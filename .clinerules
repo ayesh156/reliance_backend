@@ -1,0 +1,25 @@
+# Reliance - AI Development Strict Rules
+
+## 1. Zero Syntax Error Policy (Post-Flight Checks)
+- NEVER declare a task "Completed" without verifying that the code compiles successfully.
+- After modifying Frontend code, you MUST run `cd frontend && npx tsc --noEmit` or `npm run build` to catch syntax/type errors before responding to the user.
+- After modifying Backend code, you MUST run `cd backend && npx tsc --noEmit` or `npm run build` to verify changes.
+
+## 2. Project Architecture
+- Strictly maintain the separation of concerns: `frontend/` (React/Vite) and `backend/` (Node.js/Express).
+- Do not mix dependencies or configurations between the two environments.
+
+## 3. Database Management (Prisma)
+- Any changes to the database structure MUST strictly occur in `backend/prisma/schema.prisma`.
+- Always run `npx prisma migrate dev` and `npx prisma generate` after modifying the schema.
+- Complex database operations (like creating a product with its variants) MUST use Prisma's nested writes/transactions.
+- When storing uploaded images as Base64 strings in MySQL/MariaDB, ALWAYS use the `@db.LongText` annotation in Prisma to prevent P2000 column length errors.
+
+## 4. UI/UX & Component Standards
+- Always use the custom `ComboBox` and `ColorComboBox` components instead of native `<select>` tags globally.
+- Maintain world-class e-commerce design patterns: handle loading states, display toast notifications for API success/failures, and ensure responsive design.
+
+## 5. API Payload & Error Handling
+- Always type-cast form data (Strings to Numbers/Booleans) on the frontend before sending POST/PUT requests to match the Prisma schema perfectly.
+- Backend catch blocks MUST log the actual error using console.error and return a descriptive error message, never just generic fallback text, to make debugging 500 errors easier.
+- SKU uniqueness constraints in Prisma must be respected — ensure every variant SKU is unique by appending timestamps or incrementing indices when auto-generating.

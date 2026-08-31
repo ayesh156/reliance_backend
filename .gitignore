@@ -1,0 +1,13 @@
+node_modules
+# Keep environment variables out of version control
+.env
+dist
+
+/src/generated/prisma
+
+
+# Ignore all files inside uploads directory
+public/uploads/**/*
+
+# Always track .gitkeep files so empty folder structures are pushed to GitHub
+!public/uploads/**/.gitkeep

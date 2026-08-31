@@ -1,0 +1,286 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+// ----------------------------------------------------
+// ENUMS
+// ----------------------------------------------------
+
+enum Role {
+  ADMIN
+  STAFF
+  CASHIER
+  REP
+}
+
+enum CustomerType {
+  RETAIL
+  WHOLESALE
+}
+
+enum OrderStatus {
+  PENDING
+  PENDING_RECEIPT
+  PAYMENT_REVIEW
+  PAYMENT_VERIFIED
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  PAID
+  CANCELLED
+}
+
+enum OrderSource {
+  ECOMMERCE
+  POS_RETAIL
+  POS_WHOLESALE
+}
+
+enum ChequeStatus {
+  PENDING
+  CLEARED
+  BOUNCED
+}
+
+// ----------------------------------------------------
+// USERS & CUSTOMERS
+// ----------------------------------------------------
+
+model User {
+  id                Int        @id @default(autoincrement())
+  name              String
+  email             String?    @unique
+  phone             String?
+  password          String     @default("")
+  role              Role       @default(STAFF)
+  active            Boolean    @default(true)
+  
+  assignedCustomers Customer[] @relation("RepCustomers")
+  createdOrders     Order[]    @relation("UserOrders")
+
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  @@map("users")
+}
+
+model Customer {
+  id                 Int          @id @default(autoincrement())
+  type               CustomerType @default(RETAIL)
+  name               String
+  phone              String       @unique
+  email              String?      @unique
+  password           String?      // E-commerce login සඳහා
+  address            String?
+  city               String?
+  photoUrl           String?
+  outstandingBalance Float        @default(0)
+  creditLimit        Float        @default(0)
+  notes              String?      @db.Text
+  nic                String?
+
+  repId              Int?
+  rep                User?        @relation("RepCustomers", fields: [repId], references: [id])
+
+  orders             Order[]
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  @@index([name])
+  @@map("customers")
+}
+
+// ----------------------------------------------------
+// PRODUCTS & VARIANTS (Fast POS Indexing & Search Keys)
+// ----------------------------------------------------
+
+model Category {
+  id          Int       @id @default(autoincrement())
+  name        String    @unique
+  slug        String    @unique
+  description String?
+  image       String?   @db.LongText
+  status      String    @default("active")
+  products    Product[]
+  @@map("categories")
+}
+
+model Product {
+  id          Int              @id @default(autoincrement())
+  name        String
+  slug        String?          @unique
+  description String?          @db.Text
+  searchKey   String?          @db.VarChar(255) // ⭐ POS Search Keywords (e.g. "ts, polo, crew, shirt")
+  categoryId  Int
+  category    Category         @relation(fields: [categoryId], references: [id])
+  variants    ProductVariant[]
+  reviews     Review[]
+  images      ProductImage[]
+  isFeatured  Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([name])
+  @@index([searchKey])
+  @@map("products")
+}
+
+model ProductVariant {
+  id             Int            @id @default(autoincrement())
+  productId      Int
+  product        Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  size           String?
+  color          String?
+  sku            String         @unique          // ⭐ Barcode Scanner Scan Unit (e.g. "RL-001-M-BLK")
+  barcode        String?        @unique          // ⭐ EAN/UPC Custom Barcode (Scan Target)
+  costPrice      Float          @default(0)
+  retailPrice    Float                           // POS Retail Unit Price
+  wholesalePrice Float                           // Wholesale Rep Unit Price
+  comparePrice   Float?                          // Strikethrough Price
+  stock          Int            @default(0)
+  
+  images         ProductImage[]
+  orderItems     OrderItem[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([sku])
+  @@index([barcode])
+  @@index([productId])
+  @@map("product_variants")
+}
+
+model ProductImage {
+  id          Int             @id @default(autoincrement())
+  productId   Int
+  product     Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variantId   Int?
+  variant     ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  imageUrl    String          @db.LongText
+  order       Int             @default(0)
+  createdAt   DateTime        @default(now())
+  @@map("product_images")
+}
+
+// ----------------------------------------------------
+// REVIEWS
+// ----------------------------------------------------
+
+model Review {
+  id            Int           @id @default(autoincrement())
+  productId     Int
+  product       Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  reviewerName  String
+  reviewerPhoto String?       @db.LongText
+  description   String?       @db.Text
+  rating        Int           @default(5)
+  images        ReviewImage[]
+  createdAt     DateTime      @default(now())
+  @@map("reviews")
+}
+
+model ReviewImage {
+  id        Int      @id @default(autoincrement())
+  reviewId  Int
+  review    Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  imageUrl  String   @db.LongText
+  @@map("review_images")
+}
+
+// ----------------------------------------------------
+// ORDERS & PAYMENTS
+// ----------------------------------------------------
+
+model City {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  province    String?
+  shippingFee Float    @default(0)
+  @@map("cities")
+}
+
+model Order {
+  id                Int           @id @default(autoincrement())
+  source            OrderSource   @default(ECOMMERCE)
+
+  userId            Int?
+  user              User?         @relation("UserOrders", fields: [userId], references: [id])
+  
+  customerId        Int?
+  customer          Customer?     @relation(fields: [customerId], references: [id])
+  customerName      String?
+  customerPhone     String?
+
+  shippingAddress   String?       @db.Text
+  city              String?
+  province          String?
+  zipCode           String?
+  shippingFee       Float         @default(0)
+
+  totalAmount       Float
+  subtotal          Float         @default(0)
+  discount          Float         @default(0)
+  paidAmount        Float         @default(0)
+  dueDate           DateTime?
+  
+  status            OrderStatus   @default(PENDING)
+  paymentMethod     String?       // "COD", "CARD", "CASH", "CHEQUE", "bank-transfer"
+  paymentReceiptUrl String?
+  notes             String?       @db.Text
+  
+  items             OrderItem[]
+  payments          OrderPayment[]
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([customerPhone])
+  @@index([status])
+  @@map("orders")
+}
+
+model OrderItem {
+  id        Int            @id @default(autoincrement())
+  orderId   Int
+  order     Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variantId Int
+  variant   ProductVariant @relation(fields: [variantId], references: [id])
+  quantity  Int
+  unitPrice Float          @default(0)
+  discount  Float          @default(0)
+  price     Float
+  @@map("order_items")
+}
+
+model OrderPayment {
+  id           Int           @id @default(autoincrement())
+  orderId      Int
+  order        Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  amount       Float
+  method       String        // "CHEQUE", "CARD", "CASH"
+  reference    String?       // Cheque No / Card Transaction ID
+  chequeDate   DateTime?     // Cheque pass වෙන දිනය
+  chequeStatus ChequeStatus? @default(PENDING)
+  createdAt    DateTime      @default(now())
+  @@map("order_payments")
+}
+
+model Subscriber {
+  id            Int      @id @default(autoincrement())
+  email         String   @unique
+  subscribedAt  DateTime @default(now())
+  @@map("subscribers")
+}
+
+// ----------------------------------------------------
+// STOREFRONT SETTINGS (Key-Value Engine)
+// ----------------------------------------------------
+
+model StorefrontSetting {
+  key       String   @id
+  value     String   @db.LongText
+  updatedAt DateTime @updatedAt
+  @@map("storefront_settings")
+}
