@@ -175,17 +175,20 @@ export class ProductService {
         isFeatured: isFeatured === 'true' || isFeatured === true,
         categoryId: Number(categoryId),
         variants: {
-          create: parsedVariants.map((v) => ({
-            size: v.size?.trim() || null,
-            color: v.color?.trim() || null,
-            sku: v.sku?.trim() || `SKU-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-            barcode: v.barcode?.trim() || null,
-            costPrice: Number(v.costPrice) || 0,
-            retailPrice: Number(v.retailPrice) || 0,
-            wholesalePrice: Number(v.wholesalePrice) || 0,
-            comparePrice: v.comparePrice ? Number(v.comparePrice) : null,
-            stock: Number(v.stock) || 0,
-          })),
+          create: parsedVariants.map((v) => {
+            const cleanBarcode = v.barcode && typeof v.barcode === 'string' && v.barcode.trim() !== '' ? v.barcode.trim() : null;
+            return {
+              size: v.size?.trim() || null,
+              color: v.color?.trim() || null,
+              sku: v.sku?.trim() || `SKU-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+              barcode: cleanBarcode,
+              costPrice: Number(v.costPrice) || 0,
+              retailPrice: Number(v.retailPrice) || 0,
+              wholesalePrice: Number(v.wholesalePrice) || 0,
+              comparePrice: v.comparePrice ? Number(v.comparePrice) : null,
+              stock: Number(v.stock) || 0,
+            };
+          }),
         },
         reviews: parsedReviews.length > 0
           ? {
@@ -269,18 +272,21 @@ export class ProductService {
       if (variants !== undefined && parsedVariants.length > 0) {
         await tx.productVariant.deleteMany({ where: { productId: id } });
         await tx.productVariant.createMany({
-          data: parsedVariants.map((v) => ({
-            productId: id,
-            size: v.size?.trim() || null,
-            color: v.color?.trim() || null,
-            sku: v.sku?.trim() || `SKU-${id}-${Date.now().toString().slice(-4)}`,
-            barcode: v.barcode?.trim() || null,
-            costPrice: Number(v.costPrice) || 0,
-            retailPrice: Number(v.retailPrice) || 0,
-            wholesalePrice: Number(v.wholesalePrice) || 0,
-            comparePrice: v.comparePrice ? Number(v.comparePrice) : null,
-            stock: Number(v.stock) || 0,
-          })),
+          data: parsedVariants.map((v) => {
+            const cleanBarcode = v.barcode && typeof v.barcode === 'string' && v.barcode.trim() !== '' ? v.barcode.trim() : null;
+            return {
+              productId: id,
+              size: v.size?.trim() || null,
+              color: v.color?.trim() || null,
+              sku: v.sku?.trim() || `SKU-${id}-${Date.now().toString().slice(-4)}`,
+              barcode: cleanBarcode,
+              costPrice: Number(v.costPrice) || 0,
+              retailPrice: Number(v.retailPrice) || 0,
+              wholesalePrice: Number(v.wholesalePrice) || 0,
+              comparePrice: v.comparePrice ? Number(v.comparePrice) : null,
+              stock: Number(v.stock) || 0,
+            };
+          }),
         });
       }
 

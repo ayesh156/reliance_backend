@@ -51,10 +51,26 @@ export function errorMiddleware(
   }
 
   // Prisma known errors
-  if (isPrismaError(err) && PRISMA_ERROR_MAP[err.code]) {
-    const mapped = PRISMA_ERROR_MAP[err.code];
-    res.status(mapped.status).json({ error: mapped.message });
-    return;
+  if (isPrismaError(err)) {
+    if (err.code === 'P2002') {
+      const target = (err as any).meta?.target;
+      let fieldName = 'unique value';
+      if (typeof target === 'string') {
+        if (target.includes('barcode')) fieldName = 'Barcode';
+        else if (target.includes('sku')) fieldName = 'SKU';
+        else if (target.includes('email')) fieldName = 'Email Address';
+      } else if (Array.isArray(target)) {
+        fieldName = target.join(', ');
+      }
+      res.status(409).json({ error: `A record with this ${fieldName} already exists in the system.` });
+      return;
+    }
+
+    if (PRISMA_ERROR_MAP[err.code]) {
+      const mapped = PRISMA_ERROR_MAP[err.code];
+      res.status(mapped.status).json({ error: mapped.message });
+      return;
+    }
   }
 
   // CORS errors (from cors middleware)
