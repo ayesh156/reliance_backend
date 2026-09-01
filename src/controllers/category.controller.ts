@@ -1,18 +1,25 @@
-import { Request, Response } from 'express';
-import categoryService from '../services/category.service';
-import { sendError } from '../utils/response';
+import { Request, Response, NextFunction } from 'express';
+import { categoryService } from '../services/category.service';
+import { sendCreated, sendSuccess } from '../utils/response';
 
 export class CategoryController {
-  /** GET /api/categories — Fetch all categories */
-  async getAll(_req: Request, res: Response): Promise<void> {
+  async getAll(req: Request, res: Response, next: NextFunction) {
     try {
       const categories = await categoryService.getAllCategories();
-      res.json(categories);
-    } catch (error) {
-      console.error('Error fetching categories:', error);
-      sendError(res, 'Failed to fetch categories', 500);
+      sendSuccess(res, categories);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async create(req: Request, res: Response, next: NextFunction) {
+    try {
+      const category = await categoryService.createCategory(req.body);
+      sendCreated(res, category);
+    } catch (err) {
+      next(err);
     }
   }
 }
 
-export default new CategoryController();
+export const categoryController = new CategoryController();

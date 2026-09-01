@@ -1,15 +1,51 @@
 import { prisma } from '../lib/prisma';
+import { HttpException } from '../middleware/error.middleware';
 
 export class CategoryService {
-  /**
-   * Fetch all categories with product counts.
-   */
   async getAllCategories() {
     return prisma.category.findMany({
-      include: { _count: { select: { products: true } } },
       orderBy: { id: 'asc' },
+      include: {
+        _count: {
+          select: { products: true }
+        }
+      }
+    });
+  }
+
+  async createCategory(data: { name: string; description?: string; image?: string; status?: string }) {
+    const cleanName = data.name.trim();
+    if (!cleanName) {
+      throw new HttpException(400, 'Category name is required');
+    }
+
+    // Generate SEO friendly unique slug
+    const slug = cleanName
+      .toLowerCase()
+      .replace(/[^\w\s-]/g, '')
+      .replace(/[\s_-]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+
+    const existing = await prisma.category.findFirst({
+      where: {
+        OR: [{ name: cleanName }, { slug }]
+      }
+    });
+
+    if (existing) {
+      throw new HttpException(409, 'A category with this name or slug already exists');
+    }
+
+    return prisma.category.create({
+      data: {
+        name: cleanName,
+        slug,
+        description: data.description?.trim() || null,
+        image: data.image || null,
+        status: data.status || 'active',
+      }
     });
   }
 }
 
-export default new CategoryService();
+export const categoryService = new CategoryService();
