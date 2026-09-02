@@ -108,6 +108,24 @@ model Category {
   @@map("categories")
 }
 
+model Size {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@map("sizes")
+}
+
+model Color {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  hexCode   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@map("colors")
+}
+
 model Product {
   id          Int              @id @default(autoincrement())
   name        String
