@@ -1,16 +1,19 @@
 import { Router } from 'express';
 import authRoutes from './auth.routes';
-import categoryRoutes from './category.routes';
 import productRoutes from './product.routes';
 import settingsRoutes from './settings.routes';
 import attributeRoutes from './attribute.routes';
+import customerRoutes from './customer.routes';
+import orderRoutes from './order.routes';
 
 const router = Router();
 
+// Modular Route Aggregation
 router.use('/auth', authRoutes);
-router.use('/categories', categoryRoutes);
 router.use('/products', productRoutes);
 router.use('/settings', settingsRoutes);
 router.use('/attributes', attributeRoutes);
+router.use('/customers', customerRoutes);
+router.use('/orders', orderRoutes); // ⭐ POS Order billing endpoints
 
 export default router;

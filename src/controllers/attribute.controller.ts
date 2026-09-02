@@ -2,6 +2,39 @@ import { Request, Response, NextFunction } from 'express';
 import { attributeService } from '../services/attribute.service';
 import { sendSuccess, sendCreated } from '../utils/response';
 
+/**
+ * Handle listing all categories
+ */
+export const getCategories = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const categories = await attributeService.getCategories();
+    sendSuccess(res, categories);
+  } catch (err) { next(err); }
+};
+
+/**
+ * Handle creating a category
+ */
+export const createCategory = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const category = await attributeService.createCategory(req.body);
+    sendCreated(res, category);
+  } catch (err) { next(err); }
+};
+
+/**
+ * Handle category deletion with dependency validation
+ */
+export const deleteCategory = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await attributeService.deleteCategory(Number(req.params.id));
+    sendSuccess(res, { success: true, message: 'Category deleted' });
+  } catch (err) { next(err); }
+};
+
+/**
+ * Handle listing all sizes
+ */
 export const getSizes = async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const sizes = await attributeService.getSizes();
