@@ -302,3 +302,101 @@ model StorefrontSetting {
   updatedAt DateTime @updatedAt
   @@map("storefront_settings")
 }
+
+// ----------------------------------------------------
+// RAW MATERIALS & MANUFACTURING ENGINE
+// ----------------------------------------------------
+
+enum RawMaterialUnit {
+  METERS
+  YARDS
+  KILOGRAMS
+  PCS
+  ROLLS
+  CONES
+  PACKS
+}
+
+enum PurchasePaymentStatus {
+  PAID
+  PARTIAL
+  DUE
+}
+
+model RawMaterialShop {
+  id             Int                  @id @default(autoincrement())
+  name           String
+  phone          String?              @db.Text
+  address        String?              @db.Text
+  contactPerson  String?
+  creditBalance  Float                @default(0) // කඩයට ගෙවීමට ඇති හිඟ මුදල
+  
+  purchases      BuyRawMaterial[]
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  @@index([name])
+  @@map("raw_material_shops")
+}
+
+model RawMaterialItem {
+  id              Int                  @id @default(autoincrement())
+  name            String
+  code            String?              @unique // Item Code (e.g. RM-DNM-001)
+  description     String?              @db.Text
+  unit            RawMaterialUnit      @default(METERS)
+  currentStock    Float                @default(0) // වත්මන් තොග ශේෂය
+  alertThreshold  Float                @default(10) // අඩු වූ විට Alert දෙන අවම සීමාව
+  unitCostAverage Float                @default(0) // සාමාන්‍ය මිලදී ගැනීමේ මිල (Weighted Average Cost)
+
+  purchaseItems   BuyRawMaterialItem[]
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  @@index([name])
+  @@map("raw_material_items")
+}
+
+model BuyRawMaterial {
+  id                  Int                  @id @default(autoincrement())
+  invoiceNumber       String?              // කඩෙන් ලැබෙන බිල්පත් අංකය (Supplier Invoice No)
+  rawMaterialShopId   Int                  @map("raw_material_shop_id")
+  shop                RawMaterialShop      @relation(fields: [rawMaterialShopId], references: [id], onDelete: Cascade)
+  
+  totalAmount         Float                @map("price") // Total bill amount
+  paidAmount          Float                @default(0)   // ගෙවූ මුදල
+  paymentMethod       String?              @default("CASH") // CASH, CREDIT, CHEQUE, BANK_TRANSFER
+  paymentStatus       PurchasePaymentStatus @default(PAID)
+  
+  purchaseDate        DateTime             @map("purchase_date")
+  notes               String?              @db.Text
+  
+  items               BuyRawMaterialItem[]
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  @@index([rawMaterialShopId])
+  @@index([purchaseDate])
+  @@map("buy_raw_materials")
+}
+
+model BuyRawMaterialItem {
+  id                Int             @id @default(autoincrement())
+  buyRawMaterialId  Int             @map("buy_raw_material_id")
+  buyRawMaterial    BuyRawMaterial  @relation(fields: [buyRawMaterialId], references: [id], onDelete: Cascade)
+  
+  rawMaterialItemId Int             @map("raw_material_item_id")
+  rawMaterialItem   RawMaterialItem @relation(fields: [rawMaterialItemId], references: [id], onDelete: Cascade)
+  
+  quantity          Float           // ප්‍රමාණය (Meters, Kg, etc.)
+  pricePerUnit      Float           @map("price_per_unit")
+  rowTotal          Float           @map("row_total") // quantity * pricePerUnit
+  
+  batchNumber       String?         // Roll No හෝ Lot No
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([buyRawMaterialId])
+  @@index([rawMaterialItemId])
+  @@map("buy_raw_material_items")
+}
