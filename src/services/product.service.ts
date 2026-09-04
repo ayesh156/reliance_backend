@@ -5,7 +5,11 @@ import { HttpException } from '../middleware/error.middleware';
 
 const productInclude = {
   category: true,
-  variants: true,
+  variants: {
+    include: {
+      images: { select: { id: true, imageUrl: true }, take: 1 },
+    },
+  },
   reviews: {
     include: {
       images: true,
@@ -18,6 +22,9 @@ const productInclude = {
   },
 } as const;
 
+/**
+ * Express Payload Inputs for Variant and Review Processing
+ */
 interface VariantInput {
   id?: number;
   size?: string;
@@ -29,6 +36,10 @@ interface VariantInput {
   wholesalePrice: number;
   comparePrice?: number;
   stock?: number;
+  imageUrl?: string;
+  imageUrls?: string[];
+  imageIndex?: number | null;
+  imageIndexes?: number[];
 }
 
 interface ReviewInput {
@@ -166,7 +177,10 @@ export class ProductService {
     const slug = `${baseSlug}-${Date.now().toString().slice(-4)}`;
     const incomingImages = collectImages(req);
 
-    return prisma.product.create({
+    /**
+     * Create product record and associate uploaded gallery images to corresponding variants
+     */
+    const createdProduct = await prisma.product.create({
       data: {
         name: name.trim(),
         slug,
@@ -211,6 +225,55 @@ export class ProductService {
       },
       include: productInclude,
     });
+
+    /**
+     * Accurately link newly uploaded product images to specific variant entities via index or URL
+     */
+    /**
+     * Accurately link uploaded product images to specific variant entities
+     * Supports multiple images per variant via indexes and URLs
+     */
+    const savedImages = await prisma.productImage.findMany({
+      where: { productId: createdProduct.id },
+      orderBy: { order: 'asc' },
+    });
+
+    for (let i = 0; i < parsedVariants.length; i++) {
+      const v = parsedVariants[i];
+      const createdVariant = createdProduct.variants[i];
+      if (!createdVariant) continue;
+
+      const targetImageIds = new Set<number>();
+
+      // 1. Check array of imageIndexes
+      if (Array.isArray(v.imageIndexes)) {
+        v.imageIndexes.forEach(idx => {
+          if (savedImages[idx]) targetImageIds.add(savedImages[idx].id);
+        });
+      }
+
+      // 2. Check legacy single imageIndex
+      if (v.imageIndex !== undefined && v.imageIndex !== null && savedImages[v.imageIndex]) {
+        targetImageIds.add(savedImages[v.imageIndex].id);
+      }
+
+      // 3. Check array of imageUrls or single imageUrl
+      const urlsToCheck = Array.isArray(v.imageUrls) ? v.imageUrls : v.imageUrl ? [v.imageUrl] : [];
+      urlsToCheck.forEach(url => {
+        const found = savedImages.find(img => img.imageUrl === url);
+        if (found) targetImageIds.add(found.id);
+      });
+
+      // Update all matched images to belong to this variant
+      if (targetImageIds.size > 0) {
+        await prisma.productImage.updateMany({
+          where: { id: { in: Array.from(targetImageIds) } },
+          data: { variantId: createdVariant.id },
+        });
+      }
+    }
+
+    return createdProduct;
   }
 
   /**
@@ -268,26 +331,102 @@ export class ProductService {
         }
       }
 
-      // 2. Rebuild Variants if provided
+      // 2. Safe Variant Synchronizer (Preserves Order History & Prevents Constraint Violations)
       if (variants !== undefined && parsedVariants.length > 0) {
-        await tx.productVariant.deleteMany({ where: { productId: id } });
-        await tx.productVariant.createMany({
-          data: parsedVariants.map((v) => {
-            const cleanBarcode = v.barcode && typeof v.barcode === 'string' && v.barcode.trim() !== '' ? v.barcode.trim() : null;
-            return {
-              productId: id,
-              size: v.size?.trim() || null,
-              color: v.color?.trim() || null,
-              sku: v.sku?.trim() || `SKU-${id}-${Date.now().toString().slice(-4)}`,
-              barcode: cleanBarcode,
-              costPrice: Number(v.costPrice) || 0,
-              retailPrice: Number(v.retailPrice) || 0,
-              wholesalePrice: Number(v.wholesalePrice) || 0,
-              comparePrice: v.comparePrice ? Number(v.comparePrice) : null,
-              stock: Number(v.stock) || 0,
-            };
-          }),
+        const retainedIds = new Set<number>();
+
+        // Query active images for this product inside transaction after image step
+        const currentImages = await tx.productImage.findMany({
+          where: { productId: id },
+          orderBy: { order: 'asc' },
         });
+
+        // Reset stale variant mappings to allow fresh assignment
+        await tx.productImage.updateMany({
+          where: { productId: id },
+          data: { variantId: null },
+        });
+
+        for (const v of parsedVariants) {
+          const cleanBarcode =
+            v.barcode && typeof v.barcode === 'string' && v.barcode.trim() !== '' ? v.barcode.trim() : null;
+
+          const variantData = {
+            size: v.size?.trim() || null,
+            color: v.color?.trim() || null,
+            sku: v.sku?.trim() || `SKU-${id}-${Date.now().toString().slice(-4)}`,
+            barcode: cleanBarcode,
+            costPrice: Number(v.costPrice) || 0,
+            retailPrice: Number(v.retailPrice) || 0,
+            wholesalePrice: Number(v.wholesalePrice) || 0,
+            comparePrice: v.comparePrice ? Number(v.comparePrice) : null,
+            stock: Number(v.stock) || 0,
+          };
+
+          let resolvedVariantId: number;
+          if (v.id && !isNaN(Number(v.id))) {
+            // Update existing variant (preserves sales history)
+            const updated = await tx.productVariant.update({
+              where: { id: Number(v.id) },
+              data: variantData,
+            });
+            resolvedVariantId = updated.id;
+          } else {
+            // Insert newly appended variant row
+            const created = await tx.productVariant.create({
+              data: {
+                ...variantData,
+                productId: id,
+              },
+            });
+            resolvedVariantId = created.id;
+          }
+
+          retainedIds.add(resolvedVariantId);
+
+          // Map all matched catalog images to this variant via index or URL match
+          const matchedImageIds = new Set<number>();
+
+          if (Array.isArray(v.imageIndexes)) {
+            v.imageIndexes.forEach(idx => {
+              if (currentImages[idx]) matchedImageIds.add(currentImages[idx].id);
+            });
+          }
+          if (v.imageIndex !== undefined && v.imageIndex !== null && currentImages[v.imageIndex]) {
+            matchedImageIds.add(currentImages[v.imageIndex].id);
+          }
+
+          const urlsToCheck = Array.isArray(v.imageUrls) ? v.imageUrls : v.imageUrl ? [v.imageUrl] : [];
+          urlsToCheck.forEach(url => {
+            const found = currentImages.find(img => img.imageUrl === url);
+            if (found) matchedImageIds.add(found.id);
+          });
+
+          if (matchedImageIds.size > 0) {
+            await tx.productImage.updateMany({
+              where: { id: { in: Array.from(matchedImageIds) } },
+              data: { variantId: resolvedVariantId },
+            });
+          }
+        }
+
+        // Safely prune removed variants ONLY if they have never been sold in POS orders
+        const variantsToDelete = existing.variants.filter(ev => !retainedIds.has(ev.id));
+        for (const vt of variantsToDelete) {
+          const soldCount = await tx.orderItem.count({
+            where: { variantId: vt.id },
+          });
+
+          if (soldCount === 0) {
+            await tx.productVariant.delete({ where: { id: vt.id } });
+          } else {
+            // If historical orders exist, keep the record intact and set stock to 0 to prevent orphaned order items
+            await tx.productVariant.update({
+              where: { id: vt.id },
+              data: { stock: 0 },
+            });
+          }
+        }
       }
 
       // 3. Rebuild Reviews if provided

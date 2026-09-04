@@ -127,16 +127,20 @@ export class OrderService {
   /**
    * Retrieve active catalog variants formatted for POS searching and scanning
    */
+  /**
+   * Retrieve active catalog variants with complete image assets for color matching
+   */
   async getPosCatalog() {
     return prisma.productVariant.findMany({
       include: {
+        images: { select: { imageUrl: true }, take: 1 },
         product: {
           select: {
             id: true,
             name: true,
             searchKey: true,
             category: { select: { name: true } },
-            images: { take: 1, orderBy: { order: 'asc' }, select: { imageUrl: true } },
+            images: { orderBy: { order: 'asc' }, select: { id: true, imageUrl: true } },
           },
         },
       },
