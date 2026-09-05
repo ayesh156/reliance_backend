@@ -5,6 +5,7 @@ import settingsRoutes from './settings.routes';
 import attributeRoutes from './attribute.routes';
 import customerRoutes from './customer.routes';
 import orderRoutes from './order.routes';
+import rawMaterialShopRoutes from './rawMaterialShop.routes';
 
 const router = Router();
 
@@ -14,6 +15,7 @@ router.use('/products', productRoutes);
 router.use('/settings', settingsRoutes);
 router.use('/attributes', attributeRoutes);
 router.use('/customers', customerRoutes);
-router.use('/orders', orderRoutes); // ⭐ POS Order billing endpoints
+router.use('/orders', orderRoutes);
+router.use('/raw-material-shops', rawMaterialShopRoutes);
 
 export default router;
