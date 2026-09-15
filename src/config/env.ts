@@ -3,18 +3,15 @@ import path from 'path';
 import fs from 'fs';
 
 // ===================================
-// ROBUST ENVIRONMENT LOADING
+// ROBUST ENVIRONMENT LOADING (100% CWD & VPS Safe)
+// Works cleanly in both CommonJS (tsc) and ESM/tsx runtime
+// without triggering import.meta or __dirname compilation errors.
 // ===================================
-// Try multiple .env paths to handle tsx (dev), production builds, and
-// Contabo VPS / CyberPanel deployment scenarios where CWD may differ
-// from the project root. This runs at module load time — BEFORE the
-// `env` object below is constructed — so values are always resolved
-// from the correct .env file regardless of execution scope.
+const rootDir = process.cwd();
 const envPaths = [
-  path.join(process.cwd(), '.env'),
-  path.join(process.cwd(), 'backend', '.env'),
-  path.resolve(__dirname, '../.env'),
-  path.resolve(__dirname, '../../.env'),
+  path.join(rootDir, '.env'),
+  path.join(rootDir, 'backend', '.env'),
+  path.resolve(rootDir, '..', '.env'),
 ];
 
 let loadedEnvPath: string | null = null;

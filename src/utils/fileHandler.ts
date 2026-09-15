@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 
-const PUBLIC_DIR = path.resolve(__dirname, '../../public');
+// 🌟 CWD-Safe Public directory resolver (Works across ESM, CommonJS, and VPS)
+const PUBLIC_DIR = path.resolve(process.cwd(), 'public');
 
 /**
  * Deletes a local file from the server given a relative path starting with /uploads/.

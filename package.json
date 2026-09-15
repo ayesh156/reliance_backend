@@ -5,6 +5,8 @@
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
+    "type-check": "tsc --noEmit",
+    "monitor": "tsx src/monitor.ts",
     "dev": "tsx watch src/index.ts",
     "build": "npx prisma generate && tsc",
     "start:prod": "node dist/src/index.js",

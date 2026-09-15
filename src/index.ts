@@ -13,7 +13,7 @@ import { MAX_JSON_BODY_SIZE } from './config/constants';
 import apiRouter from './routes';
 import { initIO } from './lib/socket';
 import errorMiddleware from './middleware/error.middleware';
-import { connectDB } from './lib/prisma'; // ⭐ Import DB Connection Pool Verifier
+import { connectDB } from './lib/prisma';
 
 // 🛡️ ==========================================================
 // ZERO-CRASH PROCESS SHIELD (Senari Production Standard)
@@ -223,7 +223,7 @@ app.use((_req, res, next) => {
 // ===================================
 // 10. STATIC FILE SERVING (UPLOADS)
 // ===================================
-const uploadsDir = path.join(__dirname, '../public/uploads');
+const uploadsDir = path.join(process.cwd(), 'public/uploads');
 
 app.use('/uploads', express.static(uploadsDir));
 app.use('/api/uploads', express.static(uploadsDir));
