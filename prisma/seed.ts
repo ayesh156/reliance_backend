@@ -10,10 +10,11 @@ async function main() {
   console.log('Seeding minimal data...');
 
   const defaultPassword = await bcrypt.hash('Admin@123', 12);
+  const ravindraPassword = await bcrypt.hash('12345678', 12); // ⭐ Hashed password for Ravindra
   const repPassword = await bcrypt.hash('Rep@123', 12);
   const cashierPassword = await bcrypt.hash('Cashier@123', 12);
 
-  // 1. Admin User
+  // 1. Admin User (Ayesh)
   await prisma.user.upsert({
     where: { email: 'ayesh@gmail.com' },
     update: {},
@@ -21,6 +22,18 @@ async function main() {
       name: 'Ayesh Chathuranga',
       email: 'ayesh@gmail.com',
       password: defaultPassword,
+      role: Role.ADMIN,
+    },
+  });
+
+  // 1.1 Admin User (Ravindra)
+  await prisma.user.upsert({
+    where: { email: 'ravindra@gmail.com' },
+    update: {},
+    create: {
+      name: 'Ravindra',
+      email: 'ravindra@gmail.com',
+      password: ravindraPassword,
       role: Role.ADMIN,
     },
   });
