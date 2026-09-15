@@ -1,7 +1,7 @@
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env';
-import { AuthPayload } from '../types/common.types';
+import type { AuthPayload } from '../types/common.types';
 
 /**
  * Verify JWT token from the Authorization header (Bearer <token>).

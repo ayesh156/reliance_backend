@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+import type { Request, Response } from 'express';
 import productService from '../services/product.service';
 import { sendErrorFrom, sendNoContent } from '../utils/response';
 

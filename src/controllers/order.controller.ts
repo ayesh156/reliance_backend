@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import { orderService } from '../services/order.service';
 import { sendCreated, sendSuccess } from '../utils/response';
 

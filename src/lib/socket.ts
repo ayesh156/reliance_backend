@@ -14,7 +14,7 @@
  *   getIO().emit('someEvent', payload);
  */
 
-import { Server, ServerOptions } from 'socket.io';
+import { Server, type ServerOptions } from 'socket.io';
 import type { Server as HttpServer } from 'http';
 
 let ioInstance: Server | null = null;

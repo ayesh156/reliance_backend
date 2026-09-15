@@ -2,7 +2,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../lib/prisma';
 import { env } from '../config/env';
-import { ROLES, UserRole } from '../config/constants';
+import { ROLES, type UserRole } from '../config/constants';
 import { HttpException } from '../middleware/error.middleware';
 
 /** Minimal user selection used for auth responses. */

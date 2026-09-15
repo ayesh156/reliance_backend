@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+import type { Request, Response } from 'express';
 import authService from '../services/auth.service';
 import { sendErrorFrom } from '../utils/response';
 

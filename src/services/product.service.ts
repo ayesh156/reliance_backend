@@ -1,4 +1,4 @@
-import { Request } from 'express';
+import type { Request } from 'express';
 import { prisma } from '../lib/prisma';
 import { deleteLocalFile } from '../utils/fileHandler';
 import { HttpException } from '../middleware/error.middleware';
