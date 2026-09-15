@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Reliance — Retail & Wholesale POS + E-Commerce backend API",
   "type": "module",
-"main": "src/index.ts",
+  "main": "src/index.ts",
   "scripts": {
     "type-check": "tsc --noEmit",
     "monitor": "tsx src/monitor.ts",
@@ -35,8 +35,7 @@
     "jsonwebtoken": "^9.0.3",
     "mariadb": "^3.5.2",
     "multer": "^2.1.1",
-    "pdfkit": "^0.19.1",
-    "socket.io": "^4.8.3"
+    "pdfkit": "^0.19.1"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

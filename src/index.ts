@@ -6,12 +6,10 @@ import crypto from 'crypto';
 import helmet from 'helmet';
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
-import { createServer } from 'http';
 import { parseAllowedOrigins } from './config/cors';
 import { env } from './config/env';
 import { MAX_JSON_BODY_SIZE } from './config/constants';
 import apiRouter from './routes';
-import { initIO } from './lib/socket';
 import errorMiddleware from './middleware/error.middleware';
 import { connectDB } from './lib/prisma';
 import { renderStatusPage } from './utils/statusPage';
@@ -39,11 +37,6 @@ process.on('unhandledRejection', (reason: any) => {
 });
 
 const app = express();
-const httpServer = createServer(app);
-
-// 🛡️ OpenLiteSpeed / lsnode socket timeout configurations
-httpServer.keepAliveTimeout = 65000;
-httpServer.headersTimeout = 66000;
 
 // NOTE: Robust multi-path .env loading (process.cwd(), backend/, __dirname)
 // is handled inside `./config/env` at module load time — before this file's
@@ -125,7 +118,6 @@ app.use(
               "'self'",
               `http://localhost:${env.port}`,
               ...allowedOrigins,
-              ...allowedOrigins.map((o) => o.replace(/^http/, 'ws')),
             ],
           },
         }
@@ -285,26 +277,31 @@ app.use('/api', apiRouter);
 app.use(errorMiddleware);
 
 // ===================================
-// 15. HTTP SERVER + SOCKET.IO INITIALIZATION
+// 15. SERVER INITIALIZATION & LIFECYCLE
 // ===================================
-export const io = initIO(httpServer, {
-  cors: {
-    origin: configuredAllowedOrigins, // ⭐ Uses enhanced origin pool including reliance domains
-    credentials: true,
-  },
-});
 
-// Verified server startup: Tests database connection pool before opening port
+/**
+ * Verified server startup: Tests database connection pool before opening port.
+ * Seamlessly binds to OpenLiteSpeed AppServer (lsnode) dynamic port/pipe or fallback port.
+ */
 async function startServer(): Promise<void> {
   try {
     await connectDB();
-    httpServer.listen(env.port, () => {
-      console.log(`🚀 Reliance API running on http://localhost:${env.port}`);
-      console.log(`📊 Environment: ${env.nodeEnv}`);
-      console.log(`📡 API available at http://localhost:${env.port}/api`);
-      console.log(`📡 Status page at http://localhost:${env.port}/api/test`);
-      console.log(`❤️  Health check at http://localhost:${env.port}/api/health`);
+
+    // Prioritize OpenLiteSpeed/environment injected PORT (pipe or numeric), fallback to env.port
+    const PORT = process.env.PORT || env.port || 3010;
+
+    const server = app.listen(PORT, () => {
+      console.log(`🚀 Reliance API running on port ${PORT}`);
+      console.log(`🌐 Environment: ${env.nodeEnv}`);
+      console.log(`📡 API available at http://localhost:${PORT}/api`);
+      console.log(`📊 Status page at http://localhost:${PORT}/api/test`);
+      console.log(`🩺 Health check at http://localhost:${PORT}/api/health`);
     });
+
+    // 🛡️ OpenLiteSpeed / lsnode socket timeout configurations
+    server.keepAliveTimeout = 65000;
+    server.headersTimeout = 66000;
   } catch (error) {
     console.error('❌ Failed to start Reliance API due to database connection failure:', error);
     process.exit(1);
