@@ -60,7 +60,8 @@ export class InvoicePdfService {
     const logoPath = potentialPaths.find((p) => fs.existsSync(p));
 
     let brandTextX = startX;
-    if (logoPath) {
+    // Safely verify file existence and image header before passing to PDFKit
+    if (logoPath && fs.existsSync(logoPath) && fs.statSync(logoPath).size > 0) {
       try {
         // Logo width 82px -> 61.5pt exactly matching frontend aspect
         doc.image(logoPath, startX, headerTop - 3, { width: 62, height: 62 });
@@ -132,10 +133,15 @@ export class InvoicePdfService {
     let curY = tableTop + 24;
 
     (order.items || []).forEach((item: any, idx: number) => {
-      const styleNo = item.variant?.sku || item.variant?.styleNo || `STY-${String(idx + 1).padStart(3, '0')}`;
-      const name = item.variant?.product?.name || 'Garment Item';
-      const meta = item.variant?.size || item.variant?.color
-        ? `Size: ${item.variant?.size || 'FREE'} | Color: ${item.variant?.color || 'Default'}`
+      // Safe fallback guards avoiding nested property crashes when variant/product relations are missing
+      const variantObj = item.variant || {};
+      const productObj = variantObj.product || {};
+      const styleNo = variantObj.sku || variantObj.styleNo || item.sku || `STY-${String(idx + 1).padStart(3, '0')}`;
+      const name = productObj.name || item.productName || item.name || 'Garment Item';
+      const sizeStr = variantObj.size || item.size || '';
+      const colorStr = variantObj.color || item.color || '';
+      const meta = sizeStr || colorStr
+        ? `Size: ${sizeStr || 'FREE'} | Color: ${colorStr || 'Default'}`
         : '';
 
       doc.fontSize(8.6).font('Helvetica-Bold').fillColor('#444444').text(String(idx + 1), colX.num, curY, { width: colWidths.num, align: 'center', lineBreak: false });

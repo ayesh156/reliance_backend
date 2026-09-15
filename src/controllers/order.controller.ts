@@ -88,15 +88,31 @@ export const deleteInvoiceOrder = async (req: Request, res: Response, next: Next
 };
 
 /**
- * Stream generated Invoice PDF directly to browser download
+ * Stream generated Invoice PDF directly to browser preview/download with safe stream guards
  */
 export const downloadInvoicePdf = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const orderId = Number(req.params.id);
+
+    if (isNaN(orderId) || orderId <= 0) {
+      return res.status(400).json({ error: 'Invalid order invoice ID provided' });
+    }
+
     const doc = await orderService.generateInvoicePdf(orderId);
 
+    if (!doc) {
+      return res.status(404).json({ error: `Invoice order #${orderId} not found` });
+    }
+
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="Invoice-INV${orderId}.pdf"`);
+    res.setHeader('Content-Disposition', `inline; filename="Invoice-INV${orderId}.pdf"`);
+
+    // Handle asynchronous streaming errors gracefully
+    doc.on('error', (streamErr) => {
+      if (!res.headersSent) {
+        next(streamErr);
+      }
+    });
 
     doc.pipe(res);
     doc.end();
@@ -104,7 +120,6 @@ export const downloadInvoicePdf = async (req: Request, res: Response, next: Next
     next(err);
   }
 };
-
 
 /**
  * Handle debt settlement and invoice reconciliation
