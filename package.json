@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Reliance — Retail & Wholesale POS + E-Commerce backend API",
   "type": "module",
-  "main": "src/index.ts",
+"main": "src/index.ts",
   "scripts": {
     "type-check": "tsc --noEmit",
     "monitor": "tsx src/monitor.ts",
