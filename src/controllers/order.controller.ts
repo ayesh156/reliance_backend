@@ -88,7 +88,7 @@ export const deleteInvoiceOrder = async (req: Request, res: Response, next: Next
 };
 
 /**
- * Stream generated Invoice PDF directly to browser preview/download with safe stream guards
+ * Stream generated Invoice PDF directly to browser preview/download with safe stream guards and explicit stderr logging
  */
 export const downloadInvoicePdf = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -107,17 +107,21 @@ export const downloadInvoicePdf = async (req: Request, res: Response, next: Next
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="Invoice-INV${orderId}.pdf"`);
 
-    // Handle asynchronous streaming errors gracefully
+    // Handle asynchronous streaming errors gracefully with direct logging
     doc.on('error', (streamErr) => {
+      console.error('[PDF STREAM RUNTIME ERROR]:', streamErr);
       if (!res.headersSent) {
-        next(streamErr);
+        res.status(500).json({ error: 'PDF stream rendering failed' });
       }
     });
 
     doc.pipe(res);
     doc.end();
-  } catch (err) {
-    next(err);
+  } catch (err: any) {
+    // Explicitly write exact stack trace to server console/stderr
+    console.error('[PDF GENERATION ERROR]:', err?.message || err);
+    if (err?.stack) console.error(err.stack);
+    res.status(500).json({ error: err?.message || 'Failed to generate PDF' });
   }
 };
 
