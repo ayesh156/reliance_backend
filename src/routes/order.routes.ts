@@ -16,8 +16,9 @@ router.post('/customers/:customerId/settle-debt', verifyToken, requireRole('ADMI
 
 // Invoices CRUD Management Routes (Explicit Route Ordering)
 router.get('/invoices', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), orderController.getInvoices);
-// Support both /api/invoices/:id/pdf (via alias) and direct /:id/pdf routing
-router.get('/:id/pdf', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), orderController.downloadInvoicePdf);
+// Support both /api/orders/invoices/:id/pdf and /:id/pdf routing for direct browser preview and download
+router.get('/invoices/:id/pdf', orderController.downloadInvoicePdf);
+router.get('/:id/pdf', orderController.downloadInvoicePdf);
 router.get('/invoices/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), orderController.getInvoiceById);
 
 // Support both standard PUT and POST for edit invoice submissions
