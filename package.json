@@ -2,18 +2,19 @@
   "name": "reliance-backend",
   "version": "1.0.0",
   "description": "Reliance — Retail & Wholesale POS + E-Commerce backend API",
-  "main": "index.js",
+  "type": "module",
+  "main": "src/index.ts",
   "scripts": {
-    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "build": "tsc && echo Build completed successfully!",
+    "dev": "tsx watch src/index.ts",
+    "build": "npx prisma generate && tsc",
     "start:prod": "node dist/src/index.js",
-    "start": "node dist/src/index.js",
+    "start": "node src/index.ts",
     "test": "echo \"Error: no test specified\" && exit 1",
     "seed": "npx prisma db seed",
     "postinstall": "npx prisma generate"
   },
   "prisma": {
-    "seed": "ts-node prisma/seed.ts"
+    "seed": "tsx prisma/seed.ts"
   },
   "keywords": [],
   "author": "",

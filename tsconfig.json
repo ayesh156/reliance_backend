@@ -2,9 +2,9 @@
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": ".",
-    "module": "commonjs",
+    "module": "ESNext",
     "moduleResolution": "node",
-    "target": "es2020",
+    "target": "es2022",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -17,12 +17,5 @@
     "ignoreDeprecations": "6.0"
   },
   "include": ["src/**/*", "prisma/**/*"],
-  "ts-node": {
-    "files": true,
-    "compilerOptions": {
-      "module": "commonjs",
-      "moduleResolution": "node"
-    }
-  },
   "exclude": ["node_modules", "dist"]
 }

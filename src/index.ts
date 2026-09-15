@@ -1,4 +1,5 @@
 import express from 'express';
+import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -12,9 +13,36 @@ import { MAX_JSON_BODY_SIZE } from './config/constants';
 import apiRouter from './routes';
 import { initIO } from './lib/socket';
 import errorMiddleware from './middleware/error.middleware';
+import { connectDB } from './lib/prisma'; // ⭐ Import DB Connection Pool Verifier
+
+// 🛡️ ==========================================================
+// ZERO-CRASH PROCESS SHIELD (Senari Production Standard)
+// Prevents entire server shutdown on dropped socket connections, client aborts, or broken pipes
+// ==========================================================
+process.on('uncaughtException', (err: any) => {
+  if (
+    err?.code === 'EPIPE' ||
+    err?.code === 'ECONNRESET' ||
+    err?.code === 'ERR_STREAM_WRITE_AFTER_END' ||
+    err?.code === 'ECANCELED' ||
+    err?.message?.includes('write after end')
+  ) {
+    // Gracefully ignore closed client streams / broken sockets
+    return;
+  }
+  console.error('[Process Shield] Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason: any) => {
+  console.error('[Process Shield] Unhandled Rejection:', reason);
+});
 
 const app = express();
 const httpServer = createServer(app);
+
+// 🛡️ OpenLiteSpeed / lsnode socket timeout configurations
+httpServer.keepAliveTimeout = 65000;
+httpServer.headersTimeout = 66000;
 
 // NOTE: Robust multi-path .env loading (process.cwd(), backend/, __dirname)
 // is handled inside `./config/env` at module load time — before this file's
@@ -33,6 +61,15 @@ app.set('trust proxy', 1);
 console.log(
   `🔒 Trust proxy enabled (${env.isProduction ? 'production' : 'development'})`
 );
+
+// [FIX] Origin Header Cleaning Middleware (prevents CORS failures from reverse-proxy header comma splitting)
+app.use((req, _res, next) => {
+  const origin = req.headers.origin;
+  if (origin && typeof origin === 'string' && origin.includes(',')) {
+    req.headers.origin = origin.split(',')[0].trim();
+  }
+  next();
+});
 
 // ===================================
 // 2. HEADER DE-DUPLICATION GUARD
@@ -71,33 +108,29 @@ app.use((req, _res, next) => {
 });
 
 // ===================================
-// 4. SECURITY HEADERS (HELMET)
-// CSP is env-aware: the allowed frontend origins (and their ws:// variants)
-// are injected into connectSrc so the storefront can talk to the API and
-// the Socket.IO server without tripping the browser CSP.
+// 4. SECURITY HEADERS (HELMET) - Senari Production Pattern
 // ===================================
 app.use(
   helmet({
+    contentSecurityPolicy: env.isProduction
+      ? {
+          directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'", "'unsafe-inline'"],
+            styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+            fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+            imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
+            connectSrc: [
+              "'self'",
+              `http://localhost:${env.port}`,
+              ...allowedOrigins,
+              ...allowedOrigins.map((o) => o.replace(/^http/, 'ws')),
+            ],
+          },
+        }
+      : false,
     crossOriginEmbedderPolicy: false,
-    crossOriginOpenerPolicy: false,
     crossOriginResourcePolicy: { policy: 'cross-origin' },
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        connectSrc: [
-          "'self'",
-          `http://localhost:${env.port}`,
-          ...allowedOrigins,
-          ...allowedOrigins.map((o) => o.replace(/^http/, 'ws')),
-        ],
-        fontSrc: ["'self'", 'https://fonts.gstatic.com', 'https://fonts.googleapis.com'],
-        styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-        imgSrc: ["'self'", 'data:', 'blob:', `http://localhost:${env.port}`],
-        scriptSrc: ["'self'", "'unsafe-inline'"],
-        formAction: ["'self'"],
-        frameAncestors: ["'self'", ...allowedOrigins],
-      },
-    },
     hsts: env.isProduction
       ? { maxAge: 31536000, includeSubDomains: true, preload: true }
       : false,
@@ -105,58 +138,56 @@ app.use(
 );
 
 // ===================================
-// 5. CUSTOM ZERO-DUPLICATE CORS MIDDLEWARE
-// No standard `cors()` package here — it would collide with the reverse
-// proxy's own Access-Control-Allow-Origin header. Instead we build CORS
-// manually with setHeaderClean(), which calls res.removeHeader() BEFORE
-// res.setHeader(), guaranteeing zero duplicate headers.
+// 5. BULLETPROOF CORS CONFIGURATION (Senari Official Library Standard)
+// Utilizes official cors() middleware with dynamic origin resolver and 24h preflight cache
 // ===================================
-function isOriginAllowed(origin: string | undefined): boolean {
-  if (!origin) return false;
+const configuredAllowedOrigins = [
+  'https://reliance.ecosystemlk.app',
+  'https://api.reliance.ecosystemlk.app',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  process.env.FRONTEND_URL || '',
+  ...allowedOrigins,
+].filter(Boolean);
 
-  // Localhost / Dev origins
-  if (/^https?:\/\/localhost(:\d+)?$/i.test(origin)) return true;
-  if (/^https?:\/\/127\.0\.0\.1(:\d+)?$/i.test(origin)) return true;
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow non-browser, server-to-server, or same-origin requests (no origin header)
+      if (!origin) return callback(null, true);
 
-  // Environment frontend URL(s)
-  const frontendUrl = process.env.FRONTEND_URL || '';
-  if (frontendUrl) {
-    const allowed = frontendUrl
-      .split(',')
-      .map((o) => o.trim().toLowerCase())
-      .filter(Boolean);
-    if (allowed.includes(origin.toLowerCase())) return true;
-  }
+      const cleanOrigin = origin.replace(/\/+$/, '');
+      const isAllowed =
+        configuredAllowedOrigins.some((item) => cleanOrigin === item.replace(/\/+$/, '')) ||
+        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(cleanOrigin) ||
+        /\.ecosystemlk\.app$/i.test(cleanOrigin);
 
-  // Wildcard production domain patterns
-  if (/\.ecosystemlk\.app$/i.test(origin)) return true;
+      if (isAllowed) {
+        return callback(null, cleanOrigin);
+      }
 
-  return false;
-}
-
-function setHeaderClean(res: express.Response, name: string, value: string): void {
-  res.removeHeader(name);
-  res.setHeader(name, value);
-}
-
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-
-  setHeaderClean(res, 'Vary', 'Origin');
-  setHeaderClean(res, 'Access-Control-Allow-Origin', origin && isOriginAllowed(origin) ? origin : '');
-  setHeaderClean(res, 'Access-Control-Allow-Credentials', 'true');
-  setHeaderClean(res, 'Access-Control-Expose-Headers', 'Set-Cookie, X-Request-ID');
-
-  // Preflight requests — respond cleanly with 204, no body, no route hit.
-  if (req.method === 'OPTIONS') {
-    setHeaderClean(res, 'Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-    setHeaderClean(res, 'Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Request-ID, Cache-Control, Pragma, Expires');
-    setHeaderClean(res, 'Access-Control-Max-Age', '86400');
-    return res.status(204).end();
-  }
-
-  next();
-});
+      // Safe Fallback: Echoes default domain instead of crashing with a 500 error
+      return callback(null, 'https://reliance.ecosystemlk.app');
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'Cookie',
+      'X-Requested-With',
+      'Accept',
+      'X-Request-ID',
+      'Cache-Control',
+      'Pragma',
+      'Expires',
+    ],
+    exposedHeaders: ['Set-Cookie', 'X-Request-ID'],
+    maxAge: 86400, // 24-hour preflight cache
+  })
+);
 
 // ===================================
 // 6. COMPRESSION (GZIP)
@@ -504,15 +535,29 @@ app.use(errorMiddleware);
 // ===================================
 export const io = initIO(httpServer, {
   cors: {
-    origin: allowedOrigins,
+    origin: configuredAllowedOrigins, // ⭐ Uses enhanced origin pool including reliance domains
     credentials: true,
   },
 });
 
-httpServer.listen(env.port, () => {
-  console.log(`🚀 Reliance API running on http://localhost:${env.port}`);
-  console.log(`📊 Environment: ${env.nodeEnv}`);
-  console.log(`📡 API available at http://localhost:${env.port}/api`);
-  console.log(`📡 Status page at http://localhost:${env.port}/api/test`);
-  console.log(`❤️  Health check at http://localhost:${env.port}/api/health`);
-});
+// Verified server startup: Tests database connection pool before opening port
+async function startServer(): Promise<void> {
+  try {
+    await connectDB();
+    httpServer.listen(env.port, () => {
+      console.log(`🚀 Reliance API running on http://localhost:${env.port}`);
+      console.log(`📊 Environment: ${env.nodeEnv}`);
+      console.log(`📡 API available at http://localhost:${env.port}/api`);
+      console.log(`📡 Status page at http://localhost:${env.port}/api/test`);
+      console.log(`❤️  Health check at http://localhost:${env.port}/api/health`);
+    });
+  } catch (error) {
+    console.error('❌ Failed to start Reliance API due to database connection failure:', error);
+    process.exit(1);
+  }
+}
+
+startServer();
+
+// 🌟 Required for OpenLiteSpeed appserver (lsnode) integration
+export default app;
