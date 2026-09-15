@@ -462,17 +462,19 @@ export class OrderService {
   }
 
   /**
-   * Delegates PDF rendering to dedicated InvoicePdfService ensuring Clean Architecture
+   * Delegates PDF rendering to dedicated InvoicePdfService with fully hydrated variant & customer models
    */
   async generateInvoicePdf(orderId: number) {
     const order = await prisma.order.findUnique({
-      where: { id: orderId },
+      where: { id: Number(orderId) },
       include: {
         customer: true,
         items: {
           include: {
             variant: {
-              include: { product: { select: { name: true } } },
+              include: {
+                product: true,
+              },
             },
           },
         },
@@ -481,6 +483,11 @@ export class OrderService {
 
     if (!order) {
       throw new HttpException(404, `Invoice #${orderId} not found`);
+    }
+
+    // Attach resolved customer address into shippingAddress fallback for identical receipt alignment
+    if (order.customer?.address && !order.shippingAddress) {
+      (order as any).shippingAddress = order.customer.address;
     }
 
     return InvoicePdfService.generate(order);
