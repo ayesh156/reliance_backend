@@ -147,7 +147,7 @@ const configuredAllowedOrigins = [
 
 app.use(
   cors({
-    origin: (origin, callback) => {
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean | string) => void) => {
       // Allow non-browser, server-to-server, or same-origin requests (no origin header)
       if (!origin) return callback(null, true);
 
