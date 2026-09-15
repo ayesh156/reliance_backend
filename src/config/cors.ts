@@ -38,7 +38,7 @@ export function splitOriginHeader(origin: string | string[] | undefined): string
 }
 
 /**
- * Dynamically resolve the CORS origin callback.
+ * Dynamically resolve the CORS origin callback with explicit TypeScript parameter typings.
  * - If the request has an Origin header, we check it against the allowed
  *   list (after splitting any multi-origin header that proxies inject).
  * - If there is no Origin header (same-origin / curl / server-to-server),
@@ -46,7 +46,10 @@ export function splitOriginHeader(origin: string | string[] | undefined): string
  */
 export const corsOptions: CorsOptions = {
   credentials: true,
-  origin(origin, callback) {
+  origin(
+    origin: string | undefined,
+    callback: (err: Error | null, allow?: boolean) => void
+  ) {
     const allowed = parseAllowedOrigins();
     if (!origin) {
       // No Origin header (curl, server-to-server, same-origin) — allow.
