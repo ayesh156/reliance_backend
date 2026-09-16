@@ -51,11 +51,12 @@ export class InvoicePdfService {
     // ── 1. HEADER SECTION (Calibrated to 82px Logo & Thin Editorial Title) ──
     const headerTop = 51;
 
+    // Resolve logo strictly using process.cwd() to maintain pure ESM runtime compatibility
     const potentialPaths = [
       path.resolve(process.cwd(), 'public', 'images', 'logo.jpg'),
       path.resolve(process.cwd(), 'public', 'logo.jpg'),
-      path.resolve(__dirname, '..', '..', 'public', 'images', 'logo.jpg'),
-      path.resolve(__dirname, '..', '..', 'public', 'logo.jpg'),
+      path.resolve(process.cwd(), 'dist', 'public', 'images', 'logo.jpg'),
+      path.resolve(process.cwd(), 'public_html', 'images', 'logo.jpg'),
     ];
     const logoPath = potentialPaths.find((p) => fs.existsSync(p));
 
