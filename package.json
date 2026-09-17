@@ -23,7 +23,7 @@
   "license": "ISC",
   "dependencies": {
     "@prisma/adapter-mariadb": "^7.8.0",
-    "@prisma/client": "^7.8.0",
+    "@prisma/client": "^5.22.0",
     "@types/multer": "^2.1.0",
     "bcryptjs": "^3.0.3",
     "compression": "^1.8.1",
@@ -46,7 +46,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^25.9.1",
     "@types/pdfkit": "^0.17.6",
-    "prisma": "^7.8.0",
+    "prisma": "^5.22.0",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "tsx": "^4.23.13",
