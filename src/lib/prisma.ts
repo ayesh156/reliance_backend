@@ -10,9 +10,9 @@ if (!rawUrl) {
 
 // අනාගත Load Balancing සහ Spikes වලට මුහුණ දීම සඳහා URL එක මඟින්ම Native Params සැකසීම
 const dbUrl = new URL(rawUrl);
-dbUrl.searchParams.set('connection_limit', '5'); // උපරිම connections 5යි
-dbUrl.searchParams.set('connect_timeout', '15'); // 15s handshake timeout
-dbUrl.searchParams.set('pool_timeout', '15');    // 15s pool checkout timeout
+dbUrl.searchParams.set('connection_limit', '15');
+dbUrl.searchParams.set('connect_timeout', '20');
+dbUrl.searchParams.set('pool_timeout', '30');
 
 export const prisma =
   globalForPrisma.prisma ??
