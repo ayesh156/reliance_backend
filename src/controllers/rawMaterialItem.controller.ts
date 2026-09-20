@@ -7,17 +7,16 @@ import { sendSuccess } from "../utils/response";
  */
 export class RawMaterialItemController {
   /**
-   * Fetch all raw material items with search, unit, and low-stock filters.
-   * Query params: ?search=&unit=&lowStockOnly=true
+   * Fetch all raw material items with sanitized query filters and bounds
    */
   async getAll(req: Request, res: Response, next: NextFunction) {
     try {
-      const search = req.query.search as string | undefined;
-      const unit = req.query.unit as any;
+      const rawSearch = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 100) : undefined;
+      const rawUnit = typeof req.query.unit === 'string' ? req.query.unit.trim().toUpperCase() : undefined;
       const lowStockOnly = req.query.lowStockOnly === 'true';
 
-      // Pass all filter dimensions to the service layer
-      const items = await rawMaterialItemService.getAll({ search, unit, lowStockOnly });
+      // Pass sanitized dimensions to service layer
+      const items = await rawMaterialItemService.getAll({ search: rawSearch, unit: rawUnit as any, lowStockOnly });
       return sendSuccess(res, items);
     } catch (err) {
       next(err);
@@ -25,11 +24,15 @@ export class RawMaterialItemController {
   }
 
   /**
-   * Fetch single raw material item by ID.
+   * Fetch single raw material item by validated integer ID
    */
   async getById(req: Request, res: Response, next: NextFunction) {
     try {
-      const id = Number(req.params.id);
+      const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const id = parseInt(String(rawId), 10);
+      if (!id || isNaN(id) || id <= 0) {
+        return res.status(400).json({ error: 'Valid positive integer item ID is required' });
+      }
       const item = await rawMaterialItemService.getById(id);
       return sendSuccess(res, item);
     } catch (err) {
@@ -38,10 +41,13 @@ export class RawMaterialItemController {
   }
 
   /**
-   * Create a new raw material item.
+   * Create a new raw material item with payload validation
    */
   async create(req: Request, res: Response, next: NextFunction) {
     try {
+      if (!req.body || typeof req.body !== 'object') {
+        return res.status(400).json({ error: 'Valid payload object is required' });
+      }
       const item = await rawMaterialItemService.create(req.body);
       return sendSuccess(res, item, 201);
     } catch (err) {
@@ -50,11 +56,18 @@ export class RawMaterialItemController {
   }
 
   /**
-   * Update an existing raw material item.
+   * Update an existing raw material item with strict ID validation
    */
   async update(req: Request, res: Response, next: NextFunction) {
     try {
-      const id = Number(req.params.id);
+      const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const id = parseInt(String(rawId), 10);
+      if (!id || isNaN(id) || id <= 0) {
+        return res.status(400).json({ error: 'Valid positive integer item ID is required' });
+      }
+      if (!req.body || typeof req.body !== 'object') {
+        return res.status(400).json({ error: 'Valid update payload is required' });
+      }
       const item = await rawMaterialItemService.update(id, req.body);
       return sendSuccess(res, item);
     } catch (err) {
@@ -63,11 +76,15 @@ export class RawMaterialItemController {
   }
 
   /**
-   * Delete a raw material item.
+   * Delete a raw material item with ID guard
    */
   async delete(req: Request, res: Response, next: NextFunction) {
     try {
-      const id = Number(req.params.id);
+      const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const id = parseInt(String(rawId), 10);
+      if (!id || isNaN(id) || id <= 0) {
+        return res.status(400).json({ error: 'Valid positive integer item ID is required' });
+      }
       const result = await rawMaterialItemService.delete(id);
       return sendSuccess(res, result);
     } catch (err) {

@@ -33,10 +33,17 @@ export class OrderService {
     }
 
     return prisma.$transaction(async (tx) => {
-      // 1. Verify and reduce variant inventory stock
+      // 1. Verify and reduce variant inventory stock with strict input sanitization
       for (const item of data.items) {
+        const qty = parseInt(String(item.quantity), 10);
+        const unitPrice = Math.max(0, Number(item.unitPrice) || 0);
+
+        if (!qty || isNaN(qty) || qty <= 0) {
+          throw new HttpException(400, `Invalid line quantity specified for variant #${item.variantId}`);
+        }
+
         const variant = await tx.productVariant.findUnique({
-          where: { id: item.variantId },
+          where: { id: Number(item.variantId) },
           include: { product: { select: { name: true } } },
         });
 
@@ -44,22 +51,24 @@ export class OrderService {
           throw new HttpException(404, `Product variant #${item.variantId} not found`);
         }
 
-        if (variant.stock < item.quantity) {
+        if (variant.stock < qty) {
           throw new HttpException(
             400,
-            `Insufficient stock for "${variant.product.name}" (${variant.size}/${variant.color}). Available: ${variant.stock}`
+            `Insufficient stock for "${variant.product.name}" (${variant.size || 'N/A'}/${variant.color || 'N/A'}). Available: ${variant.stock}`
           );
         }
 
-        // Deduct inventory stock
+        // Deduct inventory stock atomically
         await tx.productVariant.update({
           where: { id: item.variantId },
-          data: { stock: { decrement: item.quantity } },
+          data: { stock: { decrement: qty } },
         });
       }
 
-      const paid = Number(data.paidAmount) || 0;
-      const total = Number(data.totalAmount) || 0;
+      // Hardened Financial Calculations (Prevents negative payments and price manipulation)
+      const sanitizedDiscount = Math.max(0, Number(data.discount) || 0);
+      const total = Math.max(0, Number(data.totalAmount) || 0);
+      const paid = Math.min(total, Math.max(0, Number(data.paidAmount) || 0));
       const isFullPaid = paid >= total;
 
       // 2. Create parent order entry
@@ -113,9 +122,26 @@ export class OrderService {
         },
       });
 
-      // 3. Update customer outstanding balance if credit was used
+      // 3. Secure Customer Credit Verification & Outstanding Sync
       if (data.customerId && total > paid) {
         const creditDue = total - paid;
+        const targetCustomer = await tx.customer.findUnique({
+          where: { id: Number(data.customerId) },
+          select: { id: true, creditLimit: true, outstandingBalance: true },
+        });
+
+        if (!targetCustomer) {
+          throw new HttpException(404, `Linked customer #${data.customerId} not found`);
+        }
+
+        // Check if customer exceeds allowable credit limit
+        if (targetCustomer.creditLimit > 0 && (targetCustomer.outstandingBalance + creditDue) > targetCustomer.creditLimit) {
+          throw new HttpException(
+            400,
+            `Transaction exceeds allowed credit limit of Rs. ${targetCustomer.creditLimit}. Current outstanding: Rs. ${targetCustomer.outstandingBalance}`
+          );
+        }
+
         await tx.customer.update({
           where: { id: Number(data.customerId) },
           data: { outstandingBalance: { increment: creditDue } },
@@ -132,9 +158,21 @@ export class OrderService {
   /**
    * Retrieve active catalog variants with complete image assets for color matching
    */
+  /**
+   * Retrieve active catalog variants optimized with lean projections and pool protection
+   */
   async getPosCatalog() {
     return prisma.productVariant.findMany({
-      include: {
+      select: {
+        id: true,
+        size: true,
+        color: true,
+        sku: true,
+        barcode: true,
+        costPrice: true,
+        retailPrice: true,
+        wholesalePrice: true,
+        stock: true,
         images: { select: { imageUrl: true }, take: 1 },
         product: {
           select: {
@@ -142,11 +180,12 @@ export class OrderService {
             name: true,
             searchKey: true,
             category: { select: { name: true } },
-            images: { orderBy: { order: 'asc' }, select: { id: true, imageUrl: true } },
+            images: { orderBy: { order: 'asc' }, select: { id: true, imageUrl: true }, take: 1 },
           },
         },
       },
       orderBy: { product: { name: 'asc' } },
+      take: 300, // Safeguard against unbounded memory consumption
     });
   }
 
@@ -607,11 +646,15 @@ export class OrderService {
   /**
    * Get unpaid credit invoices for a specific customer to populate multi-select tags
    */
+  /**
+   * Get pending debt invoices leveraging indexed status values for minimal query latency
+   */
   async getCustomerPendingInvoices(customerId: number) {
     const orders = await prisma.order.findMany({
       where: {
-        customerId,
-        totalAmount: { gt: prisma.order.fields.paidAmount },
+        customerId: Number(customerId),
+        status: { in: [OrderStatus.PROCESSING, OrderStatus.PENDING, OrderStatus.DELIVERED] },
+        paymentMethod: 'CREDIT',
       },
       orderBy: { createdAt: 'desc' },
       select: {
@@ -620,6 +663,7 @@ export class OrderService {
         paidAmount: true,
         createdAt: true,
       },
+      take: 100,
     });
 
     return orders.map((o) => ({

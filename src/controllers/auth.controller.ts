@@ -3,10 +3,14 @@ import authService from '../services/auth.service';
 import { sendErrorFrom } from '../utils/response';
 
 export class AuthController {
-  /** POST /api/auth/login — Login with email/password */
+  /** POST /api/auth/login — Login with email/password and strict payload validation */
   async login(req: Request, res: Response): Promise<void> {
     try {
       const { email, password } = req.body;
+      if (!email || typeof email !== 'string' || !password || typeof password !== 'string') {
+        res.status(400).json({ error: 'Valid email and password strings are required' });
+        return;
+      }
       const result = await authService.login(email, password);
       res.json(result);
     } catch (error) {
@@ -48,11 +52,17 @@ export class AuthController {
     }
   }
 
-  /** PATCH /api/auth/users/:id — Update staff (admin only) */
+  /** PATCH /api/auth/users/:id — Update staff with param sanitization and self-lockout check */
   async updateUser(req: Request, res: Response): Promise<void> {
     try {
-      const id = Number(req.params.id);
-      const user = await authService.updateUser(id, req.body);
+      const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const id = parseInt(String(rawId), 10);
+      if (!id || isNaN(id) || id <= 0) {
+        res.status(400).json({ error: 'Valid positive integer target user ID is required' });
+        return;
+      }
+      const currentAdminId = req.user?.userId;
+      const user = await authService.updateUser(id, req.body, currentAdminId);
       res.json(user);
     } catch (error) {
       console.error('[AuthController] Update user error:', error);

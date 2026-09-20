@@ -26,6 +26,7 @@ router.get('/invoices/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'
 router.put('/invoices/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), orderController.updateInvoiceOrder);
 router.post('/invoices/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), orderController.updateInvoiceOrder);
 
-router.delete('/invoices/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), orderController.deleteInvoiceOrder);
+// Restrict destructive invoice deletion exclusively to ADMIN role to prevent financial fraud
+router.delete('/invoices/:id', verifyToken, requireRole('ADMIN'), orderController.deleteInvoiceOrder);
 
 export default router;

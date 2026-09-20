@@ -4,15 +4,15 @@ import { verifyToken, requireRole } from '../middleware/auth.middleware';
 
 const router = Router();
 
-// ── Public ──────────────────────────────────────────────────────────────────
-router.post('/login', authController.login);
+// Public authentication endpoint
+router.post('/login', authController.login.bind(authController));
 
-// ── Authenticated ───────────────────────────────────────────────────────────
-router.get('/me', verifyToken, authController.getMe);
+// Authenticated current user profile
+router.get('/me', verifyToken, authController.getMe.bind(authController));
 
-// ── Admin only ──────────────────────────────────────────────────────────────
-router.get('/users', verifyToken, requireRole('ADMIN'), authController.listUsers);
-router.post('/users', verifyToken, requireRole('ADMIN'), authController.createUser);
-router.patch('/users/:id', verifyToken, requireRole('ADMIN'), authController.updateUser);
+// Admin-only user management endpoints
+router.get('/users', verifyToken, requireRole('ADMIN'), authController.listUsers.bind(authController));
+router.post('/users', verifyToken, requireRole('ADMIN'), authController.createUser.bind(authController));
+router.patch('/users/:id', verifyToken, requireRole('ADMIN'), authController.updateUser.bind(authController));
 
 export default router;

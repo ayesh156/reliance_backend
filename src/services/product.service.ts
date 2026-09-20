@@ -118,10 +118,12 @@ export class ProductService {
       ];
     }
 
+    // Enforce hard limit to prevent memory exhaustion and database pool saturation
     return prisma.product.findMany({
       where,
       include: productInclude,
       orderBy: { createdAt: 'desc' },
+      take: 200,
     });
   }
 
@@ -189,18 +191,25 @@ export class ProductService {
         isFeatured: isFeatured === 'true' || isFeatured === true,
         categoryId: Number(categoryId),
         variants: {
+          // Sanitize variant pricing, ensure non-negative numeric constraints
           create: parsedVariants.map((v) => {
             const cleanBarcode = v.barcode && typeof v.barcode === 'string' && v.barcode.trim() !== '' ? v.barcode.trim() : null;
+            const retailPrice = Math.max(0, Number(v.retailPrice) || 0);
+            const wholesalePrice = Math.max(0, Number(v.wholesalePrice) || 0);
+            const costPrice = Math.max(0, Number(v.costPrice) || 0);
+            const comparePrice = v.comparePrice ? Math.max(0, Number(v.comparePrice)) : null;
+            const stock = Math.max(0, parseInt(String(v.stock || 0), 10) || 0);
+
             return {
-              size: v.size?.trim() || null,
-              color: v.color?.trim() || null,
-              sku: v.sku?.trim() || `SKU-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-              barcode: cleanBarcode,
-              costPrice: Number(v.costPrice) || 0,
-              retailPrice: Number(v.retailPrice) || 0,
-              wholesalePrice: Number(v.wholesalePrice) || 0,
-              comparePrice: v.comparePrice ? Number(v.comparePrice) : null,
-              stock: Number(v.stock) || 0,
+              size: v.size?.trim() ? String(v.size).trim().slice(0, 50) : null,
+              color: v.color?.trim() ? String(v.color).trim().slice(0, 50) : null,
+              sku: v.sku?.trim() ? String(v.sku).trim().slice(0, 100) : `SKU-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+              barcode: cleanBarcode ? cleanBarcode.slice(0, 100) : null,
+              costPrice,
+              retailPrice,
+              wholesalePrice,
+              comparePrice,
+              stock,
             };
           }),
         },
@@ -483,13 +492,32 @@ export class ProductService {
   }
 
   /**
-   * Delete Product & local assets
+   * Delete Product & local assets with integrity checks for order items
    */
   async deleteProduct(id: number) {
     if (isNaN(id)) throw new HttpException(400, 'Invalid product ID');
 
-    const existing = await prisma.product.findUnique({ where: { id }, include: { images: true } });
+    const existing = await prisma.product.findUnique({
+      where: { id },
+      include: {
+        images: true,
+        variants: {
+          select: { id: true },
+        },
+      },
+    });
     if (!existing) throw new HttpException(404, 'Product not found');
+
+    // Prevent foreign key crash if this product has been ordered in sales history
+    const variantIds = existing.variants.map((v) => v.id);
+    if (variantIds.length > 0) {
+      const orderCount = await prisma.orderItem.count({
+        where: { variantId: { in: variantIds } },
+      });
+      if (orderCount > 0) {
+        throw new HttpException(400, 'Cannot delete product with existing sales history. Deactivate or archive instead.');
+      }
+    }
 
     for (const img of existing.images) {
       if (img.imageUrl && !img.imageUrl.startsWith('http')) deleteLocalFile(img.imageUrl);

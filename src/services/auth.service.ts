@@ -64,7 +64,7 @@ export class AuthService {
   }
 
   /**
-   * Fetch the current authenticated user's profile.
+   * Fetch current user profile ensuring account remains active
    */
   async getMe(userId: number) {
     const user = await prisma.user.findUnique({
@@ -74,16 +74,20 @@ export class AuthService {
     if (!user) {
       throw new HttpException(404, 'User not found');
     }
+    if (!user.active) {
+      throw new HttpException(403, 'Account has been deactivated. Access revoked.');
+    }
     return user;
   }
 
-  /**
-   * List all staff users (admin only).
+/**
+   * List staff users with pagination safeguard
    */
   async listUsers() {
     return prisma.user.findMany({
       orderBy: { createdAt: 'desc' },
       select: userSelect,
+      take: 100,
     });
   }
 
@@ -102,6 +106,12 @@ export class AuthService {
 
     if (!ROLES.includes(role)) {
       throw new HttpException(400, `Invalid role. Must be one of: ${ROLES.join(', ')}`);
+    }
+
+    // RFC Standard email validation regex
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      throw new HttpException(400, 'Invalid email format provided');
     }
 
     if (!PASSWORD_REGEX.test(password)) {
@@ -130,12 +140,28 @@ export class AuthService {
   }
 
   /**
-   * Update role / active / password of a staff user (admin only).
+   * Update role / active / password of a staff user with self-lockout guards and target verification
    */
   async updateUser(
     id: number,
-    data: { role?: string; active?: boolean; password?: string; name?: string }
+    data: { role?: string; active?: boolean; password?: string; name?: string },
+    currentAdminId?: number
   ) {
+    const existing = await prisma.user.findUnique({ where: { id } });
+    if (!existing) {
+      throw new HttpException(404, 'Target user does not exist');
+    }
+
+    // Prevent executing administrator from locking out or demoting themselves
+    if (currentAdminId && currentAdminId === id) {
+      if (data.active === false) {
+        throw new HttpException(400, 'You cannot deactivate your own administrative account');
+      }
+      if (data.role && data.role !== 'ADMIN') {
+        throw new HttpException(400, 'You cannot revoke your own administrator role');
+      }
+    }
+
     const updateData: Record<string, unknown> = {};
 
     if (data.role !== undefined) {

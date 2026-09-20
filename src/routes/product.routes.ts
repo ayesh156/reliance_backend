@@ -16,7 +16,28 @@ const storage = multer.diskStorage({
     cb(null, `prod-${Date.now()}-${Math.random().toString(36).slice(2, 6)}${ext}`);
   },
 });
-const upload = multer({ storage, limits: { fileSize: MAX_IMAGE_UPLOAD_BYTES } });
+// Strict image filter blocking executable uploads (Prevent RCE and Malicious Scripts)
+const fileFilter = (
+  _req: any,
+  file: Express.Multer.File,
+  cb: multer.FileFilterCallback
+) => {
+  const allowedMimes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+  const allowedExts = ['.jpg', '.jpeg', '.png', '.webp'];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (allowedMimes.includes(file.mimetype) && allowedExts.includes(ext)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only secure image formats (.jpg, .jpeg, .png, .webp) are allowed'));
+  }
+};
+
+const upload = multer({
+  storage,
+  limits: { fileSize: MAX_IMAGE_UPLOAD_BYTES },
+  fileFilter,
+});
 
 // ── Public Routes (Storefront & POS Reads) ──
 router.get('/', productController.getAll);

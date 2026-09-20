@@ -5,28 +5,44 @@ import { isValidSriLankanPhone, isValidSriLankanNIC } from '../utils/validators'
 
 export class CustomerService {
   /**
-   * Fetch all customers with optional search keyword and customer type filtering
+   * Fetch customers with connection pool protection, explicit projection, and query limits
    */
   async getCustomers(query?: string, type?: CustomerType) {
+    const cleanQuery = query ? query.trim().slice(0, 100) : undefined;
+
     return prisma.customer.findMany({
       where: {
         ...(type ? { type } : {}),
-        ...(query
+        ...(cleanQuery
           ? {
               OR: [
-                { name: { contains: query } },
-                { phone: { contains: query } },
-                { nic: { contains: query } },
+                { name: { contains: cleanQuery } },
+                { phone: { contains: cleanQuery } },
+                { nic: { contains: cleanQuery } },
               ],
             }
           : {}),
       },
-      include: {
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        type: true,
+        email: true,
+        address: true,
+        city: true,
+        creditLimit: true,
+        notes: true,
+        nic: true,
+        repId: true,
+        createdAt: true,
+        updatedAt: true,
         rep: {
           select: { id: true, name: true },
         },
       },
       orderBy: { createdAt: 'desc' },
+      take: 200,
     });
   }
 
@@ -86,24 +102,38 @@ export class CustomerService {
 
     const existing = await prisma.customer.findUnique({
       where: { phone: cleanPhone },
+      select: { id: true },
     });
 
     if (existing) {
       throw new HttpException(400, `A customer with phone ${cleanPhone} already exists`);
     }
 
+    // Email format validation
+    let cleanEmail: string | null = null;
+    if (data.email && data.email.trim()) {
+      cleanEmail = data.email.trim().toLowerCase();
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(cleanEmail)) {
+        throw new HttpException(400, 'Invalid customer email address format');
+      }
+    }
+
+    // Negative credit limit වැළැක්වීම සහ strings sanitize කිරීම
+    const sanitizedCreditLimit = Math.max(0, Number(data.creditLimit) || 0);
+
     return prisma.customer.create({
       data: {
-        name: data.name.trim(),
+        name: data.name.trim().slice(0, 100),
         phone: cleanPhone,
         type: data.type || CustomerType.RETAIL,
-        email: data.email?.trim() || null,
-        address: data.address?.trim() || null,
-        city: data.city?.trim() || null,
-        creditLimit: Number(data.creditLimit) || 0,
-        notes: data.notes?.trim() || null,
-        nic: data.nic?.trim() || null,
-        repId: data.repId ? Number(data.repId) : null,
+        email: cleanEmail,
+        address: data.address?.trim() ? data.address.trim().slice(0, 255) : null,
+        city: data.city?.trim() ? data.city.trim().slice(0, 100) : null,
+        creditLimit: sanitizedCreditLimit,
+        notes: data.notes?.trim() ? data.notes.trim().slice(0, 500) : null,
+        nic: data.nic?.trim() ? data.nic.trim().slice(0, 20) : null,
+        repId: data.repId && !isNaN(Number(data.repId)) && Number(data.repId) > 0 ? Number(data.repId) : null,
       },
     });
   }
@@ -132,27 +162,53 @@ export class CustomerService {
     }
 
     if (data.phone && data.phone.trim() !== customer.phone) {
+      const cleanPhone = data.phone.trim();
+      if (!isValidSriLankanPhone(cleanPhone)) {
+        throw new HttpException(400, 'Invalid Sri Lankan phone number');
+      }
+
       const duplicate = await prisma.customer.findUnique({
-        where: { phone: data.phone.trim() },
+        where: { phone: cleanPhone },
+        select: { id: true },
       });
       if (duplicate) {
-        throw new HttpException(400, `Phone number ${data.phone.trim()} is already used`);
+        throw new HttpException(400, `Phone number ${cleanPhone} is already used`);
       }
     }
+
+    // Update එකේදී email validate කිරීම
+    let updatedEmail: string | null | undefined = undefined;
+    if (data.email !== undefined) {
+      if (data.email && data.email.trim()) {
+        const val = data.email.trim().toLowerCase();
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(val)) {
+          throw new HttpException(400, 'Invalid customer email address format');
+        }
+        updatedEmail = val;
+      } else {
+        updatedEmail = null;
+      }
+    }
+
+    // Credit limit එක negative වීම වැළැක්වීම
+    const updatedCreditLimit = data.creditLimit !== undefined
+      ? Math.max(0, Number(data.creditLimit) || 0)
+      : undefined;
 
     return prisma.customer.update({
       where: { id: Number(id) },
       data: {
-        ...(data.name ? { name: data.name.trim() } : {}),
+        ...(data.name ? { name: data.name.trim().slice(0, 100) } : {}),
         ...(data.phone ? { phone: data.phone.trim() } : {}),
         ...(data.type ? { type: data.type } : {}),
-        email: data.email !== undefined ? (data.email ? data.email.trim() : null) : undefined,
-        address: data.address !== undefined ? (data.address ? data.address.trim() : null) : undefined,
-        city: data.city !== undefined ? (data.city ? data.city.trim() : null) : undefined,
-        creditLimit: data.creditLimit !== undefined ? Number(data.creditLimit) : undefined,
-        notes: data.notes !== undefined ? (data.notes ? data.notes.trim() : null) : undefined,
-        nic: data.nic !== undefined ? (data.nic ? data.nic.trim() : null) : undefined,
-        repId: data.repId !== undefined ? (data.repId ? Number(data.repId) : null) : undefined,
+        email: updatedEmail,
+        address: data.address !== undefined ? (data.address ? data.address.trim().slice(0, 255) : null) : undefined,
+        city: data.city !== undefined ? (data.city ? data.city.trim().slice(0, 100) : null) : undefined,
+        creditLimit: updatedCreditLimit,
+        notes: data.notes !== undefined ? (data.notes ? data.notes.trim().slice(0, 500) : null) : undefined,
+        nic: data.nic !== undefined ? (data.nic ? data.nic.trim().slice(0, 20) : null) : undefined,
+        repId: data.repId !== undefined ? (data.repId && !isNaN(Number(data.repId)) && Number(data.repId) > 0 ? Number(data.repId) : null) : undefined,
       },
     });
   }

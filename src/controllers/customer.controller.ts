@@ -4,13 +4,17 @@ import { sendSuccess, sendCreated } from '../utils/response';
 import { CustomerType } from '@prisma/client';
 
 /**
- * Handle listing all customers with keyword and role/type filter
+ * Handle listing customers with sanitized query keyword and validated customer type
  */
 export const getCustomers = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const query = req.query.query ? String(req.query.query) : undefined;
-    const type = req.query.type ? (req.query.type as CustomerType) : undefined;
-    const customers = await customerService.getCustomers(query, type);
+    const rawQuery = typeof req.query.query === 'string' ? req.query.query.trim().slice(0, 100) : undefined;
+    const rawType = typeof req.query.type === 'string' ? req.query.type.toUpperCase() : undefined;
+    const type = (rawType && Object.values(CustomerType).includes(rawType as CustomerType))
+      ? (rawType as CustomerType)
+      : undefined;
+
+    const customers = await customerService.getCustomers(rawQuery, type);
     sendSuccess(res, customers);
   } catch (err) {
     next(err);
@@ -18,11 +22,16 @@ export const getCustomers = async (req: Request, res: Response, next: NextFuncti
 };
 
 /**
- * Handle retrieving single customer profile details
+ * Handle retrieving single customer profile details with positive integer ID check
  */
 export const getCustomerById = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const customer = await customerService.getCustomerById(Number(req.params.id));
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const id = parseInt(String(rawId), 10);
+    if (!id || isNaN(id) || id <= 0) {
+      return res.status(400).json({ error: 'Valid positive integer customer ID is required' });
+    }
+    const customer = await customerService.getCustomerById(id);
     sendSuccess(res, customer);
   } catch (err) {
     next(err);
@@ -30,10 +39,13 @@ export const getCustomerById = async (req: Request, res: Response, next: NextFun
 };
 
 /**
- * Handle creation of a new customer account
+ * Handle creation of a new customer account with payload validation
  */
 export const createCustomer = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    if (!req.body || typeof req.body !== 'object') {
+      return res.status(400).json({ error: 'Invalid request body' });
+    }
     const customer = await customerService.createCustomer(req.body);
     sendCreated(res, customer);
   } catch (err) {
@@ -42,11 +54,16 @@ export const createCustomer = async (req: Request, res: Response, next: NextFunc
 };
 
 /**
- * Handle updating an existing customer record
+ * Handle updating an existing customer record with strict ID check
  */
 export const updateCustomer = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const updated = await customerService.updateCustomer(Number(req.params.id), req.body);
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const id = parseInt(String(rawId), 10);
+    if (!id || isNaN(id) || id <= 0) {
+      return res.status(400).json({ error: 'Valid positive integer customer ID is required' });
+    }
+    const updated = await customerService.updateCustomer(id, req.body);
     sendSuccess(res, updated);
   } catch (err) {
     next(err);
@@ -54,11 +71,16 @@ export const updateCustomer = async (req: Request, res: Response, next: NextFunc
 };
 
 /**
- * Handle safe deletion of customer record
+ * Handle safe deletion of customer record with strict ID validation
  */
 export const deleteCustomer = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    await customerService.deleteCustomer(Number(req.params.id));
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const id = parseInt(String(rawId), 10);
+    if (!id || isNaN(id) || id <= 0) {
+      return res.status(400).json({ error: 'Valid positive integer customer ID is required' });
+    }
+    await customerService.deleteCustomer(id);
     sendSuccess(res, { success: true, message: 'Customer record deleted' });
   } catch (err) {
     next(err);

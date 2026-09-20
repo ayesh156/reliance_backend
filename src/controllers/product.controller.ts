@@ -3,11 +3,12 @@ import productService from '../services/product.service';
 import { sendErrorFrom, sendNoContent } from '../utils/response';
 
 export class ProductController {
-  /** GET /api/products — Fetch with search & Category filter */
+  /** GET /api/products — Fetch with sanitized search & category filter */
   async getAll(req: Request, res: Response): Promise<void> {
     try {
-      const search = typeof req.query.search === 'string' ? req.query.search : undefined;
-      const categoryId = req.query.categoryId ? Number(req.query.categoryId) : undefined;
+      const search = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 100) : undefined;
+      const rawCat = req.query.categoryId;
+      const categoryId = rawCat && !isNaN(Number(rawCat)) && Number(rawCat) > 0 ? Number(rawCat) : undefined;
       const products = await productService.getAllProducts(search, categoryId);
       res.json(products);
     } catch (error) {
@@ -39,10 +40,14 @@ export class ProductController {
     }
   }
 
-  /** PUT /api/products/:id — Update product */
+  /** PUT /api/products/:id — Update product with strict ID checks */
   async update(req: Request, res: Response): Promise<void> {
     try {
       const id = Number(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id);
+      if (!id || isNaN(id) || id <= 0) {
+        res.status(400).json({ error: 'Valid positive integer product ID is required' });
+        return;
+      }
       const product = await productService.updateProduct(id, req);
       res.json(product);
     } catch (error) {
@@ -51,11 +56,15 @@ export class ProductController {
     }
   }
 
-  /** DELETE /api/products/:productId/images/:imageId — Delete image */
+  /** DELETE /api/products/:productId/images/:imageId — Delete image with param validation */
   async deleteImage(req: Request, res: Response): Promise<void> {
     try {
       const productId = Number(Array.isArray(req.params.productId) ? req.params.productId[0] : req.params.productId);
       const imageId = Number(Array.isArray(req.params.imageId) ? req.params.imageId[0] : req.params.imageId);
+      if (!productId || isNaN(productId) || productId <= 0 || !imageId || isNaN(imageId) || imageId <= 0) {
+        res.status(400).json({ error: 'Valid positive integer product ID and image ID are required' });
+        return;
+      }
       const result = await productService.deleteProductImage(productId, imageId);
       res.json(result);
     } catch (error) {
@@ -64,10 +73,14 @@ export class ProductController {
     }
   }
 
-  /** DELETE /api/products/:id — Delete product */
+  /** DELETE /api/products/:id — Delete product with param validation */
   async remove(req: Request, res: Response): Promise<void> {
     try {
       const id = Number(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id);
+      if (!id || isNaN(id) || id <= 0) {
+        res.status(400).json({ error: 'Valid positive integer product ID is required' });
+        return;
+      }
       await productService.deleteProduct(id);
       sendNoContent(res);
     } catch (error) {
