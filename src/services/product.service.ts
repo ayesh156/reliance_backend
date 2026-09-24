@@ -2,6 +2,7 @@ import type { Request } from 'express';
 import { prisma } from '../lib/prisma.ts';
 import { deleteLocalFile } from '../utils/fileHandler.ts';
 import { HttpException } from '../middleware/error.middleware.ts';
+import { sanitizeSafePrice, sanitizeSafeStock, validateProductPayload } from '../utils/validators.ts';
 
 const productInclude = {
   category: true,
@@ -153,8 +154,10 @@ export class ProductService {
   async createProduct(req: Request) {
     const { name, description, categoryId, searchKey, isFeatured, variants, reviews } = req.body;
 
-    if (!name || !categoryId) {
-      throw new HttpException(400, 'Product name and categoryId are required');
+    // Strict Server-side Input Validation
+    const validation = validateProductPayload(name, categoryId);
+    if (!validation.isValid) {
+      throw new HttpException(400, validation.message || 'Invalid product data');
     }
 
     let parsedVariants: VariantInput[] = [];
@@ -299,6 +302,17 @@ export class ProductService {
 
     const { name, description, categoryId, searchKey, isFeatured, variants, reviews } = req.body;
 
+    // Strict Server-side Input Validation on Update
+    if (name !== undefined || categoryId !== undefined) {
+      const validation = validateProductPayload(
+        name !== undefined ? name : existing.name,
+        categoryId !== undefined ? categoryId : existing.categoryId
+      );
+      if (!validation.isValid) {
+        throw new HttpException(400, validation.message || 'Invalid update data');
+      }
+    }
+
     let parsedVariants: VariantInput[] = [];
     if (variants !== undefined) {
       try {
@@ -360,16 +374,17 @@ export class ProductService {
           const cleanBarcode =
             v.barcode && typeof v.barcode === 'string' && v.barcode.trim() !== '' ? v.barcode.trim() : null;
 
+          // Enterprise Security Validation: සෘණ අගයන් සහ Database බිඳවැටීම් වළක්වයි
           const variantData = {
-            size: v.size?.trim() || null,
-            color: v.color?.trim() || null,
+            size: v.size?.trim() ? String(v.size).trim().slice(0, 50) : null,
+            color: v.color?.trim() ? String(v.color).trim().slice(0, 50) : null,
             sku: v.sku?.trim() || `SKU-${id}-${Date.now().toString().slice(-4)}`,
             barcode: cleanBarcode,
-            costPrice: Number(v.costPrice) || 0,
-            retailPrice: Number(v.retailPrice) || 0,
-            wholesalePrice: Number(v.wholesalePrice) || 0,
-            comparePrice: v.comparePrice ? Number(v.comparePrice) : null,
-            stock: Number(v.stock) || 0,
+            costPrice: sanitizeSafePrice(v.costPrice),
+            retailPrice: sanitizeSafePrice(v.retailPrice),
+            wholesalePrice: sanitizeSafePrice(v.wholesalePrice),
+            comparePrice: v.comparePrice ? sanitizeSafePrice(v.comparePrice) : null,
+            stock: sanitizeSafeStock(v.stock),
           };
 
           let resolvedVariantId: number;

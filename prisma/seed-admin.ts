@@ -1,29 +1,58 @@
 import { PrismaClient, Role } from '@prisma/client';
-import { PrismaMariaDb } from '@prisma/adapter-mariadb';
 import bcrypt from 'bcryptjs';
-import 'dotenv/config';
 
-const adapter = new PrismaMariaDb(process.env.DATABASE_URL!);
-const prisma = new PrismaClient({ adapter });
+// Standard Direct Prisma Client connection without external driver adapters
+const prisma = new PrismaClient();
 
-async function main() {
-  const pw = await bcrypt.hash('Ayesh123', 12);
-  await prisma.user.upsert({
-    where: { email: 'ayesh@gmail.com' },
-    update: { password: pw },
-    create: { name: 'Ayesh', email: 'ayesh@gmail.com', password: pw, role: Role.ADMIN },
+async function seedAdmin() {
+  console.log('🛡️  Seeding Super Admin User...');
+
+  const adminEmail = process.env.ADMIN_EMAIL || 'admin@reliance.lk';
+  const adminPassword = process.env.ADMIN_PASSWORD || 'Admin@12345';
+
+  // Check if admin already exists to prevent duplicate key violations
+  const existingAdmin = await prisma.user.findFirst({
+    where: {
+      OR: [
+        { email: adminEmail },
+        { role: Role.ADMIN }
+      ]
+    }
   });
-  console.log('Admin user ayesh@gmail.com / Ayesh123 created');
 
-  const pw2 = await bcrypt.hash('admin123', 12);
-  await prisma.user.upsert({
-    where: { email: 'admin@example.com' },
-    update: { password: pw2 },
-    create: { name: 'Admin', email: 'admin@example.com', password: pw2, role: Role.ADMIN },
-  });
-  console.log('Fallback admin admin@example.com / admin123 created');
+  const hashedPassword = await bcrypt.hash(adminPassword, 10);
 
-  await prisma.$disconnect();
+  if (existingAdmin) {
+    console.log(`ℹ️  Admin user already exists with email: ${existingAdmin.email}. Updating role and credentials...`);
+    const updated = await prisma.user.update({
+      where: { id: existingAdmin.id },
+      data: {
+        role: Role.ADMIN,
+        active: true,
+        password: hashedPassword,
+      }
+    });
+    console.log(`✅ Admin updated successfully: ID #${updated.id} (${updated.email})`);
+  } else {
+    const newAdmin = await prisma.user.create({
+      data: {
+        name: 'Super Admin',
+        email: adminEmail,
+        phone: '0770000000',
+        password: hashedPassword,
+        role: Role.ADMIN,
+        active: true,
+      }
+    });
+    console.log(`✅ Super Admin created successfully: ID #${newAdmin.id} (${newAdmin.email})`);
+  }
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+seedAdmin()
+  .catch((error) => {
+    console.error('❌ Error seeding admin:', error);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });

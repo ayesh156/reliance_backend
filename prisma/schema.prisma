@@ -223,6 +223,7 @@ model City {
 
 model Order {
   id                Int           @id @default(autoincrement())
+  invoiceNumber     String?       @unique // e.g. "INV-1001" or POS receipt identifier
   source            OrderSource   @default(ECOMMERCE)
 
   userId            Int?
@@ -257,6 +258,7 @@ model Order {
 
   @@index([customerPhone])
   @@index([status])
+  @@index([invoiceNumber])
   @@map("orders")
 }
 

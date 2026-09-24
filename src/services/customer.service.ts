@@ -10,7 +10,8 @@ export class CustomerService {
   async getCustomers(query?: string, type?: CustomerType) {
     const cleanQuery = query ? query.trim().slice(0, 100) : undefined;
 
-    return prisma.customer.findMany({
+    // Fetch customers with active non-cancelled order balances
+    const customers = await prisma.customer.findMany({
       where: {
         ...(type ? { type } : {}),
         ...(cleanQuery
@@ -40,14 +41,39 @@ export class CustomerService {
         rep: {
           select: { id: true, name: true },
         },
+        // Fetch active non-cancelled order balances to eliminate financial drift
+        orders: {
+          where: {
+            status: { not: 'CANCELLED' },
+          },
+          select: {
+            totalAmount: true,
+            paidAmount: true,
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
       take: 200,
     });
+
+    // Compute live aggregated outstanding debt per customer
+    return customers.map((c) => {
+      const liveDueAmount = c.orders.reduce((sum, order) => {
+        const total = Number(order.totalAmount) || 0;
+        const paid = Number(order.paidAmount) || 0;
+        return sum + Math.max(0, total - paid);
+      }, 0);
+
+      const { orders, ...safeCustomer } = c;
+      return {
+        ...safeCustomer,
+        outstandingBalance: Math.round(liveDueAmount * 100) / 100,
+      };
+    });
   }
 
   /**
-   * Retrieve a single customer profile by primary key ID
+   * Retrieve a single customer profile by primary key ID with live aggregated debt
    */
   async getCustomerById(id: number) {
     const customer = await prisma.customer.findUnique({
@@ -55,8 +81,17 @@ export class CustomerService {
       include: {
         rep: { select: { id: true, name: true } },
         orders: {
-          take: 5,
+          take: 10,
           orderBy: { createdAt: 'desc' },
+          select: {
+            id: true,
+            invoiceNumber: true,
+            totalAmount: true,
+            paidAmount: true,
+            status: true,
+            source: true,
+            createdAt: true,
+          },
         },
       },
     });
@@ -65,7 +100,18 @@ export class CustomerService {
       throw new HttpException(404, 'Customer record not found');
     }
 
-    return customer;
+    // Dynamic debt calculation from non-cancelled orders
+    const liveDueAmount = customer.orders.reduce((sum, order) => {
+      if (order.status === 'CANCELLED') return sum;
+      const total = Number(order.totalAmount) || 0;
+      const paid = Number(order.paidAmount) || 0;
+      return sum + Math.max(0, total - paid);
+    }, 0);
+
+    return {
+      ...customer,
+      outstandingBalance: Math.round(liveDueAmount * 100) / 100,
+    };
   }
 
   /**
@@ -214,20 +260,39 @@ export class CustomerService {
   }
 
   /**
-   * Delete customer record after checking for linked order history
+   * Delete customer record after verifying zero active debt and relational audit history
    */
   async deleteCustomer(id: number) {
     const customer = await prisma.customer.findUnique({
       where: { id: Number(id) },
-      include: { orders: { select: { id: true }, take: 1 } },
+      include: {
+        orders: {
+          select: {
+            id: true,
+            totalAmount: true,
+            paidAmount: true,
+            status: true,
+          },
+        },
+      },
     });
 
     if (!customer) {
       throw new HttpException(404, 'Customer record not found');
     }
 
+    // Financial Guard: Check if unpaid credit exists
+    const activeDebt = customer.orders.reduce((sum, o) => {
+      if (o.status === 'CANCELLED') return sum;
+      return sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0));
+    }, 0);
+
+    if (activeDebt > 0.01) {
+      throw new HttpException(400, `Cannot delete customer with outstanding debt of Rs. ${activeDebt.toFixed(2)}`);
+    }
+
     if (customer.orders.length > 0) {
-      throw new HttpException(400, 'Cannot delete customer with historical orders');
+      throw new HttpException(400, 'Cannot delete customer with historical orders (Financial Audit Trail Protection)');
     }
 
     return prisma.customer.delete({ where: { id: Number(id) } });
