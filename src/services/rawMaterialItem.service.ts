@@ -1,6 +1,6 @@
 import { Prisma, RawMaterialUnit } from '@prisma/client';
-import { prisma } from '../lib/prisma';
-import { HttpException } from '../middleware/error.middleware';
+import { prisma } from '../lib/prisma.ts';
+import { HttpException } from '../middleware/error.middleware.ts';
 
 export interface CreateRawMaterialItemDTO {
   name: string;

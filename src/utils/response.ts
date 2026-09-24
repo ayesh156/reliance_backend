@@ -1,5 +1,5 @@
 import type { Response } from 'express';
-import { HttpException } from '../middleware/error.middleware';
+import { HttpException } from '../middleware/error.middleware.ts';
 
 /**
  * Standardized HTTP response helpers.

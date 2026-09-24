@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
-import settingsService from '../services/settings.service';
-import { sendErrorFrom } from '../utils/response';
+import settingsService from '../services/settings.service.ts';
+import { sendErrorFrom } from '../utils/response.ts';
 
 export class SettingsController {
   /** GET /api/settings — Fetch all storefront settings */

@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
-import productService from '../services/product.service';
-import { sendErrorFrom, sendNoContent } from '../utils/response';
+import productService from '../services/product.service.ts';
+import { sendErrorFrom, sendNoContent } from '../utils/response.ts';
 
 export class ProductController {
   /** GET /api/products — Fetch with sanitized search & category filter */

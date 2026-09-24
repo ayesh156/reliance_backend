@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
-import buyRawMaterialService from '../services/buyRawMaterial.service';
-import { sendSuccess } from '../utils/response';
+import buyRawMaterialService from '../services/buyRawMaterial.service.ts';
+import { sendSuccess } from '../utils/response.ts';
 
 export class BuyRawMaterialController {
   async getAll(req: Request, res: Response, next: NextFunction) {

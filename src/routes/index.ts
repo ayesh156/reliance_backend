@@ -1,13 +1,13 @@
 import { Router } from 'express';
-import authRoutes from './auth.routes';
-import productRoutes from './product.routes';
-import settingsRoutes from './settings.routes';
-import attributeRoutes from './attribute.routes';
-import customerRoutes from './customer.routes';
-import orderRoutes from './order.routes';
-import rawMaterialShopRoutes from './rawMaterialShop.routes';
-import rawMaterialItemRoutes from './rawMaterialItem.routes';
-import buyRawMaterialRoutes from './buyRawMaterial.routes';
+import authRoutes from './auth.routes.ts';
+import productRoutes from './product.routes.ts';
+import settingsRoutes from './settings.routes.ts';
+import attributeRoutes from './attribute.routes.ts';
+import customerRoutes from './customer.routes.ts';
+import orderRoutes from './order.routes.ts';
+import rawMaterialShopRoutes from './rawMaterialShop.routes.ts';
+import rawMaterialItemRoutes from './rawMaterialItem.routes.ts';
+import buyRawMaterialRoutes from './buyRawMaterial.routes.ts';
 
 const router = Router();
 

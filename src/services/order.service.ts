@@ -1,8 +1,8 @@
-import { prisma } from '../lib/prisma';
-import { HttpException } from '../middleware/error.middleware';
+import { prisma } from '../lib/prisma.ts';
+import { HttpException } from '../middleware/error.middleware.ts';
 import { OrderSource, OrderStatus } from '@prisma/client';
 import PDFDocument from 'pdfkit';
-import { InvoicePdfService } from './invoice-pdf.service';
+import { InvoicePdfService } from './invoice-pdf.service.ts';
 
 export class OrderService {
   /**

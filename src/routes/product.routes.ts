@@ -1,10 +1,10 @@
 import { Router } from 'express';
 import path from 'path';
 import multer from 'multer';
-import productController from '../controllers/product.controller';
-import { ensureUploadDir } from '../utils/fileHandler';
-import { MAX_IMAGE_UPLOAD_BYTES, MAX_PRODUCT_IMAGES } from '../config/constants';
-import { verifyToken, requireRole } from '../middleware/auth.middleware';
+import productController from '../controllers/product.controller.ts';
+import { ensureUploadDir } from '../utils/fileHandler.ts';
+import { MAX_IMAGE_UPLOAD_BYTES, MAX_PRODUCT_IMAGES } from '../config/constants.ts';
+import { verifyToken, requireRole } from '../middleware/auth.middleware.ts';
 
 const router = Router();
 

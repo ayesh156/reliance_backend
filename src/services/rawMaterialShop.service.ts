@@ -1,6 +1,6 @@
-import { prisma } from '../lib/prisma';
-import { HttpException } from '../middleware/error.middleware';
-import { isValidSriLankanPhone } from '../utils/validators';
+import { prisma } from '../lib/prisma.ts';
+import { HttpException } from '../middleware/error.middleware.ts';
+import { isValidSriLankanPhone } from '../utils/validators.ts';
 
 export interface CreateShopInput {
   name: string;

@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
-import rawMaterialItemService from "../services/rawMaterialItem.service";
-import { sendSuccess } from "../utils/response";
+import rawMaterialItemService from "../services/rawMaterialItem.service.ts";
+import { sendSuccess } from "../utils/response.ts";
 
 /**
  * Controller handling raw material inventory items endpoints.

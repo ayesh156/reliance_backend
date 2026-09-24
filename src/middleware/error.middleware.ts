@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
-import { env } from '../config/env';
+import { env } from '../config/env.ts';
 
 /**
  * Custom HTTP exception with status code.

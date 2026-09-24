@@ -1,5 +1,5 @@
-import { env } from '../config/env';
-import { prisma } from '../lib/prisma';
+import { env } from '../config/env.ts';
+import { prisma } from '../lib/prisma.ts';
 
 export async function renderStatusPage(): Promise<string> {
   const currentTime = new Date().toLocaleString('en-US', {

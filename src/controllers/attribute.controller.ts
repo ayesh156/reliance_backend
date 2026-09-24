@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
-import { attributeService } from '../services/attribute.service';
-import { sendSuccess, sendCreated } from '../utils/response';
+import { attributeService } from '../services/attribute.service.ts';
+import { sendSuccess, sendCreated } from '../utils/response.ts';
 
 /**
  * Handle listing all categories

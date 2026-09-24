@@ -1,9 +1,9 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { prisma } from '../lib/prisma';
-import { env } from '../config/env';
-import { ROLES, type UserRole } from '../config/constants';
-import { HttpException } from '../middleware/error.middleware';
+import { prisma } from '../lib/prisma.ts';
+import { env } from '../config/env.ts';
+import { ROLES, type UserRole } from '../config/constants.ts';
+import { HttpException } from '../middleware/error.middleware.ts';
 
 /** Minimal user selection used for auth responses. */
 const userSelect = {

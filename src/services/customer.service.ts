@@ -1,7 +1,7 @@
-import { prisma } from '../lib/prisma';
+import { prisma } from '../lib/prisma.ts';
 import { CustomerType } from '@prisma/client';
-import { HttpException } from '../middleware/error.middleware';
-import { isValidSriLankanPhone, isValidSriLankanNIC } from '../utils/validators';
+import { HttpException } from '../middleware/error.middleware.ts';
+import { isValidSriLankanPhone, isValidSriLankanNIC } from '../utils/validators.ts';
 
 export class CustomerService {
   /**

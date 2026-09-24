@@ -1,5 +1,5 @@
-import { prisma } from '../lib/prisma';
-import { HttpException } from '../middleware/error.middleware';
+import { prisma } from '../lib/prisma.ts';
+import { HttpException } from '../middleware/error.middleware.ts';
 
 export class SettingsService {
   /**

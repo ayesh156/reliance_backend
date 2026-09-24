@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import buyRawMaterialController from '../controllers/buyRawMaterial.controller';
-import { verifyToken, requireRole } from '../middleware/auth.middleware';
+import buyRawMaterialController from '../controllers/buyRawMaterial.controller.ts';
+import { verifyToken, requireRole } from '../middleware/auth.middleware.ts';
 
 const router = Router();
 

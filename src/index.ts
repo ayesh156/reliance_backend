@@ -6,13 +6,13 @@ import crypto from 'crypto';
 import helmet from 'helmet';
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
-import { parseAllowedOrigins } from './config/cors';
-import { env } from './config/env';
-import { MAX_JSON_BODY_SIZE } from './config/constants';
-import apiRouter from './routes';
-import errorMiddleware from './middleware/error.middleware';
-import { connectDB } from './lib/prisma';
-import { renderStatusPage } from './utils/statusPage';
+import { parseAllowedOrigins } from './config/cors.ts';
+import { env } from './config/env.ts';
+import { MAX_JSON_BODY_SIZE } from './config/constants.ts';
+import apiRouter from './routes/index.ts';
+import errorMiddleware from './middleware/error.middleware.ts';
+import { connectDB } from './lib/prisma.ts';
+import { renderStatusPage } from './utils/statusPage.ts';
 
 // 🛡️ ==========================================================
 // ZERO-CRASH PROCESS SHIELD (Senari Production Standard)

@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
-import { customerService } from '../services/customer.service';
-import { sendSuccess, sendCreated } from '../utils/response';
+import { customerService } from '../services/customer.service.ts';
+import { sendSuccess, sendCreated } from '../utils/response.ts';
 import { CustomerType } from '@prisma/client';
 
 /**

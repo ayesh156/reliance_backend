@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
-import authService from '../services/auth.service';
-import { sendErrorFrom } from '../utils/response';
+import authService from '../services/auth.service.ts';
+import { sendErrorFrom } from '../utils/response.ts';
 
 export class AuthController {
   /** POST /api/auth/login — Login with email/password and strict payload validation */

@@ -1,7 +1,7 @@
 import type { Request } from 'express';
-import { prisma } from '../lib/prisma';
-import { deleteLocalFile } from '../utils/fileHandler';
-import { HttpException } from '../middleware/error.middleware';
+import { prisma } from '../lib/prisma.ts';
+import { deleteLocalFile } from '../utils/fileHandler.ts';
+import { HttpException } from '../middleware/error.middleware.ts';
 
 const productInclude = {
   category: true,

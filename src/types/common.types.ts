@@ -1,4 +1,4 @@
-import type { Role } from '../config/constants';
+import type { Role } from '../config/constants.ts';
 
 /**
  * Shared DTO / utility types used across controllers, services, and routes.
