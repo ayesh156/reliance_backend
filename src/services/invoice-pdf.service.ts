@@ -80,19 +80,32 @@ export class InvoicePdfService {
     doc.font('Helvetica-Bold').text('Tel: ', brandTextX, headerTop + 47, { continued: true }).font('Helvetica').text('041-2268739, 071-1350123');
     doc.font('Helvetica-Bold').text('Web: ', brandTextX, headerTop + 58, { continued: true }).font('Helvetica').text('relianceclothing.lk');
 
-    // Right-aligned Modern Light Invoice Title (Changed to Uppercase INVOICE)
-    doc.fontSize(24).font('Helvetica').fillColor('#000000').text('INVOICE', 350, headerTop - 3, { width: 202.78, align: 'right', characterSpacing: 3 });
+    // Detect wholesale order source cleanly
+    const isWholesale = order.source === 'POS_WHOLESALE' || order.orderType === 'WHOLESALE';
+    const invoiceTitle = isWholesale ? 'WHOLESALE INVOICE' : 'INVOICE';
+
+    // Right-aligned Modern Invoice Title (Preserves exact standard black color)
+    doc
+      .fontSize(isWholesale ? 20 : 24)
+      .font('Helvetica-Bold')
+      .fillColor('#000000')
+      .text(invoiceTitle, 280, headerTop - 3, { width: 272.78, align: 'right', characterSpacing: isWholesale ? 1.5 : 3 });
 
     // Meta Table (Gap tightened between label and value)
-    const metaY = headerTop + 30;
+    const metaY = headerTop + 28;
     doc.fontSize(8).font('Helvetica-Bold').fillColor('#444444').text('INVOICE NO:', 395, metaY, { width: 70, align: 'right' });
     doc.fontSize(9.5).font('Helvetica-Bold').fillColor('#000000').text(invoiceNo, 470, metaY - 1, { width: 82.78, align: 'right' });
 
     doc.fontSize(8).font('Helvetica-Bold').fillColor('#444444').text('DATE:', 395, metaY + 14, { width: 70, align: 'right' });
     doc.fontSize(8.6).font('Helvetica').fillColor('#000000').text(dateStr, 470, metaY + 13.5, { width: 82.78, align: 'right' });
 
+    if (isWholesale) {
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#444444').text('BILLING TYPE:', 395, metaY + 28, { width: 70, align: 'right' });
+      doc.fontSize(8.6).font('Helvetica-Bold').fillColor('#000000').text('WHOLESALE', 470, metaY + 27.5, { width: 82.78, align: 'right' });
+    }
+
     // Main Solid Divider Line
-    const dividerY = headerTop + 76;
+    const dividerY = headerTop + (isWholesale ? 82 : 76);
     doc.moveTo(startX, dividerY).lineTo(rightMargin, dividerY).lineWidth(1.2).strokeColor('#000000').stroke();
 
     // ── 2. BILLED TO SECTION ──
@@ -223,11 +236,14 @@ export class InvoicePdfService {
       curY += 16;
     }
 
-    // ── 5. SIGNATURES (Natural flow matching frontend, NOT forced to page bottom) ──
-    let sigY = curY + 40; 
-    if (sigY > 760) {
+    // ── 5. SIGNATURES (Pinned to A4 Page Bottom with Multi-page Overflow Protection) ──
+    const pinnedSigY = 740;
+    let sigY = pinnedSigY;
+
+    // If financial summary extends near or over the footer area, wrap safely to the next page
+    if (curY > 700) {
       doc.addPage();
-      sigY = 50;
+      sigY = pinnedSigY;
     }
 
     const sigWidth = 95; 
@@ -239,10 +255,10 @@ export class InvoicePdfService {
       doc.fontSize(7.1).font('Helvetica-Bold').fillColor('#000000').text(title, sX, sigY + 4, { width: sigWidth, align: 'center', characterSpacing: 0.5, lineBreak: false });
     });
 
-    // ── 6. FOOTER POLICY ──
-    const footerLineY = sigY + 26;
+    // ── 6. FOOTER POLICY (Pinned Exactly to Bottom Margin) ──
+    const footerLineY = 776;
     doc.moveTo(startX, footerLineY).lineTo(rightMargin, footerLineY).lineWidth(0.75).strokeColor('#000000').stroke();
-    doc.fontSize(9).font('Helvetica-Bold').text('THANK YOU FOR YOUR BUSINESS', startX, footerLineY + 8, { width: pageWidth, align: 'center', characterSpacing: 1.1, lineBreak: false });
+    doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#000000').text('THANK YOU FOR YOUR BUSINESS', startX, footerLineY + 8, { width: pageWidth, align: 'center', characterSpacing: 1.1, lineBreak: false });
     doc.fontSize(7.5).font('Helvetica').fillColor('#222222').text('Returns and exchanges are valid only for 7 days with original invoice.', startX, footerLineY + 20, { width: pageWidth, align: 'center', lineBreak: false });
 
     return doc;
