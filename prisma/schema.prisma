@@ -335,6 +335,7 @@ model RawMaterialShop {
   creditBalance  Float                @default(0) // කඩයට ගෙවීමට ඇති හිඟ මුදල
   
   purchases      BuyRawMaterial[]
+  payments       SupplierPayment[]    // ⭐ Added relation to track supplier due debt payments
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt
 
@@ -353,6 +354,7 @@ model RawMaterialItem {
   unitCostAverage Float                @default(0) // සාමාන්‍ය මිලදී ගැනීමේ මිල (Weighted Average Cost)
 
   purchaseItems   BuyRawMaterialItem[]
+  movements       RawMaterialMovement[] // ⭐ Added relation to track usage, scrap return, and wastage
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
 
@@ -375,6 +377,7 @@ model BuyRawMaterial {
   notes               String?              @db.Text
   
   items               BuyRawMaterialItem[]
+  payments            SupplierPayment[]    // ⭐ Added opposite relation for supplier invoice payments
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
 
@@ -402,4 +405,58 @@ model BuyRawMaterialItem {
   @@index([buyRawMaterialId])
   @@index([rawMaterialItemId])
   @@map("buy_raw_material_items")
+}
+
+
+// ----------------------------------------------------
+// RAW MATERIAL MOVEMENTS & SUPPLIER PAYMENTS
+// ----------------------------------------------------
+
+enum MaterialMovementType {
+  STOCK_IN        // Initial purchase from supplier
+  PRODUCTION_USE  // Deducted for garment cutting/production
+  SCRAP_RETURN    // Leftover/unused scrap returned back to warehouse
+  DAMAGE_WASTE    // Damaged/wasted materials written off
+  AUDIT_ADJUST    // Stock count correction
+}
+
+model RawMaterialMovement {
+  id                Int                  @id @default(autoincrement())
+  rawMaterialItemId Int                  @map("raw_material_item_id")
+  rawMaterialItem   RawMaterialItem      @relation(fields: [rawMaterialItemId], references: [id], onDelete: Cascade)
+  
+  movementType      MaterialMovementType @map("movement_type")
+  quantity          Float                // Amount moved (Meters, Kg, etc.)
+  previousStock     Float                @map("previous_stock") // Stock balance before
+  newStock          Float                @map("new_stock")      // Stock balance after
+  reference         String?              @db.Text               // Reason/Batch/Style notes
+  recordedBy        Int?                 @map("recorded_by")
+  
+  createdAt         DateTime             @default(now()) @map("created_at")
+
+  @@index([rawMaterialItemId])
+  @@index([movementType])
+  @@index([createdAt])
+  @@map("raw_material_movements")
+}
+
+model SupplierPayment {
+  id                 Int              @id @default(autoincrement())
+  rawMaterialShopId  Int              @map("raw_material_shop_id")
+  shop               RawMaterialShop  @relation(fields: [rawMaterialShopId], references: [id], onDelete: Cascade)
+  
+  buyRawMaterialId   Int?             @map("buy_raw_material_id")
+  buyRawMaterial     BuyRawMaterial?  @relation(fields: [buyRawMaterialId], references: [id], onDelete: SetNull)
+  
+  amount             Float            // Paid amount (Rs.)
+  paymentMethod      String           @default("CASH") @map("payment_method") // CASH, CHEQUE, BANK_TRANSFER
+  reference          String?          // Cheque No / Bank Slip
+  paymentDate        DateTime         @default(now()) @map("payment_date")
+  
+  createdAt          DateTime         @default(now()) @map("created_at")
+
+  @@index([rawMaterialShopId])
+  @@index([buyRawMaterialId])
+  @@index([paymentDate])
+  @@map("supplier_payments")
 }
