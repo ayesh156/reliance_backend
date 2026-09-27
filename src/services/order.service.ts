@@ -153,16 +153,15 @@ export class OrderService {
   }
 
   /**
-   * Retrieve active catalog variants formatted for POS searching and scanning
-   */
-  /**
-   * Retrieve active catalog variants with complete image assets for color matching
-   */
-  /**
-   * Retrieve active catalog variants optimized with lean projections and pool protection
+   * Retrieve active catalog variants optimized for POS terminal:
+   * 1. Resolves exact variant-tagged image priority (fallback to color match, then product image)
+   * 2. Excludes depleted/unconfigured stock to keep cashier terminal responsive
    */
   async getPosCatalog() {
-    return prisma.productVariant.findMany({
+    const variants = await prisma.productVariant.findMany({
+      where: {
+        stock: { gt: 0 }, // Filter out items with zero stock from active POS checkout
+      },
       select: {
         id: true,
         size: true,
@@ -173,19 +172,61 @@ export class OrderService {
         retailPrice: true,
         wholesalePrice: true,
         stock: true,
-        images: { select: { imageUrl: true }, take: 1 },
         product: {
           select: {
             id: true,
             name: true,
             searchKey: true,
             category: { select: { name: true } },
-            images: { orderBy: { order: 'asc' }, select: { id: true, imageUrl: true }, take: 1 },
+            images: { 
+              orderBy: { order: 'asc' }, 
+              select: { id: true, imageUrl: true, variantId: true } 
+            },
           },
         },
       },
       orderBy: { product: { name: 'asc' } },
       take: 300, // Safeguard against unbounded memory consumption
+    });
+
+    // World-class asset resolution: accurately link tagged variant image to variant entity
+    return variants.map((v) => {
+      const allProductImages = v.product?.images || [];
+      
+      // 1. First priority: Image specifically tagged with this variant's foreign key
+      const directVariantImg = allProductImages.find(
+        (img) => img.variantId && Number(img.variantId) === Number(v.id)
+      )?.imageUrl;
+
+      // 2. Second priority: Match by variant color keyword if present
+      const colorKey = (v.color || '').toLowerCase().trim();
+      const colorMatchedImg = colorKey && colorKey !== 'default'
+        ? allProductImages.find((img) => img.imageUrl.toLowerCase().includes(colorKey))?.imageUrl
+        : null;
+
+      // 3. Third priority: Primary product catalog photo
+      const resolvedImg = directVariantImg || colorMatchedImg || allProductImages[0]?.imageUrl || null;
+
+      return {
+        id: v.id,
+        size: v.size,
+        color: v.color,
+        sku: v.sku,
+        barcode: v.barcode,
+        costPrice: v.costPrice,
+        retailPrice: v.retailPrice,
+        wholesalePrice: v.wholesalePrice,
+        stock: v.stock,
+        imageUrl: resolvedImg,
+        images: resolvedImg ? [{ imageUrl: resolvedImg }] : [],
+        product: {
+          id: v.product.id,
+          name: v.product.name,
+          searchKey: v.product.searchKey,
+          category: v.product.category,
+          images: allProductImages.map((img) => ({ imageUrl: img.imageUrl })),
+        },
+      };
     });
   }
 
@@ -319,6 +360,7 @@ export class OrderService {
   async updateInvoiceOrder(
     orderId: number,
     data: {
+      source?: OrderSource; // Allows switching between POS_RETAIL and POS_WHOLESALE
       customerId?: number;
       customerName?: string;
       customerPhone?: string;
@@ -420,6 +462,7 @@ export class OrderService {
       const updatedOrder = await tx.order.update({
         where: { id: orderId },
         data: {
+          source: data.source || existing.source || OrderSource.POS_RETAIL, // Accurately updates Wholesale vs Retail mode
           customerId: targetCustomerId || null,
           customerName: data.customerName || 'Walk-in Customer',
           customerPhone: data.customerPhone || null,

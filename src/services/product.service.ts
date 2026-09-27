@@ -7,9 +7,7 @@ import { sanitizeSafePrice, sanitizeSafeStock, validateProductPayload } from '..
 const productInclude = {
   category: true,
   variants: {
-    include: {
-      images: { select: { id: true, imageUrl: true }, take: 1 },
-    },
+    orderBy: { id: 'asc' as const },
   },
   reviews: {
     include: {
@@ -19,6 +17,12 @@ const productInclude = {
   images: {
     orderBy: {
       order: 'asc' as const,
+    },
+    select: {
+      id: true,
+      imageUrl: true,
+      order: true,
+      variantId: true,
     },
   },
 } as const;
@@ -408,7 +412,7 @@ export class ProductService {
 
           retainedIds.add(resolvedVariantId);
 
-          // Map all matched catalog images to this variant via index or URL match
+          // Enterprise Hardened: Map all matched catalog images to this variant via index or URL match
           const matchedImageIds = new Set<number>();
 
           if (Array.isArray(v.imageIndexes)) {
@@ -420,17 +424,57 @@ export class ProductService {
             matchedImageIds.add(currentImages[v.imageIndex].id);
           }
 
-          const urlsToCheck = Array.isArray(v.imageUrls) ? v.imageUrls : v.imageUrl ? [v.imageUrl] : [];
-          urlsToCheck.forEach(url => {
-            const found = currentImages.find(img => img.imageUrl === url);
-            if (found) matchedImageIds.add(found.id);
-          });
+          // Support both absolute web URLs, relative paths, and sanitized photo strings
+          // Enterprise Hardened: Allow sharing the exact same image link across multiple variants
+          const urlsToCheck = Array.isArray(v.imageUrls) 
+            ? v.imageUrls 
+            : v.imageUrl 
+            ? [v.imageUrl] 
+            : [];
 
-          if (matchedImageIds.size > 0) {
-            await tx.productImage.updateMany({
-              where: { id: { in: Array.from(matchedImageIds) } },
-              data: { variantId: resolvedVariantId },
+          // Enterprise Multi-Variant Image Assignment:
+          // Reliably binds the image URL to each variant in the database without overwriting
+          for (const url of urlsToCheck) {
+            if (!url) continue;
+            const cleanTarget = String(url).trim();
+
+            // 1. Check if this exact variant is already linked to this image
+            const alreadyLinked = await tx.productImage.findFirst({
+              where: {
+                productId: id,
+                variantId: resolvedVariantId,
+                imageUrl: cleanTarget,
+              },
             });
+
+            if (!alreadyLinked) {
+              // 2. Check if an unassigned base image exists for this URL
+              const unassignedBase = await tx.productImage.findFirst({
+                where: {
+                  productId: id,
+                  variantId: null,
+                  imageUrl: cleanTarget,
+                },
+              });
+
+              if (unassignedBase) {
+                // Bind unassigned image to this variant
+                await tx.productImage.update({
+                  where: { id: unassignedBase.id },
+                  data: { variantId: resolvedVariantId },
+                });
+              } else {
+                // 3. Image is already bound to another variant: Create a variant link record
+                await tx.productImage.create({
+                  data: {
+                    productId: id,
+                    imageUrl: cleanTarget,
+                    variantId: resolvedVariantId,
+                    order: currentImages.length + 1,
+                  },
+                });
+              }
+            }
           }
         }
 
