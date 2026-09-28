@@ -25,4 +25,15 @@ router.delete(
   buyRawMaterialController.delete
 );
 
+router.put(
+  '/:id',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  buyRawMaterialController.update
+);
+
+// Add these routes below existing endpoints
+router.get('/:id/pdf', verifyToken, buyRawMaterialController.downloadGrnPdf);
+router.post('/settle-payment', verifyToken, requireRole('ADMIN', 'STAFF'), buyRawMaterialController.settlePayment);
+
 export default router;

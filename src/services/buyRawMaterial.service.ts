@@ -21,10 +21,30 @@ export interface CreateBuyRawMaterialDTO {
 
 export class BuyRawMaterialService {
   /**
-   * Fetch all purchases with shop and item counts
+   * Fetch all purchases with shop, item counts, and payment ledger history
    */
-  async getAll(search?: string) {
+  async getAll(search?: string, shopId?: number) {
     const where: any = {};
+
+    // ⭐ අදාළ supplier shop එකට අදාළ purchases පමණක් filter කිරීම සහ Credit Balance එක Reconcile කිරීම
+    if (shopId && !isNaN(shopId)) {
+      const sId = Number(shopId);
+      where.rawMaterialShopId = sId;
+
+      const shopPurchases = await prisma.buyRawMaterial.findMany({
+        where: { rawMaterialShopId: sId },
+        select: { totalAmount: true, paidAmount: true },
+      });
+      const actualOutstanding = shopPurchases.reduce((sum, p) => {
+        const due = (Number(p.totalAmount) || 0) - (Number(p.paidAmount) || 0);
+        return sum + Math.max(0, due);
+      }, 0);
+
+      await prisma.rawMaterialShop.update({
+        where: { id: sId },
+        data: { creditBalance: actualOutstanding },
+      });
+    }
 
     if (search && search.trim()) {
       const q = search.trim();
@@ -34,7 +54,7 @@ export class BuyRawMaterialService {
       ];
     }
 
-    return prisma.buyRawMaterial.findMany({
+    const purchases = await prisma.buyRawMaterial.findMany({
       where,
       include: {
         shop: {
@@ -59,6 +79,37 @@ export class BuyRawMaterialService {
         },
       },
       orderBy: { purchaseDate: 'desc' },
+    });
+
+    // ⭐ Parse payment audit history from structured notes ledger
+    return purchases.map((purchase) => {
+      let paymentHistory: any[] = [];
+      try {
+        if (purchase.notes && purchase.notes.startsWith('{') && purchase.notes.includes('"payments"')) {
+          const parsed = JSON.parse(purchase.notes);
+          if (Array.isArray(parsed.payments)) {
+            paymentHistory = parsed.payments;
+          }
+        }
+      } catch {
+        paymentHistory = [];
+      }
+
+      // If initial payment exists but no installments recorded yet, show the creation payment
+      if (paymentHistory.length === 0 && purchase.paidAmount > 0) {
+        paymentHistory.push({
+          id: purchase.id * 1000,
+          amount: purchase.paidAmount,
+          method: purchase.paymentMethod || 'CASH',
+          reference: 'Initial Down Payment',
+          createdAt: purchase.purchaseDate || purchase.createdAt,
+        });
+      }
+
+      return {
+        ...purchase,
+        paymentHistory,
+      };
     });
   }
 
@@ -261,6 +312,141 @@ export class BuyRawMaterialService {
     });
   }
 
+/**
+   * Update Existing Purchase Order:
+   * Safely rolls back old stock quantities and shop debt, then applies new items and amounts.
+   */
+  async update(id: number, data: CreateBuyRawMaterialDTO) {
+    if (isNaN(id)) throw new HttpException(400, 'Invalid purchase ID');
+
+    const existingPurchase = await prisma.buyRawMaterial.findUnique({
+      where: { id },
+      include: { items: true },
+    });
+
+    if (!existingPurchase) {
+      throw new HttpException(404, 'Purchase record not found');
+    }
+
+    if (!data.items || !Array.isArray(data.items) || data.items.length === 0) {
+      throw new HttpException(400, 'At least one raw material item is required');
+    }
+
+    let totalAmount = 0;
+    const validatedItems = data.items.map((item) => {
+      const qty = Number(item.quantity);
+      const unitPrice = Number(item.pricePerUnit);
+
+      if (isNaN(qty) || qty <= 0) {
+        throw new HttpException(400, 'Item quantity must be greater than zero');
+      }
+      if (isNaN(unitPrice) || unitPrice < 0) {
+        throw new HttpException(400, 'Unit price cannot be negative');
+      }
+
+      const rowTotal = qty * unitPrice;
+      totalAmount += rowTotal;
+
+      return {
+        rawMaterialItemId: Number(item.rawMaterialItemId),
+        quantity: qty,
+        pricePerUnit: unitPrice,
+        rowTotal,
+        batchNumber: item.batchNumber?.trim() || null,
+      };
+    });
+
+    const paidAmount = data.paidAmount !== undefined ? Math.max(0, Number(data.paidAmount)) : existingPurchase.paidAmount;
+    const dueAmount = totalAmount - paidAmount;
+    const oldDueAmount = existingPurchase.totalAmount - existingPurchase.paidAmount;
+
+    let paymentStatus: PurchasePaymentStatus = PurchasePaymentStatus.PAID;
+    if (paidAmount === 0 && totalAmount > 0) {
+      paymentStatus = PurchasePaymentStatus.DUE;
+    } else if (paidAmount < totalAmount) {
+      paymentStatus = PurchasePaymentStatus.PARTIAL;
+    }
+
+    return await prisma.$transaction(async (tx) => {
+      // 1. පැරණි stock ප්‍රමාණයන් නැවත rollback කිරීම
+      for (const oldItem of existingPurchase.items) {
+        const mat = await tx.rawMaterialItem.findUnique({ where: { id: oldItem.rawMaterialItemId } });
+        if (mat) {
+          const revertedStock = Math.max(0, mat.currentStock - oldItem.quantity);
+          await tx.rawMaterialItem.update({
+            where: { id: oldItem.rawMaterialItemId },
+            data: { currentStock: revertedStock },
+          });
+        }
+      }
+
+      // 2. Shop credit balance වෙනස යාවත්කාලීන කිරීම
+      const debtDiff = dueAmount - oldDueAmount;
+      if (debtDiff !== 0) {
+        await tx.rawMaterialShop.update({
+          where: { id: existingPurchase.rawMaterialShopId },
+          data: {
+            creditBalance: {
+              increment: debtDiff,
+            },
+          },
+        });
+      }
+
+      // 3. නව අයිතම සඳහා stock ප්‍රමාණය වැඩි කිරීම සහ weighted average cost ගණනය කිරීම
+      for (const item of validatedItems) {
+        const currentItem = await tx.rawMaterialItem.findUnique({
+          where: { id: item.rawMaterialItemId },
+        });
+
+        if (!currentItem) {
+          throw new HttpException(404, `Raw material item #${item.rawMaterialItemId} not found`);
+        }
+
+        const oldStock = Number(currentItem.currentStock) || 0;
+        const oldAvgCost = Number(currentItem.unitCostAverage) || 0;
+        const newStock = oldStock + item.quantity;
+
+        const newAvgCost =
+          newStock > 0
+            ? (oldStock * oldAvgCost + item.quantity * item.pricePerUnit) / newStock
+            : item.pricePerUnit;
+
+        await tx.rawMaterialItem.update({
+          where: { id: item.rawMaterialItemId },
+          data: {
+            currentStock: newStock,
+            unitCostAverage: Math.round(newAvgCost * 100) / 100,
+          },
+        });
+      }
+
+      // 4. Purchase එක සහ එහි items (Prisma nested relation update)
+      const updatedPurchase = await tx.buyRawMaterial.update({
+        where: { id },
+        data: {
+          invoiceNumber: data.invoiceNumber?.trim() ? data.invoiceNumber.trim().toUpperCase() : existingPurchase.invoiceNumber,
+          rawMaterialShopId: data.rawMaterialShopId ? Number(data.rawMaterialShopId) : existingPurchase.rawMaterialShopId,
+          totalAmount,
+          paidAmount,
+          paymentMethod: data.paymentMethod || existingPurchase.paymentMethod,
+          paymentStatus,
+          purchaseDate: data.purchaseDate ? new Date(data.purchaseDate) : existingPurchase.purchaseDate,
+          notes: data.notes !== undefined ? data.notes?.trim() || null : existingPurchase.notes,
+          items: {
+            deleteMany: {}, // ⭐ සියලුම පැරණි line items ස්වයංක්‍රීයව ඉවත් කරයි
+            create: validatedItems, // ⭐ නව line items එකතු කරයි
+          },
+        },
+        include: {
+          items: true,
+          shop: true,
+        },
+      });
+
+      return updatedPurchase;
+    });
+  }
   /**
    * Delete / Cancel Purchase Record
    * Safely reverses stock quantities, recalculates stock, and offsets shop debt balance.
@@ -280,16 +466,19 @@ export class BuyRawMaterialService {
     const dueAmount = purchase.totalAmount - purchase.paidAmount;
 
     return await prisma.$transaction(async (tx) => {
-      // 1. Rollback stock quantities
+      // 1. Rollback stock quantities with safety check to prevent negative stocks
       for (const item of purchase.items) {
-        await tx.rawMaterialItem.update({
+        const currentItem = await tx.rawMaterialItem.findUnique({
           where: { id: item.rawMaterialItemId },
-          data: {
-            currentStock: {
-              decrement: item.quantity,
-            },
-          },
         });
+
+        if (currentItem) {
+          const decremented = Math.max(0, currentItem.currentStock - item.quantity);
+          await tx.rawMaterialItem.update({
+            where: { id: item.rawMaterialItemId },
+            data: { currentStock: decremented },
+          });
+        }
       }
 
       // 2. Revert shop debt balance if there was an outstanding balance
@@ -308,6 +497,112 @@ export class BuyRawMaterialService {
       return await tx.buyRawMaterial.delete({
         where: { id },
       });
+    });
+  }
+
+  /**
+   * Record partial or full payment installment for a specific purchase order
+   */
+  async settlePurchasePayment(data: {
+    purchaseId: number;
+    amount: number;
+    paymentMethod: string;
+    paymentDate?: string | Date;
+    reference?: string;
+  }) {
+    const purchase = await prisma.buyRawMaterial.findUnique({
+      where: { id: Number(data.purchaseId) },
+    });
+
+    if (!purchase) {
+      throw new HttpException(404, 'Purchase order not found');
+    }
+
+    const payNum = Number(data.amount);
+    if (isNaN(payNum) || payNum <= 0) {
+      throw new HttpException(400, 'Payment amount must be greater than zero');
+    }
+
+    const currentDue = purchase.totalAmount - purchase.paidAmount;
+    if (payNum > currentDue) {
+      throw new HttpException(400, `Amount exceeds remaining purchase balance of Rs. ${currentDue.toLocaleString()}`);
+    }
+
+    return await prisma.$transaction(async (tx) => {
+      const newPaid = purchase.paidAmount + payNum;
+      let newStatus: PurchasePaymentStatus = PurchasePaymentStatus.PARTIAL;
+      if (newPaid >= purchase.totalAmount) {
+        newStatus = PurchasePaymentStatus.PAID;
+      }
+
+      const transactionDate = data.paymentDate ? new Date(data.paymentDate) : new Date();
+
+      // ⭐ පවතින Payment History Ledger එක කියවා නව ගෙවීම් වාර්තාව append කිරීම
+      let paymentsList: any[] = [];
+      let originalNotesText = '';
+
+      try {
+        if (purchase.notes && purchase.notes.startsWith('{') && purchase.notes.includes('"payments"')) {
+          const parsed = JSON.parse(purchase.notes);
+          paymentsList = Array.isArray(parsed.payments) ? parsed.payments : [];
+          originalNotesText = parsed.userNotes || '';
+        } else {
+          originalNotesText = purchase.notes || '';
+          if (purchase.paidAmount > 0) {
+            paymentsList.push({
+              id: purchase.id * 1000,
+              amount: purchase.paidAmount,
+              method: purchase.paymentMethod || 'CASH',
+              reference: 'Initial Payment',
+              createdAt: purchase.purchaseDate ? new Date(purchase.purchaseDate).toISOString() : new Date().toISOString(),
+            });
+          }
+        }
+      } catch {
+        originalNotesText = purchase.notes || '';
+      }
+
+      // අලුත්ම ගෙවීම් වාරිකය ලැයිස්තුවේ මුලට එක් කිරීම (Prepend)
+      paymentsList.unshift({
+        id: Date.now(),
+        amount: payNum,
+        method: data.paymentMethod || 'CASH',
+        reference: data.reference?.trim() || 'Part Payment',
+        createdAt: transactionDate.toISOString(),
+      });
+
+      const updatedNotesPayload = JSON.stringify({
+        userNotes: originalNotesText,
+        payments: paymentsList,
+      });
+
+      // 1. Purchase එක සහ එහි structured payment audit notes යාවත්කාලීන කිරීම
+      const updatedPurchase = await tx.buyRawMaterial.update({
+        where: { id: purchase.id },
+        data: {
+          paidAmount: newPaid,
+          paymentStatus: newStatus,
+          notes: updatedNotesPayload,
+          updatedAt: transactionDate,
+        },
+      });
+
+      // ⭐ 2. Supplier Shop එකේ සත්‍ය හිඟ ණය ශේෂය Purchase Invoices මඟින් නැවත ගණනය කර සමපාත කිරීම
+      const remainingPurchases = await tx.buyRawMaterial.findMany({
+        where: { rawMaterialShopId: purchase.rawMaterialShopId },
+        select: { totalAmount: true, paidAmount: true },
+      });
+      const realDue = remainingPurchases.reduce((sum, p) => {
+        const d = (Number(p.totalAmount) || 0) - (Number(p.paidAmount) || 0);
+        return sum + Math.max(0, d);
+      }, 0);
+
+      await tx.rawMaterialShop.update({
+        where: { id: purchase.rawMaterialShopId },
+        data: { creditBalance: realDue },
+      });
+
+      return updatedPurchase;
     });
   }
 }
