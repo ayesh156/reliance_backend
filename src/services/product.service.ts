@@ -96,7 +96,10 @@ export class ProductService {
    * Fetch all products with Fast POS search (ID, Name, SearchKey, SKU, Barcode) & Category filter
    */
   async getAllProducts(searchTerm?: string, categoryId?: number) {
-    const where: any = {};
+    // ⭐ Only fetch active products (hide soft-deleted/archived ones)
+    const where: any = {
+      isActive: true,
+    };
 
     if (categoryId && !isNaN(categoryId)) {
       where.categoryId = categoryId;
@@ -553,6 +556,11 @@ export class ProductService {
   /**
    * Delete Product & local assets with integrity checks for order items
    */
+  /**
+   * ⭐ Enterprise Safe Product Delete:
+   * If orders exist, archive product (isActive: false) to preserve sales records.
+   * If unused, completely remove it and its local images.
+   */
   async deleteProduct(id: number) {
     if (isNaN(id)) throw new HttpException(400, 'Invalid product ID');
 
@@ -567,22 +575,30 @@ export class ProductService {
     });
     if (!existing) throw new HttpException(404, 'Product not found');
 
-    // Prevent foreign key crash if this product has been ordered in sales history
     const variantIds = existing.variants.map((v) => v.id);
+    let orderCount = 0;
     if (variantIds.length > 0) {
-      const orderCount = await prisma.orderItem.count({
+      orderCount = await prisma.orderItem.count({
         where: { variantId: { in: variantIds } },
       });
-      if (orderCount > 0) {
-        throw new HttpException(400, 'Cannot delete product with existing sales history. Deactivate or archive instead.');
-      }
     }
 
+    // Orders තිබේ නම් Error විසිකිරීම වෙනුවට Soft-Delete (Archive) කිරීම
+    if (orderCount > 0) {
+      await prisma.product.update({
+        where: { id },
+        data: { isActive: false },
+      });
+      return { success: true, message: 'Product archived and hidden from catalog successfully.' };
+    }
+
+    // Orders නැති අලුත් product එකක් නම් සම්පූර්ණයෙන්ම delete කිරීම
     for (const img of existing.images) {
       if (img.imageUrl && !img.imageUrl.startsWith('http')) deleteLocalFile(img.imageUrl);
     }
 
     await prisma.product.delete({ where: { id } });
+    return { success: true, message: 'Product permanently deleted successfully.' };
   }
 }
 

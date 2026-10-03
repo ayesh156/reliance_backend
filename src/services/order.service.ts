@@ -157,10 +157,18 @@ export class OrderService {
    * 1. Resolves exact variant-tagged image priority (fallback to color match, then product image)
    * 2. Excludes depleted/unconfigured stock to keep cashier terminal responsive
    */
+  /**
+   * ⭐ POS Grid Catalog:
+   * Only fetches product variants belonging to active, non-deleted products.
+   * Soft-deleted/archived products are automatically hidden from the cashier.
+   */
   async getPosCatalog() {
     const variants = await prisma.productVariant.findMany({
       where: {
         stock: { gt: 0 }, // Filter out items with zero stock from active POS checkout
+        product: {
+          isActive: true, // ⭐ Delete කළ හෝ inactive කළ භාණ්ඩ POS grid එකෙන් සඟවයි
+        },
       },
       select: {
         id: true,

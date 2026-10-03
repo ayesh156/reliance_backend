@@ -87,10 +87,13 @@ model Customer {
   rep                User?        @relation("RepCustomers", fields: [repId], references: [id])
 
   orders             Order[]
+  // ⭐ Soft delete / Archive support: Keeps sales ledger history while hiding customer from UI
+  isActive           Boolean      @default(true)
   createdAt          DateTime     @default(now())
   updatedAt          DateTime     @updatedAt
 
   @@index([name])
+  @@index([isActive])
   @@map("customers")
 }
 
@@ -106,6 +109,9 @@ model Category {
   image       String?   @db.LongText
   status      String    @default("active")
   products    Product[]
+  // ⭐ Soft delete / Hide support: Preserves product relations without database constraint errors
+  isActive    Boolean   @default(true)
+  @@index([isActive])
   @@map("categories")
 }
 
@@ -139,11 +145,14 @@ model Product {
   reviews     Review[]
   images      ProductImage[]
   isFeatured  Boolean          @default(false)
+  // ⭐ Soft delete / Archive support: Retains sales order lines while hiding from POS & Catalog
+  isActive    Boolean          @default(true)
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
 
   @@index([name])
   @@index([searchKey])
+  @@index([isActive])
   @@map("products")
 }
 
@@ -336,10 +345,13 @@ model RawMaterialShop {
   
   purchases      BuyRawMaterial[]
   payments       SupplierPayment[]    // ⭐ Added relation to track supplier due debt payments
+  // ⭐ Soft delete / Deactivate support: Preserves purchase orders and debt audit logs
+  isActive       Boolean              @default(true)
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt
 
   @@index([name])
+  @@index([isActive])
   @@map("raw_material_shops")
 }
 
@@ -355,10 +367,13 @@ model RawMaterialItem {
 
   purchaseItems   BuyRawMaterialItem[]
   movements       RawMaterialMovement[] // ⭐ Added relation to track usage, scrap return, and wastage
+  // ⭐ Soft delete / Archive support: Retains stock movement ledger and GRN logs
+  isActive        Boolean              @default(true)
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
 
   @@index([name])
+  @@index([isActive])
   @@map("raw_material_items")
 }
 

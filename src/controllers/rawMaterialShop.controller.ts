@@ -67,15 +67,18 @@ export class RawMaterialShopController {
   }
 
   /**
-   * Delete a raw material supplier shop record.
-   * Protected against suppliers with existing purchase history orders.
+   * Delete or deactivate a raw material supplier shop record.
+   * ⭐ Marks as inactive if purchase orders exist instead of throwing 400 error.
    * Route parameter: :id
    */
   async delete(req: Request, res: Response, next: NextFunction) {
     try {
-      const id = Number(req.params.id);
+      const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const id = parseInt(String(rawId), 10);
+      if (!id || isNaN(id) || id <= 0) {
+        return res.status(400).json({ error: 'Valid positive supplier ID is required' });
+      }
       const result = await rawMaterialShopService.delete(id);
-      // HTTP 200 OK with deleted shop record
       return sendSuccess(res, result);
     } catch (err) {
       next(err);

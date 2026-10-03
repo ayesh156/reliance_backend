@@ -24,6 +24,7 @@ export const createCategory = async (req: Request, res: Response, next: NextFunc
 
 /**
  * Handle category deletion with strict parameter validation and array guard
+ * ⭐ Preserves product relations through soft delete if existing garments use this category
  */
 export const deleteCategory = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -32,8 +33,8 @@ export const deleteCategory = async (req: Request, res: Response, next: NextFunc
     if (!id || isNaN(id) || id <= 0) {
       return res.status(400).json({ error: 'Valid positive integer category ID is required' });
     }
-    await attributeService.deleteCategory(id);
-    sendSuccess(res, { success: true, message: 'Category deleted' });
+    const result = await attributeService.deleteCategory(id);
+    sendSuccess(res, result || { success: true, message: 'Category deleted or hidden successfully' });
   } catch (err) { next(err); }
 };
 

@@ -18,7 +18,10 @@ export class RawMaterialShopService {
    * Matches against name, contactPerson, phone, and address.
    */
   async getAll(search?: string) {
-    const where: any = {};
+    // ⭐ Only fetch active suppliers
+    const where: any = {
+      isActive: true,
+    };
     if (search && search.trim()) {
       const q = search.trim();
       where.OR = [
@@ -115,6 +118,10 @@ export class RawMaterialShopService {
    * Delete a raw material supplier shop record.
    * Ensures suppliers with associated purchase records cannot be accidentally deleted.
    */
+  /**
+   * ⭐ Soft-Delete Supplier Shop:
+   * Deactivates supplier if purchase orders exist to keep financial ledgers intact.
+   */
   async delete(id: number) {
     if (isNaN(id)) throw new HttpException(400, 'Invalid shop ID');
 
@@ -123,13 +130,15 @@ export class RawMaterialShopService {
     });
 
     if (purchaseCount > 0) {
-      throw new HttpException(
-        400,
-        `Cannot delete shop. It is associated with ${purchaseCount} purchase order(s).`
-      );
+      await prisma.rawMaterialShop.update({
+        where: { id },
+        data: { isActive: false },
+      });
+      return { success: true, message: 'Supplier shop disabled and removed from active list.' };
     }
 
-    return prisma.rawMaterialShop.delete({ where: { id } });
+    await prisma.rawMaterialShop.delete({ where: { id } });
+    return { success: true, message: 'Supplier shop deleted successfully.' };
   }
 }
 

@@ -34,7 +34,9 @@ export class RawMaterialItemService {
    */
   async getAll(filters: GetRawMaterialItemsFilter = {}) {
     const { search, unit, lowStockOnly } = filters;
-    const where: Prisma.RawMaterialItemWhereInput = {};
+    const where: Prisma.RawMaterialItemWhereInput = {
+      isActive: true, // ⭐ Exclude deactivated materials
+    };
 
     // Keyword search across Name, Code, and Description
     if (search && search.trim().length > 0) {
@@ -251,17 +253,19 @@ export class RawMaterialItemService {
       throw error;
     }
 
+    // GRN හෝ Purchase records සම්බන්ධ වී ඇත්නම් Soft-Delete (Deactivate) කිරීම
     if (existing._count.purchaseItems > 0) {
-      const error: any = new Error(
-        `Cannot delete raw material item '${existing.name}'. It is associated with ${existing._count.purchaseItems} purchase line item(s).`
-      );
-      error.statusCode = 400;
-      throw error;
+      await prisma.rawMaterialItem.update({
+        where: { id },
+        data: { isActive: false },
+      });
+      return { success: true, message: `Raw material item '${existing.name}' deactivated and removed from active list.` };
     }
 
-    return await prisma.rawMaterialItem.delete({
+    await prisma.rawMaterialItem.delete({
       where: { id },
     });
+    return { success: true, message: 'Raw material item permanently deleted.' };
   }
 
   /**

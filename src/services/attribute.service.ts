@@ -7,6 +7,7 @@ export class AttributeService {
    */
   async getCategories() {
     return prisma.category.findMany({
+      where: { isActive: true }, // ⭐ Only return active categories
       select: {
         id: true,
         name: true,
@@ -58,11 +59,17 @@ export class AttributeService {
     });
 
     if (!category) throw new HttpException(404, 'Category not found');
+    // මෙම Category එකට අදාළව Products ඇත්නම් Soft-Delete (isActive = false) කර List එකෙන් සැඟවීම
     if (category.products.length > 0) {
-      throw new HttpException(400, 'Cannot delete category assigned to existing products');
+      await prisma.category.update({
+        where: { id: Number(id) },
+        data: { isActive: false },
+      });
+      return { success: true, message: 'Category archived and hidden from dropdowns.' };
     }
 
-    return prisma.category.delete({ where: { id: Number(id) } });
+    await prisma.category.delete({ where: { id: Number(id) } });
+    return { success: true, message: 'Category deleted successfully.' };
   }
 
   /**

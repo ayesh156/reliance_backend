@@ -13,6 +13,7 @@ export class CustomerService {
     // Fetch customers with active non-cancelled order balances
     const customers = await prisma.customer.findMany({
       where: {
+        isActive: true, // ⭐ Exclude archived customers
         ...(type ? { type } : {}),
         ...(cleanQuery
           ? {
@@ -291,11 +292,17 @@ export class CustomerService {
       throw new HttpException(400, `Cannot delete customer with outstanding debt of Rs. ${activeDebt.toFixed(2)}`);
     }
 
+    // Orders තිබේ නම් (Debt = 0 අවස්ථාවේදී) customer deactivate කර list එකෙන් hide කිරීම
     if (customer.orders.length > 0) {
-      throw new HttpException(400, 'Cannot delete customer with historical orders (Financial Audit Trail Protection)');
+      await prisma.customer.update({
+        where: { id: Number(id) },
+        data: { isActive: false },
+      });
+      return { success: true, message: 'Customer archived and hidden from directory.' };
     }
 
-    return prisma.customer.delete({ where: { id: Number(id) } });
+    await prisma.customer.delete({ where: { id: Number(id) } });
+    return { success: true, message: 'Customer deleted successfully.' };
   }
 }
 

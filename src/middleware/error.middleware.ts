@@ -15,12 +15,18 @@ export class HttpException extends Error {
   }
 }
 
-/** Prisma error code → HTTP status + message mapping. */
+/** 
+ * ⭐ Prisma දෝෂ කේත පරිශීලකයාට තේරුම් ගත හැකි පැහැදිලි පණිවිඩ බවට පත් කිරීම
+ */
 const PRISMA_ERROR_MAP: Record<string, { status: number; message: string }> = {
   P2002: { status: 409, message: 'A record with this unique value already exists.' },
-  P2025: { status: 404, message: 'Record not found.' },
+  P2025: { status: 404, message: 'The requested record was not found or has already been removed.' },
   P2021: { status: 404, message: 'Table does not exist in the database.' },
-  P2003: { status: 400, message: 'Foreign key constraint failed.' },
+  // ⭐ Foreign key බිඳවැටීම් සඳහා පැහැදිලි පණිවිඩයක් ලබා දීම
+  P2003: { 
+    status: 400, 
+    message: 'Cannot delete or modify this item because it is linked to active transactions, orders, or suppliers.' 
+  },
 };
 
 /** Whether a value looks like a Prisma error (has a numeric `code`). */
@@ -44,9 +50,13 @@ export function errorMiddleware(
   res: Response,
   _next: NextFunction
 ): void {
-  // Expected custom errors
+  // Expected custom errors (Frontend එකට message සහ error යන දෙකම යැවීම)
   if (err instanceof HttpException) {
-    res.status(err.status).json({ error: err.message });
+    res.status(err.status).json({ 
+      success: false,
+      error: err.message, 
+      message: err.message 
+    });
     return;
   }
 
@@ -59,10 +69,56 @@ export function errorMiddleware(
         if (target.includes('barcode')) fieldName = 'Barcode';
         else if (target.includes('sku')) fieldName = 'SKU';
         else if (target.includes('email')) fieldName = 'Email Address';
+        else if (target.includes('phone')) fieldName = 'Phone Number';
       } else if (Array.isArray(target)) {
         fieldName = target.join(', ');
       }
-      res.status(409).json({ error: `A record with this ${fieldName} already exists in the system.` });
+      const msg = `A record with this ${fieldName} already exists in the system.`;
+      res.status(409).json({ success: false, error: msg, message: msg });
+      return;
+    }
+
+    if (PRISMA_ERROR_MAP[err.code]) {
+      const mapped = PRISMA_ERROR_MAP[err.code];
+      res.status(mapped.status).json({ 
+        success: false,
+        error: mapped.message, 
+        message: mapped.message 
+      });
+      return;
+    }
+  }
+
+  // Prisma known errors
+  if (isPrismaError(err)) {
+    if (err.code === 'P2002') {
+      const target = (err as any).meta?.target;
+      const rawMsg = String((err as any).message || '');
+      let fieldName = 'unique value';
+
+      const checkString = (typeof target === 'string' ? target : Array.isArray(target) ? target.join(' ') : '') + ' ' + rawMsg;
+
+      if (/sku/i.test(checkString)) {
+        fieldName = 'SKU (Item Code)';
+      } else if (/barcode/i.test(checkString)) {
+        fieldName = 'Barcode';
+      } else if (/phone/i.test(checkString)) {
+        fieldName = 'Phone Number';
+      } else if (/email/i.test(checkString)) {
+        fieldName = 'Email Address';
+      } else if (/invoice/i.test(checkString)) {
+        fieldName = 'Invoice Number';
+      } else if (/name|title/i.test(checkString)) {
+        fieldName = 'Name / Title';
+      }
+
+      const cleanMessage = `A product or record with this ${fieldName} is already registered in the system. Please enter a different one.`;
+      
+      res.status(409).json({
+        success: false,
+        error: cleanMessage,
+        message: cleanMessage,
+      });
       return;
     }
 

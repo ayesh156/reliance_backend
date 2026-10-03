@@ -84,6 +84,7 @@ export const updateCustomer = async (req: Request, res: Response, next: NextFunc
 
 /**
  * Handle safe deletion of customer record with strict ID validation
+ * ⭐ Handles soft deletion/archiving gracefully when orders or debt ledgers exist
  */
 export const deleteCustomer = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -92,8 +93,8 @@ export const deleteCustomer = async (req: Request, res: Response, next: NextFunc
     if (!id || isNaN(id) || id <= 0) {
       return res.status(400).json({ error: 'Valid positive integer customer ID is required' });
     }
-    await customerService.deleteCustomer(id);
-    sendSuccess(res, { success: true, message: 'Customer record deleted' });
+    const result = await customerService.deleteCustomer(id);
+    sendSuccess(res, result || { success: true, message: 'Customer record deleted or archived successfully' });
   } catch (err) {
     next(err);
   }

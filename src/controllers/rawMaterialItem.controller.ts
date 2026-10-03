@@ -76,7 +76,8 @@ export class RawMaterialItemController {
   }
 
   /**
-   * Delete a raw material item with ID guard
+   * Delete or archive a raw material item with ID guard
+   * ⭐ Deactivates item if stock movements or supplier purchases are attached
    */
   async delete(req: Request, res: Response, next: NextFunction) {
     try {
@@ -86,7 +87,7 @@ export class RawMaterialItemController {
         return res.status(400).json({ error: 'Valid positive integer item ID is required' });
       }
       const result = await rawMaterialItemService.delete(id);
-      return sendSuccess(res, result);
+      return sendSuccess(res, result || { success: true, message: 'Raw material item removed or deactivated' });
     } catch (err) {
       next(err);
     }

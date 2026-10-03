@@ -73,7 +73,7 @@ export class ProductController {
     }
   }
 
-  /** DELETE /api/products/:id — Delete product with param validation */
+  /** DELETE /api/products/:id — Delete or archive product safely */
   async remove(req: Request, res: Response): Promise<void> {
     try {
       const id = Number(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id);
@@ -81,8 +81,8 @@ export class ProductController {
         res.status(400).json({ error: 'Valid positive integer product ID is required' });
         return;
       }
-      await productService.deleteProduct(id);
-      sendNoContent(res);
+      const result = await productService.deleteProduct(id);
+      res.json(result);
     } catch (error) {
       console.error('[ProductController] Error deleting product:', error);
       sendErrorFrom(res, error, 'Failed to delete product');
