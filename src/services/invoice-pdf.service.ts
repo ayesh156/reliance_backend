@@ -27,9 +27,19 @@ export class InvoicePdfService {
     const subtotalVal = Number(order.subtotal || 0);
     const paymentMethodLabel = order.paymentMethod ? order.paymentMethod.toUpperCase() : 'CASH';
 
-    // Dynamic Old Bill check
-    const prevBalance = Number(order.customer?.outstandingBalance || order.prevBalance || 0);
-    const hasOldBill = Boolean(order.customerId || order.customer?.id) && prevBalance > 0;
+    // ⭐ Enterprise Credit Synchronization: Prevents Double-Counting on PDF Re-print
+    const isCreditOrder = paymentMethodLabel.includes('CREDIT') || balanceDue > 0;
+    const currentBillCredit = isCreditOrder ? (balanceDue > 0 ? balanceDue : total) : 0;
+    
+    // Total live balance recorded in database
+    const liveCustomerBalance = Number(order.customer?.outstandingBalance ?? order.prevBalance ?? 0);
+    
+    // True prior debt is: live balance MINUS this invoice's credit.
+    const truePreviousDue = Math.max(0, Math.round((liveCustomerBalance - currentBillCredit) * 100) / 100);
+    const hasOldBill = Boolean(order.customerId || order.customer?.id) && truePreviousDue > 0.01;
+    
+    // Cumulative total outstanding
+    const grandTotalCreditDue = Math.round((currentBillCredit + truePreviousDue) * 100) / 100;
 
     let discountDisplay = 'Discount:';
     if (discountVal > 0) {
@@ -147,16 +157,30 @@ export class InvoicePdfService {
     let curY = tableTop + 24;
 
     (order.items || []).forEach((item: any, idx: number) => {
-      // Safe fallback guards avoiding nested property crashes when variant/product relations are missing
       const variantObj = item.variant || {};
       const productObj = variantObj.product || {};
       const styleNo = variantObj.sku || variantObj.styleNo || item.sku || `STY-${String(idx + 1).padStart(3, '0')}`;
       const name = productObj.name || item.productName || item.name || 'Garment Item';
       const sizeStr = variantObj.size || item.size || '';
       const colorStr = variantObj.color || item.color || '';
-      const meta = sizeStr || colorStr
-        ? `Size: ${sizeStr || 'FREE'} | Color: ${colorStr || 'Default'}`
-        : '';
+      const meta = sizeStr || colorStr ? `Size: ${sizeStr || 'FREE'} | Color: ${colorStr || 'Default'}` : '';
+
+      const rowHeight = meta ? 28 : 20;
+
+      // ⭐ Safe Page Break Guard: Prevents items from printing outside A4 bounds
+      if (curY + rowHeight > 780) {
+        doc.addPage();
+        curY = 50; // Reset to top of new page
+        
+        // Re-draw table header on new page for better readability
+        doc.moveTo(startX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('#000000');
+        doc.text('#', colX.num, curY + 6, { width: colWidths.num, align: 'center', lineBreak: false });
+        doc.text('ITEM DESCRIPTION', colX.desc + 3, curY + 6, { width: colWidths.desc - 3, align: 'left', lineBreak: false });
+        doc.text('AMOUNT', colX.amt, curY + 6, { width: colWidths.amt - 3, align: 'right', lineBreak: false });
+        doc.moveTo(startX, curY + 18).lineTo(rightMargin, curY + 18).lineWidth(1.2).strokeColor('#000000').stroke();
+        curY += 24;
+      }
 
       doc.fontSize(8.6).font('Helvetica-Bold').fillColor('#444444').text(String(idx + 1), colX.num, curY, { width: colWidths.num, align: 'center', lineBreak: false });
       doc.font('Helvetica-Bold').fillColor('#000000').text(styleNo, colX.style + 3, curY, { width: colWidths.style - 3, lineBreak: false });
@@ -170,31 +194,12 @@ export class InvoicePdfService {
       doc.font('Helvetica-Bold').text(String(item.quantity), colX.qty, curY, { width: colWidths.qty, align: 'center', lineBreak: false });
       doc.text(`Rs ${Number(item.price).toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, colX.amt, curY, { width: colWidths.amt - 3, align: 'right', lineBreak: false });
 
-      curY += meta ? 28 : 20;
+      curY += rowHeight;
       // Dashed row separator
       doc.moveTo(startX, curY - 4).lineTo(rightMargin, curY - 4).lineWidth(0.75).strokeColor('#bbbbbb').dash(2, { space: 2 }).stroke().undash();
     });
 
-    // ── Dynamic Old Bill Row (Colors matching frontend monochrome CSS override) ──
-    if (hasOldBill) {
-      const oldBillLabelWidth = (colX.amt - startX) - 13.5;
-      
-      doc.fontSize(8).font('Helvetica-Bold').fillColor('#000000').text('OLD BILL (PREVIOUS DUE)', startX, curY + 5, { 
-        width: oldBillLabelWidth, 
-        align: 'right', 
-        characterSpacing: 0.5,
-        lineBreak: false 
-      });
-      doc.fontSize(8.6).font('Helvetica-Bold').fillColor('#000000').text(
-        `Rs ${prevBalance.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, 
-        colX.amt, 
-        curY + 5, 
-        { width: colWidths.amt - 3, align: 'right', lineBreak: false }
-      );
-      curY += 24;
-    } else {
-      curY += 12;
-    }
+    curY += 12; // Gap before summary (Old bill row completely removed from here)
 
     // ── 4. FINANCIAL SUMMARY SECTION ──
     const sumX = rightMargin - 202.5;
@@ -220,9 +225,11 @@ export class InvoicePdfService {
     doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.8).strokeColor('#000000').stroke();
     curY += 8;
 
-    doc.fontSize(9).font('Helvetica').text(`Customer Tendered (${paymentMethodLabel})`, sumX, curY, { lineBreak: false });
-    doc.font('Helvetica-Bold').fontSize(9.4).text(`Rs ${paid.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, sumX, curY, { width: sumValueWidth, align: 'right', lineBreak: false });
-    curY += 16;
+    if (paid > 0) {
+      doc.fontSize(9).font('Helvetica').text(`Customer Tendered (${paymentMethodLabel})`, sumX, curY, { lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(9.4).text(`Rs ${paid.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, sumX, curY, { width: sumValueWidth, align: 'right', lineBreak: false });
+      curY += 16;
+    }
 
     if (change > 0) {
       doc.fontSize(9).font('Helvetica').text('Change', sumX, curY, { lineBreak: false });
@@ -230,20 +237,39 @@ export class InvoicePdfService {
       curY += 16;
     }
 
-    if (balanceDue > 0) {
-      doc.fontSize(9).font('Helvetica-Bold').text('Credit / Balance Due', sumX, curY, { lineBreak: false });
-      doc.fontSize(9.4).text(`- Rs ${balanceDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, sumX, curY, { width: sumValueWidth, align: 'right', lineBreak: false });
+    if (balanceDue > 0 && paid > 0) {
+      doc.fontSize(9).font('Helvetica-Bold').text('Bill Balance Due', sumX, curY, { lineBreak: false });
+      doc.fontSize(9.4).text(`Rs ${balanceDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, sumX, curY, { width: sumValueWidth, align: 'right', lineBreak: false });
       curY += 16;
     }
 
-    // ── 5. SIGNATURES (Pinned to A4 Page Bottom with Multi-page Overflow Protection) ──
-    const pinnedSigY = 740;
-    let sigY = pinnedSigY;
+    // ⭐ Combined Total Debt Calculation (Frontend Parity)
+    if (hasOldBill) {
+      doc.fontSize(9.4).font('Helvetica-Bold').fillColor('#000000').text('Previous Due (Old Bills)', sumX, curY, { lineBreak: false });
+      doc.fontSize(10).text(`Rs ${truePreviousDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, sumX, curY, { width: sumValueWidth, align: 'right', lineBreak: false });
+      curY += 18;
 
-    // If financial summary extends near or over the footer area, wrap safely to the next page
-    if (curY > 700) {
+      doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
+      curY += 6;
+      doc.fontSize(10.5).font('Helvetica-Bold').text('Total Accumulated Credit Due', sumX, curY, { lineBreak: false });
+      doc.fontSize(11.5).text(`Rs ${grandTotalCreditDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, sumX, curY, { width: sumValueWidth, align: 'right', lineBreak: false });
+      curY += 16;
+      doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(2).strokeColor('#000000').stroke();
+      curY += 12;
+    }
+
+    // ── 5. SIGNATURES (Dynamically positioned with a generous 1-inch gap) ──
+    
+    // Require at least 80px (approx 1 inch gap + signature lines) space to print signatures on the same page.
+    // If not enough space before footer policy (approx Y: 776), move to a new page.
+    let sigY = curY + 65; // ~1 inch gap from the bottom of the summary
+    
+    if (sigY + 30 > 750) {
       doc.addPage();
-      sigY = pinnedSigY;
+      sigY = 700; // Place cleanly at the bottom of the new page
+    } else {
+      // Pin to bottom if there's plenty of space, otherwise keep the 1-inch gap
+      sigY = Math.max(sigY, 720); 
     }
 
     const sigWidth = 95; 
