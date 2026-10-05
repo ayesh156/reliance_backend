@@ -2,7 +2,7 @@ import type { Request } from 'express';
 import { prisma } from '../lib/prisma.ts';
 import { deleteLocalFile } from '../utils/fileHandler.ts';
 import { HttpException } from '../middleware/error.middleware.ts';
-import { sanitizeSafePrice, sanitizeSafeStock, validateProductPayload } from '../utils/validators.ts';
+import { sanitizeSafePrice, sanitizeSafeStock, validateProductPayload, sanitizeMultiValue } from '../utils/validators.ts';
 
 const productInclude = {
   category: true,
@@ -211,8 +211,8 @@ export class ProductService {
             const stock = Math.max(0, parseInt(String(v.stock || 0), 10) || 0);
 
             return {
-              size: v.size?.trim() ? String(v.size).trim().slice(0, 50) : null,
-              color: v.color?.trim() ? String(v.color).trim().slice(0, 50) : null,
+              size: sanitizeMultiValue(v.size),
+              color: sanitizeMultiValue(v.color),
               sku: v.sku?.trim() ? String(v.sku).trim().slice(0, 100) : `SKU-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
               barcode: cleanBarcode ? cleanBarcode.slice(0, 100) : null,
               costPrice,
@@ -383,8 +383,8 @@ export class ProductService {
 
           // Enterprise Security Validation: සෘණ අගයන් සහ Database බිඳවැටීම් වළක්වයි
           const variantData = {
-            size: v.size?.trim() ? String(v.size).trim().slice(0, 50) : null,
-            color: v.color?.trim() ? String(v.color).trim().slice(0, 50) : null,
+            size: sanitizeMultiValue(v.size),
+            color: sanitizeMultiValue(v.color),
             sku: v.sku?.trim() || `SKU-${id}-${Date.now().toString().slice(-4)}`,
             barcode: cleanBarcode,
             costPrice: sanitizeSafePrice(v.costPrice),

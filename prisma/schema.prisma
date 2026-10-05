@@ -144,6 +144,7 @@ model Product {
   variants    ProductVariant[]
   reviews     Review[]
   images      ProductImage[]
+  productionOrders ProductionOrder[]
   isFeatured  Boolean          @default(false)
   // ⭐ Soft delete / Archive support: Retains sales order lines while hiding from POS & Catalog
   isActive    Boolean          @default(true)
@@ -172,6 +173,7 @@ model ProductVariant {
   
   images         ProductImage[]
   orderItems     OrderItem[]
+  productionOrders ProductionOrder[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
@@ -368,6 +370,7 @@ model RawMaterialItem {
 
   purchaseItems   BuyRawMaterialItem[]
   movements       RawMaterialMovement[] // ⭐ Added relation to track usage, scrap return, and wastage
+  productionUsages ProductionMaterialUsage[]
   // ⭐ Soft delete / Archive support: Retains stock movement ledger and GRN logs
   isActive        Boolean              @default(true)
   createdAt       DateTime             @default(now())
@@ -475,4 +478,55 @@ model SupplierPayment {
   @@index([buyRawMaterialId])
   @@index([paymentDate])
   @@map("supplier_payments")
+}
+
+// ----------------------------------------------------
+// GARMENT PRODUCTION & MATERIAL CONSUMPTION
+// ----------------------------------------------------
+
+model ProductionOrder {
+  id              Int                       @id @default(autoincrement())
+  productionNo    String                    @unique @map("production_no")
+  productId       Int                       @map("product_id")
+  product         Product                   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variantId       Int?                      @map("variant_id")
+  variant         ProductVariant?           @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  targetQuantity  Int                       @default(0) @map("target_quantity")
+  completedQty    Int                       @default(0) @map("completed_qty")
+  status          String                    @default("COMPLETED")
+  reason          String?                   @db.Text
+  notes           String?                   @db.Text
+  productionDate  DateTime                  @default(now()) @map("production_date")
+  
+  materialUsages  ProductionMaterialUsage[]
+  
+  createdAt       DateTime                  @default(now()) @map("created_at")
+  updatedAt       DateTime                  @updatedAt @map("updated_at")
+
+  @@index([productId])
+  @@index([variantId])
+  @@index([productionDate])
+  @@index([productionNo])
+  @@map("production_orders")
+}
+
+model ProductionMaterialUsage {
+  id                Int             @id @default(autoincrement())
+  productionOrderId Int             @map("production_order_id")
+  productionOrder   ProductionOrder @relation(fields: [productionOrderId], references: [id], onDelete: Cascade)
+  rawMaterialId     Int             @map("raw_material_id")
+  rawMaterial       RawMaterialItem @relation(fields: [rawMaterialId], references: [id], onDelete: Cascade)
+  
+  issuedQty         Float           @map("issued_qty")
+  returnedQty       Float           @default(0) @map("returned_qty")
+  netConsumedQty    Float           @map("net_consumed_qty")
+  unitCost          Float           @default(0) @map("unit_cost")
+  returnReason      String?         @map("return_reason") @db.Text
+  
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+
+  @@index([productionOrderId])
+  @@index([rawMaterialId])
+  @@map("production_material_usages")
 }

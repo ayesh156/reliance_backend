@@ -201,11 +201,24 @@ export class InvoicePdfService {
       const productObj = variantObj.product || {};
       const styleNo = variantObj.sku || variantObj.styleNo || item.sku || `STY-${String(idx + 1).padStart(3, '0')}`;
       const name = productObj.name || item.productName || item.name || 'Garment Item';
-      const sizeStr = variantObj.size || item.size || '';
-      const colorStr = variantObj.color || item.color || '';
+      const sizeStr = item.sizes || item.size || item.selectedSize || variantObj.sizes || variantObj.size || '';
+      const colorStr = item.colors || item.color || item.selectedColor || variantObj.colors || variantObj.color || '';
       const meta = sizeStr || colorStr ? `Size: ${sizeStr || 'FREE'} | Color: ${colorStr || 'Default'}` : '';
 
-      const rowHeight = meta ? 28 : 20;
+      const descAvailableWidth = colWidths.desc - 6;
+
+      // Calculate dynamic text height for Item Description column
+      doc.fontSize(9).font('Helvetica-Bold');
+      const nameHeight = doc.heightOfString(name, { width: descAvailableWidth });
+
+      let metaHeight = 0;
+      if (meta) {
+        doc.fontSize(7.8).font('Helvetica');
+        metaHeight = doc.heightOfString(meta, { width: descAvailableWidth });
+      }
+
+      const totalDescHeight = nameHeight + (meta ? metaHeight + 2 : 0);
+      const rowHeight = Math.max(22, totalDescHeight + 8);
 
       // ⭐ Safe Page Break Guard: Prevents items from printing outside A4 bounds
       if (curY + rowHeight > 780) {
@@ -216,7 +229,10 @@ export class InvoicePdfService {
         doc.moveTo(startX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
         doc.fontSize(8).font('Helvetica-Bold').fillColor('#000000');
         doc.text('#', colX.num, curY + 6, { width: colWidths.num, align: 'center', lineBreak: false });
+        doc.text('STYLE NO', colX.style + 3, curY + 6, { width: colWidths.style - 3, align: 'left', lineBreak: false });
         doc.text('ITEM DESCRIPTION', colX.desc + 3, curY + 6, { width: colWidths.desc - 3, align: 'left', lineBreak: false });
+        doc.text('UNIT PRICE', colX.price, curY + 6, { width: colWidths.price - 13.5, align: 'right', lineBreak: false });
+        doc.text('QTY', colX.qty, curY + 6, { width: colWidths.qty, align: 'center', lineBreak: false });
         doc.text('AMOUNT', colX.amt, curY + 6, { width: colWidths.amt - 3, align: 'right', lineBreak: false });
         doc.moveTo(startX, curY + 18).lineTo(rightMargin, curY + 18).lineWidth(1.2).strokeColor('#000000').stroke();
         curY += 24;
@@ -224,10 +240,13 @@ export class InvoicePdfService {
 
       doc.fontSize(8.6).font('Helvetica-Bold').fillColor('#444444').text(String(idx + 1), colX.num, curY, { width: colWidths.num, align: 'center', lineBreak: false });
       doc.font('Helvetica-Bold').fillColor('#000000').text(styleNo, colX.style + 3, curY, { width: colWidths.style - 3, lineBreak: false });
-      doc.fontSize(9).font('Helvetica-Bold').text(name, colX.desc + 3, curY, { width: colWidths.desc - 3 });
+      
+      // Item Description (Title + Multi-line Variant Wrap)
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#000000').text(name, colX.desc + 3, curY, { width: descAvailableWidth });
 
       if (meta) {
-        doc.fontSize(7.8).font('Helvetica').fillColor('#555555').text(meta, colX.desc + 3, curY + 12, { width: colWidths.desc - 3, lineBreak: false });
+        const metaY = curY + nameHeight + 2;
+        doc.fontSize(7.8).font('Helvetica').fillColor('#555555').text(meta, colX.desc + 3, metaY, { width: descAvailableWidth, lineBreak: true });
       }
 
       doc.fontSize(8.6).font('Helvetica').fillColor('#000000').text(`Rs ${Number(item.unitPrice).toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, colX.price, curY, { width: colWidths.price - 13.5, align: 'right', lineBreak: false });

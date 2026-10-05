@@ -137,13 +137,21 @@ export class OrderService {
         }
       }
 
+      const itemVariants = (data.items || []).map((i: any) => ({
+        variantId: Number(i.variantId),
+        size: i.size || i.selectedSize || '',
+        color: i.color || i.selectedColor || '',
+      }));
+
+      const hasItemVariants = itemVariants.some((iv: any) => iv.size || iv.color);
       let finalOrderNotes: string | null = cleanUserNote || null;
-      if ((data.splitPayments && data.splitPayments.length > 0) || (data.cheques && data.cheques.length > 0)) {
+      if ((data.splitPayments && data.splitPayments.length > 0) || (data.cheques && data.cheques.length > 0) || hasItemVariants) {
         try {
           finalOrderNotes = JSON.stringify({
             userNotes: cleanUserNote,
             splitPayments: data.splitPayments || [],
             cheques: data.cheques || (data.splitPayments ? data.splitPayments.filter((s) => s.method === 'CHEQUE') : []),
+            itemVariants: hasItemVariants ? itemVariants : undefined,
           });
         } catch {
           finalOrderNotes = cleanUserNote || null;
@@ -499,6 +507,16 @@ export class OrderService {
         if (typeof current === 'object' && current !== null) {
           if (Array.isArray(current.splitPayments)) splitPayments = current.splitPayments;
           if (Array.isArray(current.cheques)) parsedCheques = current.cheques;
+          if (Array.isArray(current.itemVariants)) {
+            (order.items || []).forEach((it: any, idx: number) => {
+              if (current.itemVariants[idx]) {
+                it.size = current.itemVariants[idx].size;
+                it.color = current.itemVariants[idx].color;
+                it.selectedSize = current.itemVariants[idx].size;
+                it.selectedColor = current.itemVariants[idx].color;
+              }
+            });
+          }
           userNotes = current.userNotes || '';
         } else {
           userNotes = String(current || '');
@@ -749,13 +767,21 @@ export class OrderService {
         }
       }
 
+      const itemVariants = (data.items || []).map((i: any) => ({
+        variantId: Number(i.variantId),
+        size: i.size || i.selectedSize || '',
+        color: i.color || i.selectedColor || '',
+      }));
+      const hasItemVariants = itemVariants.some((iv: any) => iv.size || iv.color);
+
       let finalOrderNotes: string | null = cleanUserNote || null;
-      if ((data.splitPayments && data.splitPayments.length > 0) || (data.cheques && data.cheques.length > 0)) {
+      if ((data.splitPayments && data.splitPayments.length > 0) || (data.cheques && data.cheques.length > 0) || hasItemVariants) {
         try {
           finalOrderNotes = JSON.stringify({
             userNotes: cleanUserNote,
             splitPayments: data.splitPayments || [],
             cheques: data.cheques || (data.splitPayments ? data.splitPayments.filter((s) => s.method === 'CHEQUE') : []),
+            itemVariants: hasItemVariants ? itemVariants : undefined,
           });
         } catch {
           finalOrderNotes = cleanUserNote || null;
@@ -870,6 +896,26 @@ export class OrderService {
     // Attach resolved customer address into shippingAddress fallback for identical receipt alignment
     if (order.customer?.address && !order.shippingAddress) {
       (order as any).shippingAddress = order.customer.address;
+    }
+
+    // Hydrate item custom size and color from notes
+    if (order.notes) {
+      try {
+        let current: any = order.notes;
+        while (typeof current === 'string' && current.trim().startsWith('{')) {
+          current = JSON.parse(current);
+        }
+        if (typeof current === 'object' && current !== null && Array.isArray(current.itemVariants)) {
+          (order.items || []).forEach((it: any, idx: number) => {
+            if (current.itemVariants[idx]) {
+              it.size = current.itemVariants[idx].size;
+              it.color = current.itemVariants[idx].color;
+              it.selectedSize = current.itemVariants[idx].size;
+              it.selectedColor = current.itemVariants[idx].color;
+            }
+          });
+        }
+      } catch {}
     }
 
     return InvoicePdfService.generate(order);

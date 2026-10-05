@@ -10,6 +10,7 @@ import rawMaterialItemRoutes from './rawMaterialItem.routes.ts';
 import buyRawMaterialRoutes from './buyRawMaterial.routes.ts';
 import customerCreditRoutes from './customerCredit.routes.ts';
 import paymentRoutes from './payment.routes.ts';
+import productionRoutes from './production.routes.ts';
 
 const router = Router();
 
@@ -27,5 +28,6 @@ router.use('/raw-material-shops', rawMaterialShopRoutes);
 router.use('/raw-material-items', rawMaterialItemRoutes);
 router.use('/credit', customerCreditRoutes);
 router.use('/payments', paymentRoutes);
+router.use('/production', productionRoutes);
 
 export default router;

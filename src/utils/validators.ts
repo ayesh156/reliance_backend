@@ -53,3 +53,18 @@ export const validateProductPayload = (
   }
   return { isValid: true };
 };
+
+/**
+ * Sanitize multi-value variant strings (colors and sizes)
+ * Handles comma-separated values, removes dangerous characters, trims, deduplicates, and limits length.
+ */
+export const sanitizeMultiValue = (val?: any): string | null => {
+  if (!val || typeof val !== 'string') return null;
+  const tokens = val
+    .split(',')
+    .map((s) => s.trim().replace(/[<>"/\\{}]/g, ''))
+    .filter(Boolean);
+  const unique = Array.from(new Set(tokens));
+  if (unique.length === 0) return null;
+  return unique.join(', ').slice(0, 190);
+};
