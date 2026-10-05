@@ -193,6 +193,10 @@ export const settleCustomerDebt = async (req: Request, res: Response, next: Next
           .filter((id: number) => !isNaN(id) && id > 0)
       : [];
 
+    const paymentDate = req.body.paymentDate && !isNaN(new Date(req.body.paymentDate).getTime())
+      ? new Date(req.body.paymentDate)
+      : new Date();
+
     const result = await orderService.settleCustomerDebt({
       customerId,
       amount,
@@ -200,6 +204,7 @@ export const settleCustomerDebt = async (req: Request, res: Response, next: Next
       selectedInvoiceIds,
       paymentMethod: typeof req.body.paymentMethod === 'string' ? req.body.paymentMethod.trim().slice(0, 30) : 'CASH',
       notes: typeof req.body.notes === 'string' ? req.body.notes.trim().slice(0, 255) : undefined,
+      paymentDate,
     });
     sendSuccess(res, result);
   } catch (err) {

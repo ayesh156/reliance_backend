@@ -10,8 +10,7 @@ export class CustomerService {
   async getCustomers(query?: string, type?: CustomerType) {
     const cleanQuery = query ? query.trim().slice(0, 100) : undefined;
 
-    // Fetch customers with active non-cancelled order balances
-    const customers = await prisma.customer.findMany({
+    return prisma.customer.findMany({
       where: {
         isActive: true, // ⭐ Exclude archived customers
         ...(type ? { type } : {}),
@@ -34,6 +33,7 @@ export class CustomerService {
         address: true,
         city: true,
         creditLimit: true,
+        outstandingBalance: true,
         notes: true,
         nic: true,
         repId: true,
@@ -42,39 +42,14 @@ export class CustomerService {
         rep: {
           select: { id: true, name: true },
         },
-        // Fetch active non-cancelled order balances to eliminate financial drift
-        orders: {
-          where: {
-            status: { not: 'CANCELLED' },
-          },
-          select: {
-            totalAmount: true,
-            paidAmount: true,
-          },
-        },
       },
       orderBy: { createdAt: 'desc' },
       take: 200,
     });
-
-    // Compute live aggregated outstanding debt per customer
-    return customers.map((c) => {
-      const liveDueAmount = c.orders.reduce((sum, order) => {
-        const total = Number(order.totalAmount) || 0;
-        const paid = Number(order.paidAmount) || 0;
-        return sum + Math.max(0, total - paid);
-      }, 0);
-
-      const { orders, ...safeCustomer } = c;
-      return {
-        ...safeCustomer,
-        outstandingBalance: Math.round(liveDueAmount * 100) / 100,
-      };
-    });
   }
 
   /**
-   * Retrieve a single customer profile by primary key ID with live aggregated debt
+   * Retrieve a single customer profile by primary key ID
    */
   async getCustomerById(id: number) {
     const customer = await prisma.customer.findUnique({
@@ -101,38 +76,7 @@ export class CustomerService {
       throw new HttpException(404, 'Customer record not found');
     }
 
-    // Dynamic debt calculation from all non-cancelled customer orders (without pagination truncation)
-    const allUnpaidOrders = await prisma.order.findMany({
-      where: {
-        customerId: Number(id),
-        status: { not: 'CANCELLED' },
-      },
-      select: {
-        totalAmount: true,
-        paidAmount: true,
-      },
-    });
-
-    const liveDueAmount = allUnpaidOrders.reduce((sum, order) => {
-      const total = Number(order.totalAmount) || 0;
-      const paid = Number(order.paidAmount) || 0;
-      return sum + Math.max(0, total - paid);
-    }, 0);
-
-    const calculatedOutstanding = Math.round(liveDueAmount * 100) / 100;
-
-    // Synchronize customer.outstandingBalance if drift detected
-    if (Math.abs(customer.outstandingBalance - calculatedOutstanding) > 0.01) {
-      await prisma.customer.update({
-        where: { id: Number(id) },
-        data: { outstandingBalance: calculatedOutstanding },
-      });
-    }
-
-    return {
-      ...customer,
-      outstandingBalance: calculatedOutstanding,
-    };
+    return customer;
   }
 
   /**
@@ -146,6 +90,7 @@ export class CustomerService {
     address?: string;
     city?: string;
     creditLimit?: number;
+    outstandingBalance?: number;
     notes?: string;
     nic?: string;
     repId?: number;
@@ -186,8 +131,8 @@ export class CustomerService {
       }
     }
 
-    // Negative credit limit වැළැක්වීම සහ strings sanitize කිරීම
     const sanitizedCreditLimit = Math.max(0, Number(data.creditLimit) || 0);
+    const sanitizedOutstandingBalance = Number(data.outstandingBalance) || 0;
 
     return prisma.customer.create({
       data: {
@@ -198,6 +143,7 @@ export class CustomerService {
         address: data.address?.trim() ? data.address.trim().slice(0, 255) : null,
         city: data.city?.trim() ? data.city.trim().slice(0, 100) : null,
         creditLimit: sanitizedCreditLimit,
+        outstandingBalance: sanitizedOutstandingBalance,
         notes: data.notes?.trim() ? data.notes.trim().slice(0, 500) : null,
         nic: data.nic?.trim() ? data.nic.trim().slice(0, 20) : null,
         repId: data.repId && !isNaN(Number(data.repId)) && Number(data.repId) > 0 ? Number(data.repId) : null,
@@ -218,6 +164,7 @@ export class CustomerService {
       address?: string;
       city?: string;
       creditLimit?: number;
+      outstandingBalance?: number;
       notes?: string;
       nic?: string;
       repId?: number;
@@ -258,9 +205,12 @@ export class CustomerService {
       }
     }
 
-    // Credit limit එක negative වීම වැළැක්වීම
     const updatedCreditLimit = data.creditLimit !== undefined
       ? Math.max(0, Number(data.creditLimit) || 0)
+      : undefined;
+
+    const updatedOutstandingBalance = data.outstandingBalance !== undefined
+      ? Number(data.outstandingBalance) || 0
       : undefined;
 
     return prisma.customer.update({
@@ -273,6 +223,7 @@ export class CustomerService {
         address: data.address !== undefined ? (data.address ? data.address.trim().slice(0, 255) : null) : undefined,
         city: data.city !== undefined ? (data.city ? data.city.trim().slice(0, 100) : null) : undefined,
         creditLimit: updatedCreditLimit,
+        ...(updatedOutstandingBalance !== undefined ? { outstandingBalance: updatedOutstandingBalance } : {}),
         notes: data.notes !== undefined ? (data.notes ? data.notes.trim().slice(0, 500) : null) : undefined,
         nic: data.nic !== undefined ? (data.nic ? data.nic.trim().slice(0, 20) : null) : undefined,
         repId: data.repId !== undefined ? (data.repId && !isNaN(Number(data.repId)) && Number(data.repId) > 0 ? Number(data.repId) : null) : undefined,

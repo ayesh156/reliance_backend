@@ -27,8 +27,23 @@ export class OrderService {
     paidAmount?: number;
     settledDueAmount?: number;
     excessMode?: string;
-    paymentMethod: string; // CASH, CARD, CREDIT, CHEQUE
+    paymentMethod: string; // CASH, CARD, CREDIT, CHEQUE, BANK_TRANSFER
     notes?: string;
+    splitPayments?: Array<{
+      id?: string;
+      method: string;
+      amount: number | string;
+      date?: string | Date;
+      chequeNumber?: string;
+      bankName?: string;
+      reference?: string;
+    }>;
+    cheques?: Array<{
+      chequeNumber?: string;
+      bankName?: string;
+      chequeDate?: string | Date;
+      amount: number | string;
+    }>;
   }) {
     if (!data.items || data.items.length === 0) {
       throw new HttpException(400, 'Order must contain at least one item');
@@ -74,6 +89,67 @@ export class OrderService {
       const sanitizedSettledDue = Math.max(0, Number(data.settledDueAmount) || 0);
       const isFullPaid = paid >= total;
 
+      // Prepare Multi-Split, Multi-Cheque or standard payments
+      let paymentCreateEntries: any[] = [];
+      if (data.splitPayments && Array.isArray(data.splitPayments) && data.splitPayments.length > 0) {
+        paymentCreateEntries = data.splitPayments
+          .filter((s) => Number(s.amount) > 0)
+          .map((s) => {
+            let ref = s.reference || '';
+            if (s.method === 'CHEQUE') {
+              ref = `Cheque #${s.chequeNumber || ''}${s.bankName ? ` (${s.bankName})` : ''}`.trim() || ref || 'Cheque Payment';
+            } else if (s.method === 'BANK_TRANSFER' && s.bankName) {
+              ref = `Bank Transfer (${s.bankName})${ref ? `: ${ref}` : ''}`;
+            }
+            return {
+              amount: Number(s.amount),
+              method: s.method || 'CASH',
+              reference: ref || `${s.method} Payment`,
+              chequeDate: (s.method === 'CHEQUE' && s.date) ? new Date(s.date) : (s.date ? new Date(s.date) : undefined),
+            };
+          });
+      } else if (data.cheques && Array.isArray(data.cheques) && data.cheques.length > 0) {
+        paymentCreateEntries = data.cheques
+          .filter((c) => Number(c.amount) > 0)
+          .map((c) => ({
+            amount: Number(c.amount),
+            method: 'CHEQUE',
+            reference: `Cheque #${c.chequeNumber || ''}${c.bankName ? ` (${c.bankName})` : ''}`.trim() || 'Cheque Payment',
+            chequeDate: c.chequeDate ? new Date(c.chequeDate) : undefined,
+          }));
+      } else if (paid > 0) {
+        paymentCreateEntries = [
+          {
+            amount: paid,
+            method: data.paymentMethod || 'CASH',
+          },
+        ];
+      }
+
+      // Structure notes if split payments or multi-cheques are included
+      let cleanUserNote = data.notes || '';
+      while (typeof cleanUserNote === 'string' && cleanUserNote.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(cleanUserNote);
+          cleanUserNote = parsed.userNotes || '';
+        } catch {
+          break;
+        }
+      }
+
+      let finalOrderNotes: string | null = cleanUserNote || null;
+      if ((data.splitPayments && data.splitPayments.length > 0) || (data.cheques && data.cheques.length > 0)) {
+        try {
+          finalOrderNotes = JSON.stringify({
+            userNotes: cleanUserNote,
+            splitPayments: data.splitPayments || [],
+            cheques: data.cheques || (data.splitPayments ? data.splitPayments.filter((s) => s.method === 'CHEQUE') : []),
+          });
+        } catch {
+          finalOrderNotes = cleanUserNote || null;
+        }
+      }
+
       // 2. Create parent order entry
       const order = await tx.order.create({
         data: {
@@ -89,7 +165,7 @@ export class OrderService {
           settledDueAmount: sanitizedSettledDue,
           status: isFullPaid ? OrderStatus.PAID : OrderStatus.PROCESSING,
           paymentMethod: data.paymentMethod || 'CASH',
-          notes: data.notes || null,
+          notes: finalOrderNotes,
           items: {
             create: data.items.map((i) => ({
               variantId: i.variantId,
@@ -99,17 +175,7 @@ export class OrderService {
               price: i.price,
             })),
           },
-          payments:
-            paid > 0
-              ? {
-                  create: [
-                    {
-                      amount: paid,
-                      method: data.paymentMethod || 'CASH',
-                    },
-                  ],
-                }
-              : undefined,
+          payments: paymentCreateEntries.length > 0 ? { create: paymentCreateEntries } : undefined,
         },
         include: {
           items: {
@@ -201,27 +267,8 @@ export class OrderService {
           });
         }
 
-        // 3. Recalculate live aggregated outstanding debt across all active orders to ensure zero ledger drift
-        const allCustomerOrders = await tx.order.findMany({
-          where: {
-            customerId: custId,
-            status: { not: OrderStatus.CANCELLED },
-          },
-          select: {
-            totalAmount: true,
-            paidAmount: true,
-          },
-        });
-
-        const liveCalculatedOutstanding = allCustomerOrders.reduce((sum, o) => {
-          return sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0));
-        }, 0);
-
-        const syncedOutstanding = Math.round(liveCalculatedOutstanding * 100) / 100;
-
-        const freshCustomer = await tx.customer.update({
+        const freshCustomer = await tx.customer.findUnique({
           where: { id: custId },
-          data: { outstandingBalance: syncedOutstanding },
         });
 
         (order as any).customer = freshCustomer;
@@ -408,6 +455,9 @@ export class OrderService {
             outstandingBalance: true,
           },
         },
+        payments: {
+          orderBy: { createdAt: 'asc' },
+        },
         items: {
           include: {
             variant: {
@@ -436,7 +486,34 @@ export class OrderService {
       (order as any).shippingAddress = order.customer.address;
     }
 
-    return order;
+    // Parse structured notes if present
+    let splitPayments: any[] = [];
+    let parsedCheques: any[] = [];
+    let userNotes = '';
+    if (order.notes) {
+      try {
+        let current: any = order.notes;
+        while (typeof current === 'string' && current.trim().startsWith('{')) {
+          current = JSON.parse(current);
+        }
+        if (typeof current === 'object' && current !== null) {
+          if (Array.isArray(current.splitPayments)) splitPayments = current.splitPayments;
+          if (Array.isArray(current.cheques)) parsedCheques = current.cheques;
+          userNotes = current.userNotes || '';
+        } else {
+          userNotes = String(current || '');
+        }
+      } catch {
+        userNotes = typeof order.notes === 'string' && order.notes.trim().startsWith('{') ? '' : String(order.notes || '');
+      }
+    }
+
+    return {
+      ...order,
+      splitPayments: splitPayments.length > 0 ? splitPayments : undefined,
+      cheques: parsedCheques.length > 0 ? parsedCheques : undefined,
+      userNotes,
+    };
   }
 
   /**
@@ -466,6 +543,21 @@ export class OrderService {
       excessMode?: string;
       paymentMethod: string;
       notes?: string;
+      splitPayments?: Array<{
+        id?: string;
+        method: string;
+        amount: number | string;
+        date?: string | Date;
+        chequeNumber?: string;
+        bankName?: string;
+        reference?: string;
+      }>;
+      cheques?: Array<{
+        chequeNumber?: string;
+        bankName?: string;
+        chequeDate?: string | Date;
+        amount: number | string;
+      }>;
     }
   ) {
     return prisma.$transaction(async (tx) => {
@@ -585,37 +677,90 @@ export class OrderService {
           });
         }
 
-        // 3. Recalculate live aggregated outstanding debt across all active orders for target customer
-        const allCustomerOrders = await tx.order.findMany({
-          where: {
-            customerId: custId,
-            status: { not: OrderStatus.CANCELLED },
-          },
-          select: {
-            id: true,
-            totalAmount: true,
-            paidAmount: true,
-          },
-        });
-
-        const liveCalculatedOutstanding = allCustomerOrders.reduce((sum, o) => {
-          if (o.id === orderId) {
-            return sum + Math.max(0, newTotal - newPaid);
+        // 3. Increment or decrement customer outstandingBalance based on net credit & settlement delta
+        if (existing.customerId && existing.customerId !== targetCustomerId) {
+          // New customer selected: apply new credit due to new customer
+          if (newCreditDue > 0) {
+            await tx.customer.update({
+              where: { id: custId },
+              data: { outstandingBalance: { increment: newCreditDue } },
+            });
           }
-          return sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0));
-        }, 0);
-
-        const syncedOutstanding = Math.round(liveCalculatedOutstanding * 100) / 100;
-
-        await tx.customer.update({
-          where: { id: custId },
-          data: { outstandingBalance: syncedOutstanding },
-        });
+        } else {
+          // Same customer: apply net difference
+          const balanceAdjustment = (newCreditDue - oldCreditDue) - (newSettledDue - oldSettledDue);
+          if (balanceAdjustment !== 0) {
+            await tx.customer.update({
+              where: { id: custId },
+              data: { outstandingBalance: { increment: balanceAdjustment } },
+            });
+          }
+        }
       }
 
       // 4. Update order items and sync payments ledger
       await tx.orderItem.deleteMany({ where: { orderId } });
       await tx.orderPayment.deleteMany({ where: { orderId } });
+
+      let paymentCreateEntries: any[] = [];
+      if (data.splitPayments && Array.isArray(data.splitPayments) && data.splitPayments.length > 0) {
+        paymentCreateEntries = data.splitPayments
+          .filter((s) => Number(s.amount) > 0)
+          .map((s) => {
+            let ref = s.reference || '';
+            if (s.method === 'CHEQUE') {
+              ref = `Cheque #${s.chequeNumber || ''}${s.bankName ? ` (${s.bankName})` : ''}`.trim() || ref || 'Cheque Payment';
+            } else if (s.method === 'BANK_TRANSFER' && s.bankName) {
+              ref = `Bank Transfer (${s.bankName})${ref ? `: ${ref}` : ''}`;
+            }
+            return {
+              amount: Number(s.amount),
+              method: s.method || 'CASH',
+              reference: ref || `${s.method} Payment`,
+              chequeDate: (s.method === 'CHEQUE' && s.date) ? new Date(s.date) : (s.date ? new Date(s.date) : undefined),
+            };
+          });
+      } else if (data.cheques && Array.isArray(data.cheques) && data.cheques.length > 0) {
+        paymentCreateEntries = data.cheques
+          .filter((c) => Number(c.amount) > 0)
+          .map((c) => ({
+            amount: Number(c.amount),
+            method: 'CHEQUE',
+            reference: `Cheque #${c.chequeNumber || ''}${c.bankName ? ` (${c.bankName})` : ''}`.trim() || 'Cheque Payment',
+            chequeDate: c.chequeDate ? new Date(c.chequeDate) : undefined,
+          }));
+      } else if (newPaid > 0) {
+        paymentCreateEntries = [
+          {
+            amount: newPaid,
+            method: data.paymentMethod === 'CREDIT' ? 'CASH' : (data.paymentMethod || 'CASH'),
+          },
+        ];
+      }
+
+      let rawNoteCandidate = data.notes !== undefined ? data.notes : existing.notes;
+      let cleanUserNote = rawNoteCandidate || '';
+      while (typeof cleanUserNote === 'string' && cleanUserNote.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(cleanUserNote);
+          cleanUserNote = parsed.userNotes || '';
+        } catch {
+          break;
+        }
+      }
+
+      let finalOrderNotes: string | null = cleanUserNote || null;
+      if ((data.splitPayments && data.splitPayments.length > 0) || (data.cheques && data.cheques.length > 0)) {
+        try {
+          finalOrderNotes = JSON.stringify({
+            userNotes: cleanUserNote,
+            splitPayments: data.splitPayments || [],
+            cheques: data.cheques || (data.splitPayments ? data.splitPayments.filter((s) => s.method === 'CHEQUE') : []),
+          });
+        } catch {
+          finalOrderNotes = cleanUserNote || null;
+        }
+      }
 
       const updatedOrder = await tx.order.update({
         where: { id: orderId },
@@ -630,7 +775,7 @@ export class OrderService {
           paidAmount: newPaid,
           settledDueAmount: newSettledDue,
           paymentMethod: newCreditDue > 0 ? 'CREDIT' : data.paymentMethod || 'CASH',
-          notes: data.notes !== undefined ? (data.notes || null) : existing.notes,
+          notes: finalOrderNotes,
           status: newPaid >= newTotal ? OrderStatus.PAID : OrderStatus.PROCESSING,
           items: {
             create: data.items.map((i) => ({
@@ -640,14 +785,7 @@ export class OrderService {
               price: i.price,
             })),
           },
-          payments: newPaid > 0 ? {
-            create: [
-              {
-                amount: newPaid,
-                method: data.paymentMethod === 'CREDIT' ? 'CASH' : (data.paymentMethod || 'CASH'),
-              }
-            ]
-          } : undefined,
+          payments: paymentCreateEntries.length > 0 ? { create: paymentCreateEntries } : undefined,
         },
         include: {
           items: {
@@ -752,8 +890,9 @@ export class OrderService {
     selectedInvoiceIds?: number[];
     paymentMethod?: string;
     notes?: string;
+    paymentDate?: string | Date;
   }) {
-    const { customerId, amount, strategy, selectedInvoiceIds = [], paymentMethod = 'CASH' } = data;
+    const { customerId, amount, strategy, selectedInvoiceIds = [], paymentMethod = 'CASH', notes, paymentDate } = data;
 
     return prisma.$transaction(async (tx) => {
       const customer = await tx.customer.findUnique({
@@ -776,11 +915,15 @@ export class OrderService {
         throw new HttpException(400, 'Invalid settlement amount');
       }
 
-      // Query unpaid/partially paid credit invoices for this customer (Excludes CANCELLED & PAID)
+      // Resolve custom audit payment timestamp
+      const resolvedDate = paymentDate && !isNaN(new Date(paymentDate).getTime())
+        ? new Date(paymentDate)
+        : new Date();
+
+      // Query unpaid/partially paid credit invoices for this customer (Excludes CANCELLED)
       const whereCondition: any = {
         customerId,
-        paymentMethod: 'CREDIT',
-        status: { in: [OrderStatus.PROCESSING, OrderStatus.PENDING, OrderStatus.DELIVERED] },
+        status: { not: OrderStatus.CANCELLED },
       };
 
       if (strategy === 'CUSTOM' && selectedInvoiceIds.length > 0) {
@@ -798,15 +941,15 @@ export class OrderService {
       for (const order of unpaidOrders) {
         if (remainingCash <= 0) break;
 
-        const currentDebt = Math.max(0, order.totalAmount - order.paidAmount);
+        const currentDebt = Math.max(0, Math.round((Number(order.totalAmount) - Number(order.paidAmount)) * 100) / 100);
         if (currentDebt <= 0) continue;
 
         const amountForThisOrder = strategy === 'FULL' 
           ? currentDebt 
           : Math.min(remainingCash, currentDebt);
 
-        const newPaid = order.paidAmount + amountForThisOrder;
-        const isNowFullyPaid = newPaid >= order.totalAmount;
+        const newPaid = Math.round((Number(order.paidAmount) + amountForThisOrder) * 100) / 100;
+        const isNowFullyPaid = newPaid >= Number(order.totalAmount);
 
         // Update Order balance & status
         await tx.order.update({
@@ -814,20 +957,23 @@ export class OrderService {
           data: {
             paidAmount: newPaid,
             status: isNowFullyPaid ? OrderStatus.PAID : order.status,
-            paymentMethod: isNowFullyPaid ? 'CASH' : 'CREDIT',
+            paymentMethod: isNowFullyPaid ? (paymentMethod || 'CASH') : order.paymentMethod,
+            updatedAt: new Date(),
           },
         });
 
-        // Add payment ledger transaction
+        // Add explicit payment ledger transaction for this specific invoice
         await tx.orderPayment.create({
           data: {
             orderId: order.id,
             amount: amountForThisOrder,
-            method: paymentMethod,
+            method: paymentMethod || 'CASH',
+            reference: notes?.trim() || 'Full Balance Settlement',
+            createdAt: resolvedDate,
           },
         });
 
-        remainingCash -= amountForThisOrder;
+        remainingCash = Math.round((remainingCash - amountForThisOrder) * 100) / 100;
         settledInvoiceDetails.push({ invoiceId: order.id, amountSettled: amountForThisOrder });
       }
 

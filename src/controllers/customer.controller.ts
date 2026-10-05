@@ -47,8 +47,10 @@ export const createCustomer = async (req: Request, res: Response, next: NextFunc
       return res.status(400).json({ error: 'Invalid request body' });
     }
 
-    // Security Whitelist: Strip client-injected financial balances on account creation
-    const { outstandingBalance: _forbiddenBal, id: _forbiddenId, ...safePayload } = req.body;
+    const { id: _forbiddenId, ...safePayload } = req.body;
+    if (req.body.outstandingBalance !== undefined) {
+      safePayload.outstandingBalance = Number(req.body.outstandingBalance) || 0;
+    }
 
     const customer = await customerService.createCustomer(safePayload);
     sendCreated(res, customer);
@@ -58,7 +60,7 @@ export const createCustomer = async (req: Request, res: Response, next: NextFunc
 };
 
 /**
- * Handle updating an existing customer record with strict ID check and financial field tampering protection
+ * Handle updating an existing customer record with strict ID check
  */
 export const updateCustomer = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -72,8 +74,10 @@ export const updateCustomer = async (req: Request, res: Response, next: NextFunc
       return res.status(400).json({ error: 'Invalid request payload' });
     }
 
-    // Security Whitelist: Prevent direct mutation of outstanding balances via profile updates
-    const { outstandingBalance: _forbiddenBal, id: _forbiddenId, createdAt: _forbiddenCreated, ...safeUpdateData } = req.body;
+    const { id: _forbiddenId, createdAt: _forbiddenCreated, ...safeUpdateData } = req.body;
+    if (req.body.outstandingBalance !== undefined) {
+      safeUpdateData.outstandingBalance = Number(req.body.outstandingBalance) || 0;
+    }
 
     const updated = await customerService.updateCustomer(id, safeUpdateData);
     sendSuccess(res, updated);

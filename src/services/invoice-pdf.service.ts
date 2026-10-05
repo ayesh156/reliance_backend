@@ -126,7 +126,7 @@ export class InvoicePdfService {
     const dividerY = headerTop + (isWholesale ? 82 : 76);
     doc.moveTo(startX, dividerY).lineTo(rightMargin, dividerY).lineWidth(1.2).strokeColor('#000000').stroke();
 
-    // ── 2. BILLED TO SECTION ──
+    // ── 2. BILLED TO & PAYMENT / NOTE DETAILS SECTION ──
     const customerTop = dividerY + 10;
     doc.fontSize(8).font('Helvetica-Bold').fillColor('#000000').text('BILLED TO', startX, customerTop, { characterSpacing: 0.8 });
     doc.moveTo(startX, customerTop + 10).lineTo(startX + 50, customerTop + 10).lineWidth(1.2).strokeColor('#000000').stroke();
@@ -135,6 +135,38 @@ export class InvoicePdfService {
     doc.fontSize(9).font('Helvetica').fillColor('#000000');
     doc.text(order.customer?.address || order.shippingAddress || '-', startX, customerTop + 28);
     doc.font('Helvetica-Bold').text('Contact: ', startX, customerTop + 40, { continued: true }).font('Helvetica').text(order.customerPhone || order.customer?.phone || '-');
+
+    // Clean user note text and split payment details for PDF
+    let displayPdfNote = '';
+    if (order.notes) {
+      try {
+        let current = order.notes;
+        while (typeof current === 'string' && current.trim().startsWith('{')) {
+          current = JSON.parse(current);
+        }
+        if (typeof current === 'object' && current !== null) {
+          displayPdfNote = current.userNotes || '';
+        } else {
+          displayPdfNote = String(current || '');
+        }
+      } catch {
+        displayPdfNote = typeof order.notes === 'string' && order.notes.trim().startsWith('{') ? '' : String(order.notes || '');
+      }
+    }
+    if (typeof displayPdfNote === 'string' && displayPdfNote.trim().startsWith('{')) {
+      displayPdfNote = '';
+    }
+    if (!displayPdfNote && typeof order.userNotes === 'string') {
+      displayPdfNote = order.userNotes;
+    }
+
+    if (displayPdfNote) {
+      const noteBoxWidth = 200;
+      const noteX = rightMargin - noteBoxWidth;
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#000000').text('PAYMENT / NOTE DETAILS', noteX, customerTop, { width: noteBoxWidth, align: 'right', characterSpacing: 0.8 });
+      doc.moveTo(noteX, customerTop + 10).lineTo(rightMargin, customerTop + 10).lineWidth(1.2).strokeColor('#000000').stroke();
+      doc.fontSize(8.5).font('Helvetica').fillColor('#222222').text(displayPdfNote, noteX, customerTop + 15, { width: noteBoxWidth, align: 'right' });
+    }
 
     // ── 3. ITEMS TABLE (Proportions: # 5%, Style 17%, Desc 38%, Price 16%, Qty 8%, Amount 16%) ──
     const tableTop = customerTop + 62;

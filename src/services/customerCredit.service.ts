@@ -97,12 +97,13 @@ export class CustomerCreditService {
       })
       .filter((bill) => bill.dueAmount > 0.01);
 
-    const computedTotalDue = bills.reduce((acc, b) => acc + b.dueAmount, 0);
+    const computedBillsDue = bills.reduce((acc, b) => acc + b.dueAmount, 0);
+    const effectiveTotalDue = Math.max(Number(customer.outstandingBalance) || 0, Math.round(computedBillsDue * 100) / 100);
 
     return {
       customer: {
         ...customer,
-        computedTotalDue: Math.round(computedTotalDue * 100) / 100,
+        computedTotalDue: effectiveTotalDue,
       },
       bills,
     };

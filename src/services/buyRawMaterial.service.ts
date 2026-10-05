@@ -9,6 +9,16 @@ export interface CreatePurchaseItemDTO {
   batchNumber?: string | null;
 }
 
+export interface PurchasePaymentInput {
+  id?: string | number;
+  method: string; // CASH, CHEQUE, BANK_TRANSFER
+  amount: number | string;
+  paymentDate?: string | Date;
+  reference?: string;
+  chequeNumber?: string;
+  bankName?: string;
+}
+
 export interface CreateBuyRawMaterialDTO {
   invoiceNumber?: string | null;
   rawMaterialShopId: number;
@@ -16,6 +26,13 @@ export interface CreateBuyRawMaterialDTO {
   paymentMethod?: string;
   purchaseDate?: string | Date;
   notes?: string | null;
+  payments?: PurchasePaymentInput[];
+  cheques?: Array<{
+    chequeNumber?: string;
+    bankName?: string;
+    chequeDate?: string | Date;
+    amount: number | string;
+  }>;
   items: CreatePurchaseItemDTO[];
 }
 
@@ -114,7 +131,7 @@ export class BuyRawMaterialService {
   }
 
   /**
-   * Fetch single purchase order breakdown by ID
+   * Fetch single purchase order breakdown by ID with fully hydrated payments & cheques
    */
   async getById(id: number) {
     if (isNaN(id)) throw new HttpException(400, 'Invalid purchase ID');
@@ -128,11 +145,70 @@ export class BuyRawMaterialService {
             rawMaterialItem: true,
           },
         },
+        payments: {
+          orderBy: { paymentDate: 'asc' },
+        },
       },
     });
 
     if (!purchase) throw new HttpException(404, 'Purchase record not found');
-    return purchase;
+
+    let paymentHistory: any[] = [];
+    let parsedCheques: any[] = [];
+    let displayUserNotes = '';
+
+    if (purchase.notes) {
+      try {
+        if (purchase.notes.startsWith('{')) {
+          const parsed = JSON.parse(purchase.notes);
+          if (Array.isArray(parsed.payments)) {
+            paymentHistory = parsed.payments;
+          }
+          if (Array.isArray(parsed.cheques)) {
+            parsedCheques = parsed.cheques;
+          }
+          if (typeof parsed.userNotes === 'string') {
+            displayUserNotes = parsed.userNotes;
+          }
+        } else {
+          displayUserNotes = purchase.notes;
+        }
+      } catch {
+        displayUserNotes = purchase.notes;
+      }
+    }
+
+    // If DB has payments relation items and paymentHistory from notes is empty, map from DB
+    if (paymentHistory.length === 0 && Array.isArray(purchase.payments) && purchase.payments.length > 0) {
+      paymentHistory = purchase.payments.map((p) => ({
+        id: p.id,
+        amount: p.amount,
+        method: p.paymentMethod,
+        reference: p.reference || '',
+        paymentDate: p.paymentDate ? p.paymentDate.toISOString() : p.createdAt.toISOString(),
+        createdAt: p.paymentDate ? p.paymentDate.toISOString() : p.createdAt.toISOString(),
+      }));
+    }
+
+    // If still empty but paidAmount > 0, generate initial down payment record
+    if (paymentHistory.length === 0 && purchase.paidAmount > 0) {
+      paymentHistory.push({
+        id: purchase.id * 1000,
+        amount: purchase.paidAmount,
+        method: purchase.paymentMethod || 'CASH',
+        reference: 'Initial Down Payment',
+        paymentDate: (purchase.purchaseDate || purchase.createdAt).toISOString(),
+        createdAt: (purchase.purchaseDate || purchase.createdAt).toISOString(),
+      });
+    }
+
+    return {
+      ...purchase,
+      userNotes: displayUserNotes,
+      payments: paymentHistory,
+      paymentHistory,
+      cheques: parsedCheques.length > 0 ? parsedCheques : undefined,
+    };
   }
 
   /**
@@ -232,7 +308,48 @@ export class BuyRawMaterialService {
       };
     });
 
-    const paidAmount = Math.max(0, Number(data.paidAmount) || 0);
+    let paidAmount = Math.max(0, Number(data.paidAmount) || 0);
+    let initialPaymentsList: any[] = [];
+
+    // Support both multi-payment rows and multi-cheques
+    if (data.payments && Array.isArray(data.payments) && data.payments.length > 0) {
+      const validPayments = data.payments.filter((p) => Number(p.amount) > 0);
+      if (validPayments.length > 0) {
+        paidAmount = validPayments.reduce((sum, p) => sum + Number(p.amount), 0);
+        initialPaymentsList = validPayments.map((p, idx) => {
+          let ref = p.reference || '';
+          if (p.method === 'CHEQUE') {
+            ref = `Cheque #${p.chequeNumber || ''}${p.bankName ? ` (${p.bankName})` : ''}`.trim() || ref || 'Cheque Payment';
+          }
+          return {
+            id: p.id || Date.now() + idx,
+            amount: Number(p.amount),
+            method: p.method || 'CASH',
+            reference: ref,
+            chequeNumber: p.chequeNumber,
+            bankName: p.bankName,
+            paymentDate: p.paymentDate ? new Date(p.paymentDate).toISOString() : new Date().toISOString(),
+            createdAt: p.paymentDate ? new Date(p.paymentDate).toISOString() : new Date().toISOString(),
+          };
+        });
+      }
+    } else if (data.cheques && Array.isArray(data.cheques) && data.cheques.length > 0) {
+      const validCheques = data.cheques.filter((c) => Number(c.amount) > 0);
+      if (validCheques.length > 0) {
+        paidAmount = validCheques.reduce((sum, c) => sum + Number(c.amount), 0);
+        initialPaymentsList = validCheques.map((c, idx) => ({
+          id: Date.now() + idx,
+          amount: Number(c.amount),
+          method: 'CHEQUE',
+          reference: `Cheque #${c.chequeNumber || ''}${c.bankName ? ` (${c.bankName})` : ''}`.trim() || 'Cheque Payment',
+          chequeNumber: c.chequeNumber,
+          bankName: c.bankName,
+          paymentDate: c.chequeDate ? new Date(c.chequeDate).toISOString() : new Date().toISOString(),
+          createdAt: c.chequeDate ? new Date(c.chequeDate).toISOString() : new Date().toISOString(),
+        }));
+      }
+    }
+
     const dueAmount = totalAmount - paidAmount;
 
     // Determine Payment Status enum
@@ -241,6 +358,16 @@ export class BuyRawMaterialService {
       paymentStatus = PurchasePaymentStatus.DUE;
     } else if (paidAmount < totalAmount) {
       paymentStatus = PurchasePaymentStatus.PARTIAL;
+    }
+
+    // Prepare Notes JSON
+    let finalNotesPayload: string | null = data.notes?.trim() || null;
+    if (initialPaymentsList.length > 0 || (data.cheques && data.cheques.length > 0)) {
+      finalNotesPayload = JSON.stringify({
+        userNotes: data.notes?.trim() || '',
+        cheques: data.cheques || initialPaymentsList.filter((p) => p.method === 'CHEQUE'),
+        payments: initialPaymentsList,
+      });
     }
 
     // Atomic Execution
@@ -255,7 +382,7 @@ export class BuyRawMaterialService {
           paymentMethod: data.paymentMethod || 'CASH',
           paymentStatus,
           purchaseDate: data.purchaseDate ? new Date(data.purchaseDate) : new Date(),
-          notes: data.notes?.trim() || null,
+          notes: finalNotesPayload,
           items: {
             create: validatedItems,
           },
@@ -266,7 +393,23 @@ export class BuyRawMaterialService {
         },
       });
 
-      // 2. Process Stock & Weighted Average Cost for each material
+      // 2. Persist individual SupplierPayment records
+      if (initialPaymentsList.length > 0) {
+        for (const p of initialPaymentsList) {
+          await tx.supplierPayment.create({
+            data: {
+              rawMaterialShopId: data.rawMaterialShopId,
+              buyRawMaterialId: purchase.id,
+              amount: Number(p.amount),
+              paymentMethod: p.method || 'CASH',
+              reference: p.reference || null,
+              paymentDate: p.paymentDate ? new Date(p.paymentDate) : new Date(),
+            },
+          });
+        }
+      }
+
+      // 3. Process Stock & Weighted Average Cost for each material
       for (const item of validatedItems) {
         const currentItem = await tx.rawMaterialItem.findUnique({
           where: { id: item.rawMaterialItemId },
@@ -296,7 +439,7 @@ export class BuyRawMaterialService {
         });
       }
 
-      // 3. Update Shop Credit Balance if there is an unpaid balance
+      // 4. Update Shop Credit Balance if there is an unpaid balance
       if (dueAmount > 0) {
         await tx.rawMaterialShop.update({
           where: { id: data.rawMaterialShopId },
@@ -312,7 +455,7 @@ export class BuyRawMaterialService {
     });
   }
 
-/**
+  /**
    * Update Existing Purchase Order:
    * Safely rolls back old stock quantities and shop debt, then applies new items and amounts.
    */
@@ -356,7 +499,47 @@ export class BuyRawMaterialService {
       };
     });
 
-    const paidAmount = data.paidAmount !== undefined ? Math.max(0, Number(data.paidAmount)) : existingPurchase.paidAmount;
+    let paidAmount = data.paidAmount !== undefined ? Math.max(0, Number(data.paidAmount)) : existingPurchase.paidAmount;
+    let updatedPaymentsList: any[] = [];
+
+    if (data.payments && Array.isArray(data.payments) && data.payments.length > 0) {
+      const validPayments = data.payments.filter((p) => Number(p.amount) > 0);
+      if (validPayments.length > 0) {
+        paidAmount = validPayments.reduce((sum, p) => sum + Number(p.amount), 0);
+        updatedPaymentsList = validPayments.map((p, idx) => {
+          let ref = p.reference || '';
+          if (p.method === 'CHEQUE') {
+            ref = `Cheque #${p.chequeNumber || ''}${p.bankName ? ` (${p.bankName})` : ''}`.trim() || ref || 'Cheque Payment';
+          }
+          return {
+            id: p.id || Date.now() + idx,
+            amount: Number(p.amount),
+            method: p.method || 'CASH',
+            reference: ref,
+            chequeNumber: p.chequeNumber,
+            bankName: p.bankName,
+            paymentDate: p.paymentDate ? new Date(p.paymentDate).toISOString() : new Date().toISOString(),
+            createdAt: p.paymentDate ? new Date(p.paymentDate).toISOString() : new Date().toISOString(),
+          };
+        });
+      }
+    } else if (data.cheques && Array.isArray(data.cheques) && data.cheques.length > 0) {
+      const validCheques = data.cheques.filter((c) => Number(c.amount) > 0);
+      if (validCheques.length > 0) {
+        paidAmount = validCheques.reduce((sum, c) => sum + Number(c.amount), 0);
+        updatedPaymentsList = validCheques.map((c, idx) => ({
+          id: Date.now() + idx,
+          amount: Number(c.amount),
+          method: 'CHEQUE',
+          reference: `Cheque #${c.chequeNumber || ''}${c.bankName ? ` (${c.bankName})` : ''}`.trim() || 'Cheque Payment',
+          chequeNumber: c.chequeNumber,
+          bankName: c.bankName,
+          paymentDate: c.chequeDate ? new Date(c.chequeDate).toISOString() : new Date().toISOString(),
+          createdAt: c.chequeDate ? new Date(c.chequeDate).toISOString() : new Date().toISOString(),
+        }));
+      }
+    }
+
     const dueAmount = totalAmount - paidAmount;
     const oldDueAmount = existingPurchase.totalAmount - existingPurchase.paidAmount;
 
@@ -366,6 +549,17 @@ export class BuyRawMaterialService {
     } else if (paidAmount < totalAmount) {
       paymentStatus = PurchasePaymentStatus.PARTIAL;
     }
+
+    let finalNotesPayload = data.notes !== undefined ? data.notes?.trim() || null : existingPurchase.notes;
+    if (updatedPaymentsList.length > 0 || (data.cheques && data.cheques.length > 0)) {
+      finalNotesPayload = JSON.stringify({
+        userNotes: data.notes !== undefined ? data.notes?.trim() || '' : '',
+        cheques: data.cheques || updatedPaymentsList.filter((p) => p.method === 'CHEQUE'),
+        payments: updatedPaymentsList,
+      });
+    }
+
+    const targetShopId = data.rawMaterialShopId ? Number(data.rawMaterialShopId) : existingPurchase.rawMaterialShopId;
 
     return await prisma.$transaction(async (tx) => {
       // 1. පැරණි stock ප්‍රමාණයන් නැවත rollback කිරීම
@@ -384,7 +578,7 @@ export class BuyRawMaterialService {
       const debtDiff = dueAmount - oldDueAmount;
       if (debtDiff !== 0) {
         await tx.rawMaterialShop.update({
-          where: { id: existingPurchase.rawMaterialShopId },
+          where: { id: targetShopId },
           data: {
             creditBalance: {
               increment: debtDiff,
@@ -393,7 +587,24 @@ export class BuyRawMaterialService {
         });
       }
 
-      // 3. නව අයිතම සඳහා stock ප්‍රමාණය වැඩි කිරීම සහ weighted average cost ගණනය කිරීම
+      // 3. Sync SupplierPayment records
+      await tx.supplierPayment.deleteMany({ where: { buyRawMaterialId: id } });
+      if (updatedPaymentsList.length > 0) {
+        for (const p of updatedPaymentsList) {
+          await tx.supplierPayment.create({
+            data: {
+              rawMaterialShopId: targetShopId,
+              buyRawMaterialId: id,
+              amount: Number(p.amount),
+              paymentMethod: p.method || 'CASH',
+              reference: p.reference || null,
+              paymentDate: p.paymentDate ? new Date(p.paymentDate) : new Date(),
+            },
+          });
+        }
+      }
+
+      // 4. නව අයිතම සඳහා stock ප්‍රමාණය වැඩි කිරීම සහ weighted average cost ගණනය කිරීම
       for (const item of validatedItems) {
         const currentItem = await tx.rawMaterialItem.findUnique({
           where: { id: item.rawMaterialItemId },
@@ -421,18 +632,18 @@ export class BuyRawMaterialService {
         });
       }
 
-      // 4. Purchase එක සහ එහි items (Prisma nested relation update)
+      // 5. Purchase එක සහ එහි items (Prisma nested relation update)
       const updatedPurchase = await tx.buyRawMaterial.update({
         where: { id },
         data: {
           invoiceNumber: data.invoiceNumber?.trim() ? data.invoiceNumber.trim().toUpperCase() : existingPurchase.invoiceNumber,
-          rawMaterialShopId: data.rawMaterialShopId ? Number(data.rawMaterialShopId) : existingPurchase.rawMaterialShopId,
+          rawMaterialShopId: targetShopId,
           totalAmount,
           paidAmount,
           paymentMethod: data.paymentMethod || existingPurchase.paymentMethod,
           paymentStatus,
           purchaseDate: data.purchaseDate ? new Date(data.purchaseDate) : existingPurchase.purchaseDate,
-          notes: data.notes !== undefined ? data.notes?.trim() || null : existingPurchase.notes,
+          notes: finalNotesPayload,
           items: {
             deleteMany: {}, // ⭐ සියලුම පැරණි line items ස්වයංක්‍රීයව ඉවත් කරයි
             create: validatedItems, // ⭐ නව line items එකතු කරයි
