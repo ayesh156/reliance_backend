@@ -299,9 +299,35 @@ async function startServer(): Promise<void> {
       console.log(`🩺 Health check at http://localhost:${PORT}/api/health`);
     });
 
+    // 🛑 Explicit Server Error Handling (e.g., EADDRINUSE port conflicts)
+    server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`❌ Port ${PORT} is already in use (EADDRINUSE). Please terminate the existing process or assign a different PORT.`);
+      } else {
+        console.error('❌ Server startup error:', err);
+      }
+      process.exit(1);
+    });
+
     // 🛡️ OpenLiteSpeed / lsnode socket timeout configurations
     server.keepAliveTimeout = 65000;
     server.headersTimeout = 66000;
+
+    // Graceful shutdown handling
+    const handleShutdown = (signal: string) => {
+      console.log(`\n🛑 [${signal}] Gracefully shutting down Reliance API...`);
+      server.close(async () => {
+        try {
+          await (await import('./lib/prisma.ts')).prisma.$disconnect();
+        } catch {
+          // Ignore prisma disconnect errors during shutdown
+        }
+        process.exit(0);
+      });
+    };
+
+    process.once('SIGTERM', () => handleShutdown('SIGTERM'));
+    process.once('SIGINT', () => handleShutdown('SIGINT'));
   } catch (error) {
     console.error('❌ Failed to start Reliance API due to database connection failure:', error);
     process.exit(1);

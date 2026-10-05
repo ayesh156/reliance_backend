@@ -253,6 +253,7 @@ model Order {
   subtotal          Float         @default(0)
   discount          Float         @default(0)
   paidAmount        Float         @default(0)
+  settledDueAmount  Float         @default(0)
   dueDate           DateTime?
   
   status            OrderStatus   @default(PENDING)

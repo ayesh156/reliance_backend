@@ -136,13 +136,17 @@ export class CustomerStatementPdfService {
 
     // Total Summary Row
     curY += 10;
-    const sumX = rightMargin - 220;
-    const sumValueWidth = rightMargin - sumX - 3;
+    const sumWidth = 260;
+    const sumX = rightMargin - sumWidth;
+    const labelWidth = 145;
+    const valX = sumX + labelWidth;
+    const valWidth = sumWidth - labelWidth; // 115pt
+
     doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
-    curY += 6;
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000').text('Total Due Balance', sumX, curY, { lineBreak: false });
-    doc.fontSize(11.5).text(`Rs. ${totalDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, sumX, curY, { width: sumValueWidth, align: 'right', lineBreak: false });
-    curY += 18;
+    curY += 5;
+    doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#000000').text('Total Due Balance', sumX, curY, { width: labelWidth, align: 'left' });
+    doc.fontSize(11.5).font('Helvetica-Bold').fillColor('#b91c1c').text(`Rs. ${totalDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, valX, curY, { width: valWidth, align: 'right' });
+    curY += 16;
     doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.8).strokeColor('#000000').stroke();
     curY += 15;
 

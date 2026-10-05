@@ -25,6 +25,8 @@ export class OrderService {
     discount?: number;
     totalAmount: number;
     paidAmount?: number;
+    settledDueAmount?: number;
+    excessMode?: string;
     paymentMethod: string; // CASH, CARD, CREDIT, CHEQUE
     notes?: string;
   }) {
@@ -69,6 +71,7 @@ export class OrderService {
       const sanitizedDiscount = Math.max(0, Number(data.discount) || 0);
       const total = Math.max(0, Number(data.totalAmount) || 0);
       const paid = Math.min(total, Math.max(0, Number(data.paidAmount) || 0));
+      const sanitizedSettledDue = Math.max(0, Number(data.settledDueAmount) || 0);
       const isFullPaid = paid >= total;
 
       // 2. Create parent order entry
@@ -83,6 +86,7 @@ export class OrderService {
           discount: Number(data.discount) || 0,
           totalAmount: total,
           paidAmount: paid,
+          settledDueAmount: sanitizedSettledDue,
           status: isFullPaid ? OrderStatus.PAID : OrderStatus.PROCESSING,
           paymentMethod: data.paymentMethod || 'CASH',
           notes: data.notes || null,
@@ -123,11 +127,11 @@ export class OrderService {
       });
 
       // 3. Secure Customer Credit Verification & Outstanding Sync
-      if (data.customerId && total > paid) {
-        const creditDue = total - paid;
+      if (data.customerId) {
+        const custId = Number(data.customerId);
+        const creditDue = Math.max(0, total - paid);
         const targetCustomer = await tx.customer.findUnique({
-          where: { id: Number(data.customerId) },
-          select: { id: true, creditLimit: true, outstandingBalance: true },
+          where: { id: custId },
         });
 
         if (!targetCustomer) {
@@ -135,17 +139,92 @@ export class OrderService {
         }
 
         // Check if customer exceeds allowable credit limit
-        if (targetCustomer.creditLimit > 0 && (targetCustomer.outstandingBalance + creditDue) > targetCustomer.creditLimit) {
+        if (creditDue > 0 && targetCustomer.creditLimit > 0 && (targetCustomer.outstandingBalance + creditDue) > targetCustomer.creditLimit) {
           throw new HttpException(
             400,
             `Transaction exceeds allowed credit limit of Rs. ${targetCustomer.creditLimit}. Current outstanding: Rs. ${targetCustomer.outstandingBalance}`
           );
         }
 
-        await tx.customer.update({
-          where: { id: Number(data.customerId) },
-          data: { outstandingBalance: { increment: creditDue } },
+        // 1. Directly decrement customer outstanding if settledDueAmount > 0
+        if (sanitizedSettledDue > 0) {
+          await tx.customer.update({
+            where: { id: custId },
+            data: { outstandingBalance: { decrement: sanitizedSettledDue } },
+          });
+
+          // 2. FIFO Settlement on previous unpaid/partially paid credit invoices
+          let remainingToSettle = sanitizedSettledDue;
+          const unpaidOrders = await tx.order.findMany({
+            where: {
+              customerId: custId,
+              id: { not: order.id },
+              status: { not: OrderStatus.CANCELLED },
+            },
+            orderBy: { createdAt: 'asc' },
+          });
+
+          for (const prevOrder of unpaidOrders) {
+            if (remainingToSettle <= 0) break;
+            const unpaidAmount = Math.max(0, prevOrder.totalAmount - prevOrder.paidAmount);
+            if (unpaidAmount > 0 && remainingToSettle > 0) {
+              const settleForThis = Math.min(unpaidAmount, remainingToSettle);
+              const newPrevPaid = prevOrder.paidAmount + settleForThis;
+              const isPrevPaid = newPrevPaid >= prevOrder.totalAmount;
+
+              await tx.order.update({
+                where: { id: prevOrder.id },
+                data: {
+                  paidAmount: { increment: settleForThis },
+                  status: isPrevPaid ? OrderStatus.PAID : prevOrder.status,
+                },
+              });
+
+              await tx.orderPayment.create({
+                data: {
+                  orderId: prevOrder.id,
+                  amount: settleForThis,
+                  method: data.paymentMethod || 'CASH',
+                  reference: `Settled from POS Invoice #${order.id}`,
+                },
+              });
+
+              remainingToSettle -= settleForThis;
+            }
+          }
+        }
+
+        if (creditDue > 0) {
+          await tx.customer.update({
+            where: { id: custId },
+            data: { outstandingBalance: { increment: creditDue } },
+          });
+        }
+
+        // 3. Recalculate live aggregated outstanding debt across all active orders to ensure zero ledger drift
+        const allCustomerOrders = await tx.order.findMany({
+          where: {
+            customerId: custId,
+            status: { not: OrderStatus.CANCELLED },
+          },
+          select: {
+            totalAmount: true,
+            paidAmount: true,
+          },
         });
+
+        const liveCalculatedOutstanding = allCustomerOrders.reduce((sum, o) => {
+          return sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0));
+        }, 0);
+
+        const syncedOutstanding = Math.round(liveCalculatedOutstanding * 100) / 100;
+
+        const freshCustomer = await tx.customer.update({
+          where: { id: custId },
+          data: { outstandingBalance: syncedOutstanding },
+        });
+
+        (order as any).customer = freshCustomer;
       }
 
       return order;
@@ -364,6 +443,7 @@ export class OrderService {
    * Update existing invoice:
    * 1. Reverts previous item inventory stock and deducts updated item inventory stock.
    * 2. Recalculates credit due delta and increments/decrements customer outstandingBalance atomically.
+   * 3. Performs FIFO allocation of settledDueAmount across older unpaid customer orders.
    */
   async updateInvoiceOrder(
     orderId: number,
@@ -382,7 +462,10 @@ export class OrderService {
       discount?: number;
       totalAmount: number;
       paidAmount: number;
+      settledDueAmount?: number;
+      excessMode?: string;
       paymentMethod: string;
+      notes?: string;
     }
   ) {
     return prisma.$transaction(async (tx) => {
@@ -431,36 +514,103 @@ export class OrderService {
       const oldTotal = Number(existing.totalAmount || 0);
       const oldPaid = Number(existing.paidAmount || 0);
       const oldCreditDue = Math.max(0, oldTotal - oldPaid);
+      const oldSettledDue = Number((existing as any).settledDueAmount || 0);
 
       const newTotal = Number(data.totalAmount || 0);
       const newPaid = Math.min(newTotal, Math.max(0, Number(data.paidAmount || 0)));
       const newCreditDue = Math.max(0, newTotal - newPaid);
+      const newSettledDue = data.settledDueAmount !== undefined ? Math.max(0, Number(data.settledDueAmount) || 0) : oldSettledDue;
 
       const targetCustomerId = data.customerId ? Number(data.customerId) : existing.customerId;
 
-      if (existing.customerId && targetCustomerId && existing.customerId === targetCustomerId) {
-        // Same customer: adjust only the net difference (newCreditDue - oldCreditDue)
-        const creditDelta = newCreditDue - oldCreditDue;
-        if (creditDelta !== 0) {
-          await tx.customer.update({
-            where: { id: targetCustomerId },
-            data: { outstandingBalance: { increment: creditDelta } },
+      if (targetCustomerId) {
+        const custId = Number(targetCustomerId);
+
+        // 1. If settledDueAmount > 0, apply FIFO Settlement on previous unpaid/partially paid credit invoices
+        if (newSettledDue > 0) {
+          let remainingToSettle = newSettledDue;
+          const unpaidOrders = await tx.order.findMany({
+            where: {
+              customerId: custId,
+              id: { not: orderId },
+              status: { not: OrderStatus.CANCELLED },
+            },
+            orderBy: { createdAt: 'asc' },
           });
+
+          for (const prevOrder of unpaidOrders) {
+            if (remainingToSettle <= 0) break;
+            const unpaidAmount = Math.max(0, prevOrder.totalAmount - prevOrder.paidAmount);
+            if (unpaidAmount > 0 && remainingToSettle > 0) {
+              const settleForThis = Math.min(unpaidAmount, remainingToSettle);
+              const newPrevPaid = prevOrder.paidAmount + settleForThis;
+              const isPrevPaid = newPrevPaid >= prevOrder.totalAmount;
+
+              await tx.order.update({
+                where: { id: prevOrder.id },
+                data: {
+                  paidAmount: { increment: settleForThis },
+                  status: isPrevPaid ? OrderStatus.PAID : prevOrder.status,
+                },
+              });
+
+              await tx.orderPayment.create({
+                data: {
+                  orderId: prevOrder.id,
+                  amount: settleForThis,
+                  method: data.paymentMethod || 'CASH',
+                  reference: `Settled from POS Invoice #${orderId}`,
+                },
+              });
+
+              remainingToSettle -= settleForThis;
+            }
+          }
         }
-      } else {
-        // Customer was switched: rollback old credit and apply new credit to new customer
-        if (existing.customerId && oldCreditDue > 0) {
+
+        // 2. Rollback previous customer's debt if customer was changed
+        if (existing.customerId && existing.customerId !== targetCustomerId) {
+          const oldCustOrders = await tx.order.findMany({
+            where: {
+              customerId: existing.customerId,
+              id: { not: orderId },
+              status: { not: OrderStatus.CANCELLED },
+            },
+            select: { totalAmount: true, paidAmount: true },
+          });
+          const oldCustDue = oldCustOrders.reduce((sum, o) => sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0)), 0);
           await tx.customer.update({
             where: { id: existing.customerId },
-            data: { outstandingBalance: { decrement: oldCreditDue } },
+            data: { outstandingBalance: Math.round(oldCustDue * 100) / 100 },
           });
         }
-        if (targetCustomerId && newCreditDue > 0) {
-          await tx.customer.update({
-            where: { id: targetCustomerId },
-            data: { outstandingBalance: { increment: newCreditDue } },
-          });
-        }
+
+        // 3. Recalculate live aggregated outstanding debt across all active orders for target customer
+        const allCustomerOrders = await tx.order.findMany({
+          where: {
+            customerId: custId,
+            status: { not: OrderStatus.CANCELLED },
+          },
+          select: {
+            id: true,
+            totalAmount: true,
+            paidAmount: true,
+          },
+        });
+
+        const liveCalculatedOutstanding = allCustomerOrders.reduce((sum, o) => {
+          if (o.id === orderId) {
+            return sum + Math.max(0, newTotal - newPaid);
+          }
+          return sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0));
+        }, 0);
+
+        const syncedOutstanding = Math.round(liveCalculatedOutstanding * 100) / 100;
+
+        await tx.customer.update({
+          where: { id: custId },
+          data: { outstandingBalance: syncedOutstanding },
+        });
       }
 
       // 4. Update order items and sync payments ledger
@@ -478,7 +628,9 @@ export class OrderService {
           discount: Number(data.discount) || 0,
           totalAmount: newTotal,
           paidAmount: newPaid,
+          settledDueAmount: newSettledDue,
           paymentMethod: newCreditDue > 0 ? 'CREDIT' : data.paymentMethod || 'CASH',
+          notes: data.notes !== undefined ? (data.notes || null) : existing.notes,
           status: newPaid >= newTotal ? OrderStatus.PAID : OrderStatus.PROCESSING,
           items: {
             create: data.items.map((i) => ({
@@ -537,12 +689,14 @@ export class OrderService {
         });
       }
 
-      // Cancel remaining credit from customer outstanding balance
+      // Cancel remaining credit and reverse any settled due from customer outstanding balance
       const creditDue = Math.max(0, order.totalAmount - order.paidAmount);
-      if (order.customerId && creditDue > 0) {
+      const settledDue = Number((order as any).settledDueAmount || 0);
+      const adjustment = -creditDue + settledDue;
+      if (order.customerId && adjustment !== 0) {
         await tx.customer.update({
           where: { id: order.customerId },
-          data: { outstandingBalance: { decrement: creditDue } },
+          data: { outstandingBalance: { increment: adjustment } },
         });
       }
 

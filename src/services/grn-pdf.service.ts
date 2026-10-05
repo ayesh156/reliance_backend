@@ -111,22 +111,25 @@ export class GrnPdfService {
     });
 
     // Summary Section
-    const sumX = rightMargin - 190;
-    const sumValW = 185;
+    const sumWidth = 265;
+    const sumX = rightMargin - sumWidth;
+    const labelWidth = 155;
+    const valX = sumX + labelWidth;
+    const valWidth = sumWidth - labelWidth; // 110pt
     curY += 10;
 
-    doc.fontSize(9).font('Helvetica-Bold').fillColor('#000000').text('Total Stock-In Value:', sumX, curY);
-    doc.text(`Rs. ${total.toLocaleString()}`, sumX, curY, { width: sumValW, align: 'right' });
-    curY += 16;
+    const renderSummaryRow = (label: string, value: string, isBold = false, fontSize = 9, valColor = '#000000') => {
+      doc.fontSize(fontSize).font(isBold ? 'Helvetica-Bold' : 'Helvetica').fillColor('#000000').text(label, sumX, curY, { width: labelWidth, align: 'left' });
+      doc.font('Helvetica-Bold').fillColor(valColor).text(value, valX, curY, { width: valWidth, align: 'right' });
+      curY += 16;
+    };
 
-    doc.font('Helvetica').text(`Paid Amount (${paymentMethod}):`, sumX, curY);
-    doc.font('Helvetica-Bold').text(`Rs. ${paid.toLocaleString()}`, sumX, curY, { width: sumValW, align: 'right' });
-    curY += 16;
+    renderSummaryRow('Total Stock-In Value:', `Rs. ${total.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, true, 9);
+    renderSummaryRow(`Paid Amount (${paymentMethod}):`, `Rs. ${paid.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, false, 8.8);
 
     doc.moveTo(sumX, curY - 2).lineTo(rightMargin, curY - 2).lineWidth(1).strokeColor('#000000').stroke();
-    doc.fontSize(10).font('Helvetica-Bold').fillColor(due > 0 ? '#b91c1c' : '#15803d').text('Outstanding Due Balance:', sumX, curY + 2);
-    doc.text(`Rs. ${due.toLocaleString()}`, sumX, curY + 2, { width: sumValW, align: 'right' });
-    curY += 20;
+    curY += 3;
+    renderSummaryRow('Outstanding Due Balance:', `Rs. ${due.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, true, 10, due > 0 ? '#b91c1c' : '#15803d');
     doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.5).strokeColor('#000000').stroke();
 
     // ⭐ Statement PDF එකේ ආකාරයට අත්සන් තීරු 4 කට සකස් කිරීම

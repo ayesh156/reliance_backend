@@ -101,17 +101,37 @@ export class CustomerService {
       throw new HttpException(404, 'Customer record not found');
     }
 
-    // Dynamic debt calculation from non-cancelled orders
-    const liveDueAmount = customer.orders.reduce((sum, order) => {
-      if (order.status === 'CANCELLED') return sum;
+    // Dynamic debt calculation from all non-cancelled customer orders (without pagination truncation)
+    const allUnpaidOrders = await prisma.order.findMany({
+      where: {
+        customerId: Number(id),
+        status: { not: 'CANCELLED' },
+      },
+      select: {
+        totalAmount: true,
+        paidAmount: true,
+      },
+    });
+
+    const liveDueAmount = allUnpaidOrders.reduce((sum, order) => {
       const total = Number(order.totalAmount) || 0;
       const paid = Number(order.paidAmount) || 0;
       return sum + Math.max(0, total - paid);
     }, 0);
 
+    const calculatedOutstanding = Math.round(liveDueAmount * 100) / 100;
+
+    // Synchronize customer.outstandingBalance if drift detected
+    if (Math.abs(customer.outstandingBalance - calculatedOutstanding) > 0.01) {
+      await prisma.customer.update({
+        where: { id: Number(id) },
+        data: { outstandingBalance: calculatedOutstanding },
+      });
+    }
+
     return {
       ...customer,
-      outstandingBalance: Math.round(liveDueAmount * 100) / 100,
+      outstandingBalance: calculatedOutstanding,
     };
   }
 
