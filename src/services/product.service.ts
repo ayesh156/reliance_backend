@@ -3,6 +3,8 @@ import { prisma } from '../lib/prisma.ts';
 import { deleteLocalFile } from '../utils/fileHandler.ts';
 import { HttpException } from '../middleware/error.middleware.ts';
 import { sanitizeSafePrice, sanitizeSafeStock, validateProductPayload, sanitizeMultiValue } from '../utils/validators.ts';
+import { normalizeImageUrl } from '../utils/imageUrl.ts';
+
 
 const productInclude = {
   category: true,
@@ -66,9 +68,12 @@ function collectImages(req: Request): { imageUrl: string; order: number }[] {
         : req.body.imageUrls;
       if (Array.isArray(urls)) {
         for (const u of urls) {
-          if (typeof u === 'string' && u.trim() && !seen.has(u)) {
-            seen.add(u);
-            result.push({ imageUrl: u, order: result.length });
+          if (typeof u === 'string' && u.trim()) {
+            const normalized = normalizeImageUrl(u.trim());
+            if (!seen.has(normalized)) {
+              seen.add(normalized);
+              result.push({ imageUrl: normalized, order: result.length });
+            }
           }
         }
       }
@@ -279,7 +284,8 @@ export class ProductService {
       // 3. Check array of imageUrls or single imageUrl
       const urlsToCheck = Array.isArray(v.imageUrls) ? v.imageUrls : v.imageUrl ? [v.imageUrl] : [];
       urlsToCheck.forEach(url => {
-        const found = savedImages.find(img => img.imageUrl === url);
+        const normalized = normalizeImageUrl(url);
+        const found = savedImages.find(img => img.imageUrl === url || img.imageUrl === normalized);
         if (found) targetImageIds.add(found.id);
       });
 
@@ -439,7 +445,7 @@ export class ProductService {
           // Reliably binds the image URL to each variant in the database without overwriting
           for (const url of urlsToCheck) {
             if (!url) continue;
-            const cleanTarget = String(url).trim();
+            const cleanTarget = normalizeImageUrl(String(url).trim());
 
             // 1. Check if this exact variant is already linked to this image
             const alreadyLinked = await tx.productImage.findFirst({

@@ -30,7 +30,7 @@ export class InvoicePdfService {
     const remainingChange = Math.max(0, Math.round((tendered - paidAmount - settledDue) * 100) / 100);
     const balanceDue = Math.max(0, Math.round((total - paidAmount) * 100) / 100);
     const discountVal = Number(order.discount || 0);
-    const subtotalVal = Number(order.subtotal || 0);
+    const subtotalVal = Number(order.subtotal || (total + discountVal) || 0);
 
     const isWholesale = order.source === 'POS_WHOLESALE' || order.orderType === 'WHOLESALE';
     const paymentMethodLabel = order.paymentMethod 
@@ -55,14 +55,10 @@ export class InvoicePdfService {
 
     let discountDisplay = 'Discount:';
     if (discountVal > 0) {
-      if (order.discountType === 'PERCENT') {
-        const percent = order.discountRate !== undefined
-          ? order.discountRate
-          : (subtotalVal > 0 ? Math.round((discountVal / subtotalVal) * 100) : 0);
-        discountDisplay = `Discount (${percent}%):`;
-      } else {
-        discountDisplay = 'Discount:';
-      }
+      const percent = order.discountRate !== undefined && Number(order.discountRate) > 0
+        ? Number(order.discountRate)
+        : (subtotalVal > 0 ? Math.round((discountVal / subtotalVal) * 100) : 0);
+      discountDisplay = percent > 0 ? `Discount (${percent}%):` : 'Discount:';
     }
 
     // Margins calibrated to 18mm Top/Bottom (51pt), 15mm Left/Right (42.5pt)
