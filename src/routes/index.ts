@@ -11,11 +11,14 @@ import buyRawMaterialRoutes from './buyRawMaterial.routes.ts';
 import customerCreditRoutes from './customerCredit.routes.ts';
 import paymentRoutes from './payment.routes.ts';
 import productionRoutes from './production.routes.ts';
+import reportRoutes from './report.routes.ts';
+import userRoutes from './user.routes.ts';
 
 const router = Router();
 
 // Modular Route Aggregation
 router.use('/auth', authRoutes);
+router.use('/users', userRoutes);
 router.use('/products', productRoutes);
 router.use('/settings', settingsRoutes);
 router.use('/attributes', attributeRoutes);
@@ -29,5 +32,6 @@ router.use('/raw-material-items', rawMaterialItemRoutes);
 router.use('/credit', customerCreditRoutes);
 router.use('/payments', paymentRoutes);
 router.use('/production', productionRoutes);
+router.use('/reports', reportRoutes);
 
 export default router;

@@ -2,9 +2,39 @@ import PDFDocument from 'pdfkit';
 import path from 'path';
 import fs from 'fs';
 
+/**
+ * Format timestamp to standard 'YYYY-MM-DD' representation (e.g., '2026-10-07')
+ * for uniform presentation across backend PDF streaming and frontend print preview.
+ */
+function formatPdfReturnDate(dateInput: string | Date | undefined | null): string {
+  if (!dateInput) return '-';
+  const d = new Date(dateInput);
+  if (isNaN(d.getTime())) return '-';
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+const formatPdfReturnDateTime = formatPdfReturnDate;
+
 export class InvoicePdfService {
   /**
    * Generate A4 Invoice PDF perfectly identical to Frontend Print Engine (100% Visual Parity)
+   *
+   * Layout & Financial Reconciliation Workflow:
+   * 1. Header with brand logo, enterprise details, and wholesale/retail badge.
+   * 2. Customer billing information & structured split/note payment box.
+   * 3. Itemized purchases table with style number, variant metadata (Size/Color), and unit rates.
+   * 4. Return Adjustment History ledger (when returns exist) formatted as:
+   *    `# | DATE | RETURNED ITEM & REASON | QTY | CREDIT / REFUND`.
+   * 5. Financial Summary section mirroring A4 print modal breakdown:
+   *    - Sub Total
+   *    - Discount (with dynamic percentage)
+   *    - Original Bill Total & Return Adjustments (when returns exist)
+   *    - Net Total Due (After Returns) / Total Due (Current Bill)
+   *    - Tendered breakdown & change returned
+   *    - True Previous Due (Old Bills) & Total Accumulated Credit Due
+   * 6. Four-column signature block & bottom tear-off store policy.
    */
   static generate(order: any): InstanceType<typeof PDFDocument> {
     // A4 Portrait: 595.28 x 841.89 pt
@@ -52,6 +82,76 @@ export class InvoicePdfService {
     
     // Cumulative total outstanding
     const grandTotalCreditDue = Math.max(0, Math.round((currentBillCredit + truePreviousDue - settledDue) * 100) / 100);
+
+    // Extract return records for PDF rendering
+    let returnsList: any[] = [];
+    if (Array.isArray(order.returns) && order.returns.length > 0) {
+      returnsList = order.returns;
+    } else if (order.notes) {
+      try {
+        let current = order.notes;
+        while (typeof current === 'string' && current.trim().startsWith('{')) {
+          current = JSON.parse(current);
+        }
+        if (typeof current === 'object' && current !== null && Array.isArray(current.returns)) {
+          returnsList = current.returns;
+        }
+      } catch {}
+    }
+
+    // Consolidate duplicate return items occurring on the exact same date with identical variant and reason
+    interface ConsolidatedPdfReturnRow {
+      returnDateFormatted: string;
+      prodDesc: string;
+      reasonText: string;
+      totalQty: number;
+      totalRefund: number;
+    }
+
+    const consolidatedReturnMap = new Map<string, ConsolidatedPdfReturnRow>();
+    let totalReturnRefund = returnsList.reduce((acc: number, r: any) => acc + (Number(r.totalReturnRefund) || 0), 0);
+
+    returnsList.forEach((ret: any) => {
+      const retDateFormatted = formatPdfReturnDate(ret.returnDate || ret.createdAt || ret.date || order.createdAt);
+      const reasonText = (ret.reason || 'Return').trim();
+
+      (ret.returnedItems || []).forEach((rit: any) => {
+        const itemReason = (rit.reason || reasonText).trim();
+        const variantIdentifier = rit.variantId !== undefined && rit.variantId !== null
+          ? String(rit.variantId)
+          : (rit.sku || `${rit.productName || rit.name || 'Garment Item'}_${rit.variantName || ''}`);
+        const groupKey = `${retDateFormatted}_${variantIdentifier}_${itemReason}`;
+
+        const qty = Number(rit.returnQty ?? rit.quantity ?? 1);
+        const amt = Number(rit.refundAmount ?? rit.amount ?? 0);
+
+        if (consolidatedReturnMap.has(groupKey)) {
+          const existing = consolidatedReturnMap.get(groupKey)!;
+          existing.totalQty += qty;
+          existing.totalRefund += amt;
+        } else {
+          const varDesc = rit.variantName ? ` (${rit.variantName})` : '';
+          const prodDesc = `${rit.productName || 'Garment Item'}${varDesc}`;
+          consolidatedReturnMap.set(groupKey, {
+            returnDateFormatted: retDateFormatted,
+            prodDesc,
+            reasonText: itemReason,
+            totalQty: qty,
+            totalRefund: amt,
+          });
+        }
+      });
+    });
+
+    const consolidatedReturns = Array.from(consolidatedReturnMap.values());
+    const hasReturns = returnsList.length > 0 && consolidatedReturns.length > 0;
+    if (totalReturnRefund === 0 && consolidatedReturns.length > 0) {
+      totalReturnRefund = consolidatedReturns.reduce((acc, r) => acc + r.totalRefund, 0);
+    }
+
+    const originalBillTotal = order.originalTotalAmount !== undefined
+      ? Number(order.originalTotalAmount)
+      : (total + totalReturnRefund);
 
     let discountDisplay = 'Discount:';
     if (discountVal > 0) {
@@ -256,6 +356,78 @@ export class InvoicePdfService {
 
     curY += 12; // Gap before summary
 
+    // ── 3.5. ITEM RETURN ADJUSTMENT HISTORY (Rendered before financial summary when returns exist) ──
+    if (hasReturns) {
+      if (curY + 55 > 760) {
+        doc.addPage();
+        curY = 50;
+      }
+
+      doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#b91c1c').text(
+        `ITEM RETURN ADJUSTMENT HISTORY (REFUND / CREDIT DEDUCTED: RS ${totalReturnRefund.toLocaleString('en-LK', { minimumFractionDigits: 2 })})`,
+        startX,
+        curY
+      );
+      curY += 13;
+
+      // Table Header: # | DATE | RETURNED ITEM & REASON | QTY | CREDIT / REFUND
+      const retColWidths = { num: 25.5, date: 85, item: 235, qty: 50, amt: 114.78 };
+      const retColX = {
+        num: startX,
+        date: startX + retColWidths.num,
+        item: startX + retColWidths.num + retColWidths.date,
+        qty: startX + retColWidths.num + retColWidths.date + retColWidths.item,
+        amt: startX + retColWidths.num + retColWidths.date + retColWidths.item + retColWidths.qty,
+      };
+
+      const drawRetHeader = (y: number) => {
+        doc.moveTo(startX, y).lineTo(rightMargin, y).lineWidth(1).strokeColor('#000000').stroke();
+        doc.fontSize(7.5).font('Helvetica-Bold').fillColor('#000000');
+        const thY = y + 4;
+        doc.text('#', retColX.num, thY, { width: retColWidths.num, align: 'center', lineBreak: false });
+        doc.text('DATE', retColX.date + 2, thY, { width: retColWidths.date - 2, align: 'left', lineBreak: false });
+        doc.text('RETURNED ITEM & REASON', retColX.item + 2, thY, { width: retColWidths.item - 2, align: 'left', lineBreak: false });
+        doc.text('QTY', retColX.qty, thY, { width: retColWidths.qty, align: 'center', lineBreak: false });
+        doc.text('CREDIT / REFUND', retColX.amt, thY, { width: retColWidths.amt - 3, align: 'right', lineBreak: false });
+        doc.moveTo(startX, y + 15).lineTo(rightMargin, y + 15).lineWidth(0.8).strokeColor('#888888').stroke();
+        return y + 18;
+      };
+
+      curY = drawRetHeader(curY);
+
+      let rCounter = 0;
+      consolidatedReturns.forEach((cItem) => {
+        rCounter++;
+        const qtyText = `${cItem.totalQty} pcs`;
+        const refundText = `- Rs ${Number(cItem.totalRefund).toLocaleString('en-LK', { minimumFractionDigits: 2 })}`;
+
+        const itemAvailableWidth = retColWidths.item - 4;
+        doc.fontSize(8).font('Helvetica');
+        const fullDescText = `${cItem.prodDesc} [${cItem.reasonText}]`;
+        const textHeight = doc.heightOfString(fullDescText, { width: itemAvailableWidth });
+        const rowHeight = Math.max(16, textHeight + 5);
+
+        if (curY + rowHeight > 770) {
+          doc.addPage();
+          curY = drawRetHeader(50);
+        }
+
+        doc.fontSize(8).font('Helvetica').fillColor('#555555').text(String(rCounter), retColX.num, curY, { width: retColWidths.num, align: 'center', lineBreak: false });
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('#000000').text(cItem.returnDateFormatted, retColX.date + 2, curY, { width: retColWidths.date - 2, align: 'left', lineBreak: false });
+        
+        doc.fontSize(8).font('Helvetica').fillColor('#000000').text(cItem.prodDesc, retColX.item + 2, curY, { width: itemAvailableWidth, continued: true })
+          .fillColor('#555555').text(` [${cItem.reasonText}]`);
+
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('#000000').text(qtyText, retColX.qty, curY, { width: retColWidths.qty, align: 'center', lineBreak: false });
+        doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#b91c1c').text(refundText, retColX.amt, curY, { width: retColWidths.amt - 3, align: 'right', lineBreak: false });
+
+        curY += rowHeight;
+        doc.moveTo(startX, curY - 2).lineTo(rightMargin, curY - 2).lineWidth(0.5).strokeColor('#cccccc').dash(1.5, { space: 1.5 }).stroke().undash();
+      });
+
+      curY += 10;
+    }
+
     // ── 4. FINANCIAL SUMMARY SECTION (Strict Column Bounds to Eliminate Any Overlap) ──
     const sumWidth = 265;
     const sumX = rightMargin - sumWidth;
@@ -314,10 +486,28 @@ export class InvoicePdfService {
       });
     }
 
-    // Total Due (Current Bill): Solid 1.2pt Top, Solid 1.8pt Bottom
+    // Original Bill & Return Adjustments if returns exist
+    if (hasReturns) {
+      renderSummaryRow('Original Bill Total', `Rs ${originalBillTotal.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+        isBold: true,
+        fontSize: 9,
+        labelColor: '#000000',
+        valColor: '#000000'
+      });
+
+      renderSummaryRow('Return Adjustments', `- Rs ${totalReturnRefund.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+        isBold: true,
+        fontSize: 9,
+        labelColor: '#b91c1c',
+        valColor: '#b91c1c'
+      });
+    }
+
+    // Total Due (Current Bill) / Net Total Due (After Returns): Solid 1.2pt Top, Solid 1.8pt Bottom
+    const totalDueLabel = hasReturns ? 'Net Total Due (After Returns)' : 'Total Due (Current Bill)';
     doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
     curY += 4;
-    renderSummaryRow('Total Due (Current Bill)', `Rs ${total.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+    renderSummaryRow(totalDueLabel, `Rs ${total.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
       isBold: true,
       fontSize: 10.5,
       labelColor: '#000000',

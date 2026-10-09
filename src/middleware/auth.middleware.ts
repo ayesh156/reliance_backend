@@ -12,14 +12,16 @@ import type { AuthPayload } from '../types/common.types.ts';
  */
 export const verifyToken = (req: Request, res: Response, next: NextFunction): void => {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Access denied. No token provided.' });
-    return;
+  let token: string | undefined;
+
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.split(' ')[1];
+  } else if (typeof req.query.token === 'string' && req.query.token.trim()) {
+    token = req.query.token.trim();
   }
 
-  const token = authHeader.split(' ')[1];
   if (!token || token.trim().length === 0) {
-    res.status(401).json({ error: 'Access denied. Malformed token.' });
+    res.status(401).json({ error: 'Access denied. No token provided.' });
     return;
   }
 

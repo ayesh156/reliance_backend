@@ -26,7 +26,15 @@ router.get('/invoices/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'
 router.put('/invoices/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), orderController.updateInvoiceOrder);
 router.post('/invoices/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), orderController.updateInvoiceOrder);
 
+// In-Store Invoice Item Return & Stock Restoration Endpoint (POST /api/orders/:id/returns & /api/invoices/:id/returns)
+router.post('/orders/:id/returns', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), orderController.processInvoiceReturn);
+router.post('/invoices/:id/returns', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), orderController.processInvoiceReturn);
+router.post('/:id/returns', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), orderController.processInvoiceReturn);
+
+
 // Restrict destructive invoice deletion exclusively to ADMIN role to prevent financial fraud
 router.delete('/invoices/:id', verifyToken, requireRole('ADMIN'), orderController.deleteInvoiceOrder);
+router.delete('/orders/:id', verifyToken, requireRole('ADMIN'), orderController.deleteInvoiceOrder);
+router.delete('/:id', verifyToken, requireRole('ADMIN'), orderController.deleteInvoiceOrder);
 
 export default router;

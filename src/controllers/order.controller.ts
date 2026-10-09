@@ -228,3 +228,36 @@ export const getCustomerPendingInvoices = async (req: Request, res: Response, ne
     next(err);
   }
 };
+
+/**
+ * Handle in-store invoice item return & stock restoration
+ */
+export const processInvoiceReturn = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const id = parseInt(String(rawId), 10);
+    if (!id || isNaN(id) || id <= 0) {
+      return res.status(400).json({ error: 'Valid positive integer invoice ID is required' });
+    }
+
+    if (!req.body || !Array.isArray(req.body.returnedItems) || req.body.returnedItems.length === 0) {
+      return res.status(400).json({ error: 'At least one returned item must be specified' });
+    }
+
+    const user = (req as any).user;
+    const recordedBy = req.body.recordedBy || user?.name || user?.email || (user?.userId ? `User #${user.userId}` : 'Cashier');
+
+    const result = await orderService.processInvoiceReturn(
+      id,
+      {
+        ...req.body,
+        recordedBy,
+      },
+      user
+    );
+
+    sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+};

@@ -4,6 +4,86 @@ import { OrderSource, OrderStatus } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { InvoicePdfService } from './invoice-pdf.service.ts';
 
+export interface ReturnedItemRecord {
+  variantId: number;
+  productId?: number;
+  productName?: string;
+  variantName?: string;
+  sku?: string;
+  returnQty: number;
+  unitPrice: number;
+  amount: number;
+}
+
+export interface ReturnRecord {
+  returnId: string;
+  returnDate: string; // ISO timestamp
+  returnedItems: ReturnedItemRecord[];
+  totalReturnRefund: number;
+  reason: string;
+  recordedBy: string;
+  creditDueAdjustment?: number;
+  cashRefundAmount?: number;
+}
+
+export interface ProcessReturnInput {
+  returnedItems: {
+    variantId: number;
+    productId?: number;
+    returnQty: number;
+    unitPrice?: number;
+    amount?: number;
+  }[];
+  reason?: string;
+  recordedBy?: string;
+}
+
+/**
+ * Universal helper to parse structured metadata stored within `Order.notes` JSON.
+ * Preserves user text notes while extracting return logs, split payments, and cheques.
+ */
+export function parseOrderStructuredNotes(notes: any) {
+  let userNotes = '';
+  let splitPayments: any[] = [];
+  let cheques: any[] = [];
+  let itemVariants: any[] = [];
+  let returns: ReturnRecord[] = [];
+  let originalTotalAmount: number | undefined = undefined;
+  let rawParsed: any = {};
+
+  if (notes) {
+    try {
+      let current: any = notes;
+      while (typeof current === 'string' && current.trim().startsWith('{')) {
+        current = JSON.parse(current);
+      }
+      if (typeof current === 'object' && current !== null) {
+        rawParsed = current;
+        if (Array.isArray(current.splitPayments)) splitPayments = current.splitPayments;
+        if (Array.isArray(current.cheques)) cheques = current.cheques;
+        if (Array.isArray(current.itemVariants)) itemVariants = current.itemVariants;
+        if (Array.isArray(current.returns)) returns = current.returns;
+        if (typeof current.originalTotalAmount === 'number') originalTotalAmount = current.originalTotalAmount;
+        userNotes = current.userNotes || '';
+      } else {
+        userNotes = String(current || '');
+      }
+    } catch {
+      userNotes = typeof notes === 'string' && notes.trim().startsWith('{') ? '' : String(notes || '');
+    }
+  }
+
+  return {
+    rawParsed,
+    userNotes,
+    splitPayments,
+    cheques,
+    itemVariants,
+    returns,
+    originalTotalAmount,
+  };
+}
+
 export class OrderService {
   /**
    * Create POS Order with transactional atomic stock deduction
@@ -435,8 +515,25 @@ export class OrderService {
       }),
     ]);
 
+    const mappedOrders = orders.map((order) => {
+      const parsed = parseOrderStructuredNotes(order.notes);
+      const originalTotalAmount = parsed.originalTotalAmount ?? (
+        parsed.returns.length > 0
+          ? order.totalAmount + parsed.returns.reduce((sum, r) => sum + (Number(r.totalReturnRefund) || 0), 0)
+          : order.totalAmount
+      );
+      return {
+        ...order,
+        returns: parsed.returns,
+        originalTotalAmount,
+        splitPayments: parsed.splitPayments.length > 0 ? parsed.splitPayments : undefined,
+        cheques: parsed.cheques.length > 0 ? parsed.cheques : undefined,
+        userNotes: parsed.userNotes,
+      };
+    });
+
     return {
-      data: orders,
+      data: mappedOrders,
       pagination: {
         total,
         page,
@@ -494,43 +591,32 @@ export class OrderService {
       (order as any).shippingAddress = order.customer.address;
     }
 
-    // Parse structured notes if present
-    let splitPayments: any[] = [];
-    let parsedCheques: any[] = [];
-    let userNotes = '';
-    if (order.notes) {
-      try {
-        let current: any = order.notes;
-        while (typeof current === 'string' && current.trim().startsWith('{')) {
-          current = JSON.parse(current);
+    // Parse structured notes and return history if present
+    const parsed = parseOrderStructuredNotes(order.notes);
+    if (parsed.itemVariants.length > 0) {
+      (order.items || []).forEach((it: any, idx: number) => {
+        if (parsed.itemVariants[idx]) {
+          it.size = parsed.itemVariants[idx].size;
+          it.color = parsed.itemVariants[idx].color;
+          it.selectedSize = parsed.itemVariants[idx].size;
+          it.selectedColor = parsed.itemVariants[idx].color;
         }
-        if (typeof current === 'object' && current !== null) {
-          if (Array.isArray(current.splitPayments)) splitPayments = current.splitPayments;
-          if (Array.isArray(current.cheques)) parsedCheques = current.cheques;
-          if (Array.isArray(current.itemVariants)) {
-            (order.items || []).forEach((it: any, idx: number) => {
-              if (current.itemVariants[idx]) {
-                it.size = current.itemVariants[idx].size;
-                it.color = current.itemVariants[idx].color;
-                it.selectedSize = current.itemVariants[idx].size;
-                it.selectedColor = current.itemVariants[idx].color;
-              }
-            });
-          }
-          userNotes = current.userNotes || '';
-        } else {
-          userNotes = String(current || '');
-        }
-      } catch {
-        userNotes = typeof order.notes === 'string' && order.notes.trim().startsWith('{') ? '' : String(order.notes || '');
-      }
+      });
     }
+
+    const originalTotalAmount = parsed.originalTotalAmount ?? (
+      parsed.returns.length > 0
+        ? order.totalAmount + parsed.returns.reduce((sum, r) => sum + (Number(r.totalReturnRefund) || 0), 0)
+        : order.totalAmount
+    );
 
     return {
       ...order,
-      splitPayments: splitPayments.length > 0 ? splitPayments : undefined,
-      cheques: parsedCheques.length > 0 ? parsedCheques : undefined,
-      userNotes,
+      splitPayments: parsed.splitPayments.length > 0 ? parsed.splitPayments : undefined,
+      cheques: parsed.cheques.length > 0 ? parsed.cheques : undefined,
+      returns: parsed.returns,
+      originalTotalAmount,
+      userNotes: parsed.userNotes,
     };
   }
 
@@ -774,14 +860,24 @@ export class OrderService {
       }));
       const hasItemVariants = itemVariants.some((iv: any) => iv.size || iv.color);
 
+      const existingParsed = parseOrderStructuredNotes(existing.notes);
+
       let finalOrderNotes: string | null = cleanUserNote || null;
-      if ((data.splitPayments && data.splitPayments.length > 0) || (data.cheques && data.cheques.length > 0) || hasItemVariants) {
+      if (
+        (data.splitPayments && data.splitPayments.length > 0) ||
+        (data.cheques && data.cheques.length > 0) ||
+        hasItemVariants ||
+        existingParsed.returns.length > 0
+      ) {
         try {
           finalOrderNotes = JSON.stringify({
+            ...existingParsed.rawParsed,
             userNotes: cleanUserNote,
-            splitPayments: data.splitPayments || [],
-            cheques: data.cheques || (data.splitPayments ? data.splitPayments.filter((s) => s.method === 'CHEQUE') : []),
-            itemVariants: hasItemVariants ? itemVariants : undefined,
+            splitPayments: data.splitPayments || existingParsed.splitPayments || [],
+            cheques: data.cheques || (data.splitPayments ? data.splitPayments.filter((s) => s.method === 'CHEQUE') : existingParsed.cheques || []),
+            itemVariants: hasItemVariants ? itemVariants : existingParsed.itemVariants,
+            returns: existingParsed.returns,
+            originalTotalAmount: existingParsed.originalTotalAmount,
           });
         } catch {
           finalOrderNotes = cleanUserNote || null;
@@ -1073,7 +1169,275 @@ export class OrderService {
     }));
   }
 
-  
+  /**
+   * Process in-store invoice item return & atomic stock restoration.
+   *
+   * Architecture, Rollback Arithmetic & Concurrency Safeguards:
+   * 1. Schema Preservation Strategy:
+   *    - Operates with ZERO alterations to `schema.prisma` and without database migrations.
+   *    - Maintains an immutable return audit log in `Order.notes` JSON metadata.
+   * 2. Strict Concurrency Guard:
+   *    - Wrapped entirely inside an isolated `prisma.$transaction`.
+   *    - Reads live invoice rows, validates cumulative past returns, updates stock,
+   *      and commits all financial ledger balances atomically.
+   * 3. Cumulative Quantity Validation:
+   *    - Sums historical returns across all previous return events for this invoice:
+   *      `returnableQty = orderItem.quantity - sum(pastReturns.returnQty)`.
+   *    - Throws `HttpException(400)` if requested `returnQty > returnableQty` or if total returnQty is 0.
+   * 4. Atomic Inventory Restoration:
+   *    - For every returned item, executes `tx.productVariant.update` with `{ stock: { increment: returnQty } }`.
+   * 5. Financial Ledger Reconciliation & Due Rollback Arithmetic:
+   *    - Line item amount: `amount = round(returnQty * unitPrice, 2)`.
+   *    - Total refund value: `totalReturnRefund = sum(item.amount)`.
+   *    - New invoice net total: `newBillTotal = max(0, order.totalAmount - totalReturnRefund)`.
+   *    - Previous credit due: `oldCreditDue = max(0, order.totalAmount - order.paidAmount)`.
+   *    - Due offset logic:
+   *      a) If the bill had unpaid credit due (`oldCreditDue > 0`), the return refund FIRST offsets
+   *         that credit due: `creditDueAdjustment = min(oldCreditDue, totalReturnRefund)`.
+   *         This amount is decremented from `Customer.outstandingBalance`.
+   *      b) Any refund value exceeding the credit due represents cash/tender paid by customer:
+   *         `cashRefundAmount = min(order.paidAmount, totalReturnRefund - creditDueAdjustment)`.
+   *         `order.paidAmount` is decremented by `cashRefundAmount`, and a negative audit entry
+   *         is recorded in `OrderPayment` (`amount: -cashRefundAmount`).
+   * 6. Audit Trail Recording:
+   *    - Generates a globally unique `returnId` (e.g., `RET-<orderId>-<timestamp>`).
+   *    - Appends the return event to `Order.notes` including items breakdown, reason, and cashier identity.
+   */
+  async processInvoiceReturn(
+    orderId: number,
+    data: ProcessReturnInput,
+    user?: { userId?: number; name?: string; role?: string }
+  ) {
+    return prisma.$transaction(async (tx) => {
+      // 1. Fetch order with items, variants, linked customer, and payments
+      const order = await tx.order.findUnique({
+        where: { id: Number(orderId) },
+        include: {
+          items: {
+            include: {
+              variant: {
+                include: {
+                  product: { select: { id: true, name: true } },
+                },
+              },
+            },
+          },
+          customer: true,
+          payments: true,
+        },
+      });
+
+      if (!order) {
+        throw new HttpException(404, `Invoice #${orderId} not found`);
+      }
+
+      if (order.status === OrderStatus.CANCELLED) {
+        throw new HttpException(400, `Cannot process return for cancelled invoice #${orderId}`);
+      }
+
+      // 2. Parse existing structured metadata from order.notes
+      const parsedNotes = parseOrderStructuredNotes(order.notes);
+      const existingReturns = parsedNotes.returns || [];
+
+      // Calculate cumulative returned quantities per variantId
+      const cumulativeReturnedQty: Record<number, number> = {};
+      for (const pastRet of existingReturns) {
+        for (const item of pastRet.returnedItems) {
+          cumulativeReturnedQty[item.variantId] = (cumulativeReturnedQty[item.variantId] || 0) + Number(item.returnQty);
+        }
+      }
+
+      // 3. Validate returned items payload
+      if (!Array.isArray(data.returnedItems) || data.returnedItems.length === 0) {
+        throw new HttpException(400, 'At least one item must be submitted for return');
+      }
+
+      const activeReturnsToProcess: ReturnedItemRecord[] = [];
+      let totalReturnRefund = 0;
+
+      for (const retItem of data.returnedItems) {
+        const variantId = Number(retItem.variantId);
+        const returnQty = Number(retItem.returnQty);
+
+        if (!returnQty || returnQty <= 0) {
+          continue; // Skip items with 0 return quantity
+        }
+
+        // Locate original order item
+        const originalOrderItem = order.items.find((it) => it.variantId === variantId);
+        if (!originalOrderItem) {
+          throw new HttpException(400, `Item variant #${variantId} was not part of invoice #${orderId}`);
+        }
+
+        const originalPurchasedQty = originalOrderItem.quantity;
+        const alreadyReturned = cumulativeReturnedQty[variantId] || 0;
+        const returnableQty = originalPurchasedQty - alreadyReturned;
+
+        if (returnQty > returnableQty) {
+          const prodName = originalOrderItem.variant?.product?.name || `Variant #${variantId}`;
+          throw new HttpException(
+            400,
+            `Return quantity (${returnQty}) for "${prodName}" exceeds remaining returnable quantity (${returnableQty}). Original purchased: ${originalPurchasedQty}, already returned: ${alreadyReturned}.`
+          );
+        }
+
+        // Calculate unit price and line amount
+        const unitPrice = retItem.unitPrice !== undefined && Number(retItem.unitPrice) >= 0
+          ? Number(retItem.unitPrice)
+          : (originalOrderItem.unitPrice || (originalOrderItem.price / originalOrderItem.quantity));
+        const amount = Math.round(returnQty * unitPrice * 100) / 100;
+        totalReturnRefund += amount;
+
+        // Extract variant descriptor
+        const size = (originalOrderItem as any).size || originalOrderItem.variant?.size || '';
+        const color = (originalOrderItem as any).color || originalOrderItem.variant?.color || '';
+        const variantName = [size, color].filter(Boolean).join('/') || undefined;
+
+        activeReturnsToProcess.push({
+          variantId,
+          productId: retItem.productId || originalOrderItem.variant?.productId,
+          productName: originalOrderItem.variant?.product?.name || 'Garment Item',
+          variantName,
+          sku: originalOrderItem.variant?.sku,
+          returnQty,
+          unitPrice,
+          amount,
+        });
+      }
+
+      if (activeReturnsToProcess.length === 0 || totalReturnRefund <= 0) {
+        throw new HttpException(400, 'Return must contain at least one item with a quantity greater than zero');
+      }
+
+      totalReturnRefund = Math.round(totalReturnRefund * 100) / 100;
+
+      // 4. Atomic Inventory Restoration: increment ProductVariant.stock
+      for (const item of activeReturnsToProcess) {
+        await tx.productVariant.update({
+          where: { id: item.variantId },
+          data: {
+            stock: { increment: item.returnQty },
+          },
+        });
+      }
+
+      // 5. Financial Ledger Reconciliation & Due Rollback Arithmetic
+      const oldBillTotal = order.totalAmount;
+      const oldPaidAmount = order.paidAmount;
+      const oldCreditDue = Math.max(0, Math.round((oldBillTotal - oldPaidAmount) * 100) / 100);
+
+      const newBillTotal = Math.max(0, Math.round((oldBillTotal - totalReturnRefund) * 100) / 100);
+
+      let creditDueAdjustment = 0;
+      let cashRefundAmount = 0;
+
+      if (oldCreditDue > 0) {
+        creditDueAdjustment = Math.min(oldCreditDue, totalReturnRefund);
+        const excessRefund = totalReturnRefund - creditDueAdjustment;
+        if (excessRefund > 0) {
+          cashRefundAmount = Math.min(oldPaidAmount, excessRefund);
+        }
+      } else {
+        // Bill was fully paid: entire return value is refunded to customer
+        cashRefundAmount = Math.min(oldPaidAmount, totalReturnRefund);
+      }
+
+      const newPaidAmount = Math.max(0, Math.round((oldPaidAmount - cashRefundAmount) * 100) / 100);
+      const newCreditDue = Math.max(0, Math.round((newBillTotal - newPaidAmount) * 100) / 100);
+
+      // Decrement customer outstanding debt by the credit offset amount
+      if (order.customerId && creditDueAdjustment > 0) {
+        await tx.customer.update({
+          where: { id: order.customerId },
+          data: {
+            outstandingBalance: { decrement: creditDueAdjustment },
+          },
+        });
+      }
+
+      // Record negative order payment entry if cash/paid was refunded
+      if (cashRefundAmount > 0) {
+        await tx.orderPayment.create({
+          data: {
+            orderId: order.id,
+            amount: -cashRefundAmount,
+            method: order.paymentMethod || 'CASH',
+            reference: `Cash Refund: Item Return (${data.reason || 'Customer Return'})`,
+          },
+        });
+      }
+
+      // 6. Build Return Record & Update Order
+      const returnTimestamp = new Date();
+      const returnId = `RET-${order.id}-${Date.now().toString(36).toUpperCase()}`;
+      const recordedBy = data.recordedBy || user?.name || (user?.userId ? `User #${user.userId}` : 'Cashier');
+      const returnReason = (data.reason || 'Customer Request').trim();
+
+      const returnRecord: ReturnRecord = {
+        returnId,
+        returnDate: returnTimestamp.toISOString(),
+        returnedItems: activeReturnsToProcess,
+        totalReturnRefund,
+        reason: returnReason,
+        recordedBy,
+        creditDueAdjustment,
+        cashRefundAmount,
+      };
+
+      const updatedReturnsList = [...existingReturns, returnRecord];
+      const originalTotalAmount = parsedNotes.originalTotalAmount ?? oldBillTotal;
+
+      const updatedNotesPayload = JSON.stringify({
+        ...parsedNotes.rawParsed,
+        userNotes: parsedNotes.userNotes,
+        originalTotalAmount,
+        returns: updatedReturnsList,
+      });
+
+      const updatedOrder = await tx.order.update({
+        where: { id: order.id },
+        data: {
+          totalAmount: newBillTotal,
+          paidAmount: newPaidAmount,
+          notes: updatedNotesPayload,
+          updatedAt: returnTimestamp,
+        },
+        include: {
+          customer: {
+            select: { id: true, name: true, phone: true, outstandingBalance: true },
+          },
+          items: {
+            include: {
+              variant: {
+                include: {
+                  product: { select: { id: true, name: true } },
+                },
+              },
+            },
+          },
+          payments: {
+            orderBy: { createdAt: 'desc' },
+          },
+          user: { select: { id: true, name: true } },
+        },
+      });
+
+      return {
+        success: true,
+        returnRecord,
+        order: {
+          ...updatedOrder,
+          returns: updatedReturnsList,
+          originalTotalAmount,
+          newBillTotal,
+          newPaidAmount,
+          newCreditDue,
+          creditDueAdjustment,
+          cashRefundAmount,
+        },
+      };
+    });
+  }
 }
 
 
