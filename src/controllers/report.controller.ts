@@ -25,13 +25,19 @@ export async function getReportData(req: Request, res: Response): Promise<void> 
     throw new HttpException(400, `Invalid report module '${moduleParam}'. Valid modules: ${VALID_MODULES.join(', ')}`);
   }
 
+  const userRole = String(req.user?.role || '').toUpperCase();
+  if (userRole === 'REP' && moduleParam !== 'sales') {
+    throw new HttpException(403, 'Forbidden: Representatives are strictly restricted to viewing their own sales reports.');
+  }
+
   const dateFilter = resolveDateFilter({
     preset: req.query.preset as string,
     startDate: req.query.startDate as string,
     endDate: req.query.endDate as string,
   });
 
-  const report = await reportService.getReportData(moduleParam, dateFilter);
+  const repUserId = userRole === 'REP' ? Number(req.user?.userId) : undefined;
+  const report = await reportService.getReportData(moduleParam, dateFilter, repUserId);
 
   res.status(200).json({
     success: true,
@@ -50,13 +56,19 @@ export async function downloadReportPdf(req: Request, res: Response): Promise<vo
     throw new HttpException(400, `Invalid report module '${moduleParam}'. Valid modules: ${VALID_MODULES.join(', ')}`);
   }
 
+  const userRole = String(req.user?.role || '').toUpperCase();
+  if (userRole === 'REP' && moduleParam !== 'sales') {
+    throw new HttpException(403, 'Forbidden: Representatives are strictly restricted to downloading their own sales reports.');
+  }
+
   const dateFilter = resolveDateFilter({
     preset: req.query.preset as string,
     startDate: req.query.startDate as string,
     endDate: req.query.endDate as string,
   });
 
-  const report = await reportService.getReportData(moduleParam, dateFilter);
+  const repUserId = userRole === 'REP' ? Number(req.user?.userId) : undefined;
+  const report = await reportService.getReportData(moduleParam, dateFilter, repUserId);
   const pdfDoc = ReportPdfService.generate(moduleParam, report, req.user);
 
   const dateTag = dateFilter.startDate.toISOString().split('T')[0];

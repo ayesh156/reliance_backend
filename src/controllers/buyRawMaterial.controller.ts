@@ -37,6 +37,10 @@ export class BuyRawMaterialController {
 
   async delete(req: Request, res: Response, next: NextFunction) {
     try {
+      const userRole = String((req as any).user?.role || '').toUpperCase();
+      if (userRole === 'REP') {
+        return res.status(403).json({ error: 'Forbidden: Representatives cannot delete raw material purchases.' });
+      }
       const id = Number(req.params.id);
       const result = await buyRawMaterialService.delete(id);
       return sendSuccess(res, result);

@@ -13,8 +13,18 @@ export const createPosOrder = async (req: Request, res: Response, next: NextFunc
       return res.status(401).json({ error: 'Authenticated user session invalid' });
     }
 
+    const userRole = String((req as any).user?.role || '').toUpperCase();
+
     if (!req.body || !Array.isArray(req.body.items) || req.body.items.length === 0) {
       return res.status(400).json({ error: 'Order must contain at least one valid line item' });
+    }
+
+    // Role-based wholesale billing constraint for Sales Representatives (REP)
+    if (userRole === 'REP') {
+      if (req.body.source && req.body.source !== 'POS_WHOLESALE') {
+        return res.status(403).json({ error: 'Representatives are strictly restricted to wholesale POS billing.' });
+      }
+      req.body.source = 'POS_WHOLESALE';
     }
 
     const order = await orderService.createPosOrder({
@@ -123,7 +133,8 @@ export const deleteInvoiceOrder = async (req: Request, res: Response, next: Next
     if (!id || isNaN(id) || id <= 0) {
       return res.status(400).json({ error: 'Valid positive integer invoice ID is required' });
     }
-    const result = await orderService.deleteInvoiceOrder(id);
+    const currentUser = (req as any).user;
+    const result = await orderService.deleteInvoiceOrder(id, currentUser);
     sendSuccess(res, result);
   } catch (err) {
     next(err);

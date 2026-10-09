@@ -165,15 +165,20 @@ export class ReportService {
    * Aggregates gross revenue, discounts, net sales, paid amounts, credit/debt accumulation,
    * and payment method splits across POS retail, wholesale, and ecommerce orders.
    */
-  async getSalesReport(dateFilter: DateFilterResult) {
+  async getSalesReport(dateFilter: DateFilterResult, repUserId?: number) {
     const { startDate, endDate } = dateFilter;
 
-    // Use strictly indexed createdAt & status filters
+    // Use strictly indexed createdAt & status filters (with optional repUserId filter)
+    const whereClause: any = {
+      createdAt: { gte: startDate, lte: endDate },
+      status: { not: OrderStatus.CANCELLED },
+    };
+    if (repUserId) {
+      whereClause.userId = repUserId;
+    }
+
     const orders = await prisma.order.findMany({
-      where: {
-        createdAt: { gte: startDate, lte: endDate },
-        status: { not: OrderStatus.CANCELLED },
-      },
+      where: whereClause,
       orderBy: { createdAt: 'desc' },
       include: {
         customer: { select: { id: true, name: true, phone: true } },
@@ -1045,10 +1050,10 @@ export class ReportService {
   /**
    * Router Dispatcher: Delegates to domain-specific analytical aggregation service
    */
-  async getReportData(module: ReportModule, filter: DateFilterResult) {
+  async getReportData(module: ReportModule, filter: DateFilterResult, repUserId?: number) {
     switch (module) {
       case 'sales':
-        return this.getSalesReport(filter);
+        return this.getSalesReport(filter, repUserId);
       case 'returns':
         return this.getReturnsReport(filter);
       case 'inventory':

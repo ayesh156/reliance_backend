@@ -136,6 +136,10 @@ export class ProductionController {
    */
   async delete(req: Request, res: Response, next: NextFunction) {
     try {
+      const userRole = String((req as any).user?.role || '').toUpperCase();
+      if (userRole === 'REP') {
+        return res.status(403).json({ error: 'Forbidden: Representatives cannot delete production orders.' });
+      }
       const id = Number(req.params.id);
       if (!id || isNaN(id)) {
         return res.status(400).json({ error: 'Valid integer ID is required' });

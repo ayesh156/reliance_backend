@@ -73,6 +73,10 @@ export class RawMaterialShopController {
    */
   async delete(req: Request, res: Response, next: NextFunction) {
     try {
+      const userRole = String((req as any).user?.role || '').toUpperCase();
+      if (userRole === 'REP') {
+        return res.status(403).json({ error: 'Forbidden: Representatives cannot delete suppliers.' });
+      }
       const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = parseInt(String(rawId), 10);
       if (!id || isNaN(id) || id <= 0) {
