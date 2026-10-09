@@ -133,7 +133,17 @@ export const deleteInvoiceOrder = async (req: Request, res: Response, next: Next
     if (!id || isNaN(id) || id <= 0) {
       return res.status(400).json({ error: 'Valid positive integer invoice ID is required' });
     }
-    const currentUser = (req as any).user;
+    const user = (req as any).user;
+    if (!user) {
+      return res.status(401).json({ error: 'Authenticated user session invalid' });
+    }
+    const currentUser = {
+      id: Number(user.userId ?? user.id),
+      userId: Number(user.userId ?? user.id),
+      role: String(user.role || ''),
+      name: user.name,
+      email: user.email,
+    };
     const result = await orderService.deleteInvoiceOrder(id, currentUser);
     sendSuccess(res, result);
   } catch (err) {

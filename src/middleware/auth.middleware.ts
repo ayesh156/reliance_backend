@@ -46,7 +46,7 @@ export const verifyToken = (req: Request, res: Response, next: NextFunction): vo
 /**
  * Require one of the specified roles and ensure authenticated context exists
  */
-export const requireRole = (...roles: string[]) => {
+export const requireRole = (...roles: (string | string[])[]) => {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (!req.user || !req.user.role) {
       res.status(401).json({ error: 'Not authenticated or user context missing.' });
@@ -54,10 +54,10 @@ export const requireRole = (...roles: string[]) => {
     }
 
     const userRole = String(req.user.role).toUpperCase();
-    const allowedRoles = roles.map((r) => r.toUpperCase());
+    const allowedRoles = roles.flat().map((r) => String(r).toUpperCase());
 
     if (!allowedRoles.includes(userRole)) {
-      res.status(403).json({ error: `Access denied. Required role: ${roles.join(' or ')}` });
+      res.status(403).json({ error: `Access denied. Required role: ${allowedRoles.join(' or ')}` });
       return;
     }
     next();
