@@ -50,6 +50,42 @@ export class AttributeService {
   }
 
   /**
+   * Update category name and description
+   */
+  async updateCategory(id: number, data: { name?: string; description?: string }) {
+    const existing = await prisma.category.findUnique({ where: { id: Number(id) } });
+    if (!existing) throw new HttpException(404, 'Category not found');
+
+    const cleanName = data.name !== undefined ? data.name.trim() : existing.name;
+    if (!cleanName) throw new HttpException(400, 'Category name cannot be empty');
+
+    let slug = existing.slug;
+    if (data.name !== undefined) {
+      slug = cleanName
+        .toLowerCase()
+        .replace(/[^\w\s-]/g, '')
+        .replace(/[\s_-]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      const duplicate = await prisma.category.findFirst({
+        where: {
+          id: { not: Number(id) },
+          OR: [{ name: cleanName }, { slug }],
+        },
+      });
+      if (duplicate) throw new HttpException(409, 'Another category with this name or slug already exists');
+    }
+
+    return prisma.category.update({
+      where: { id: Number(id) },
+      data: {
+        name: cleanName,
+        slug,
+        description: data.description !== undefined ? data.description?.trim() || null : existing.description,
+      },
+    });
+  }
+
+  /**
    * Safely delete a category if not linked to active catalog products
    */
   async deleteCategory(id: number) {

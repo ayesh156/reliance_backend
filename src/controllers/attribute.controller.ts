@@ -23,6 +23,21 @@ export const createCategory = async (req: Request, res: Response, next: NextFunc
 };
 
 /**
+ * Handle updating a category
+ */
+export const updateCategory = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const id = parseInt(String(rawId), 10);
+    if (!id || isNaN(id) || id <= 0) {
+      return res.status(400).json({ error: 'Valid positive integer category ID is required' });
+    }
+    const category = await attributeService.updateCategory(id, req.body);
+    sendSuccess(res, category);
+  } catch (err) { next(err); }
+};
+
+/**
  * Handle category deletion with strict parameter validation and array guard
  * ⭐ Preserves product relations through soft delete if existing garments use this category
  */

@@ -7,6 +7,7 @@ const router = Router();
 // Categories endpoints unified under attributes
 router.get('/categories', attributeController.getCategories);
 router.post('/categories', verifyToken, requireRole('ADMIN', 'STAFF'), attributeController.createCategory);
+router.put('/categories/:id', verifyToken, requireRole('ADMIN', 'STAFF'), attributeController.updateCategory);
 router.delete('/categories/:id', verifyToken, requireRole('ADMIN'), attributeController.deleteCategory);
 
 // Sizes endpoints
