@@ -59,7 +59,7 @@ export class InvoicePdfService {
     const settledDue = Number(order.settledDueAmount || 0);
     const remainingChange = Math.max(0, Math.round((tendered - paidAmount - settledDue) * 100) / 100);
     const balanceDue = Math.max(0, Math.round((total - paidAmount) * 100) / 100);
-    const discountVal = Number(order.discount || 0);
+    const discountVal = Number(order.discountAmount ?? order.discount ?? 0);
     const subtotalVal = Number(order.subtotal || (total + discountVal) || 0);
 
     const isWholesale = order.source === 'POS_WHOLESALE' || order.orderType === 'WHOLESALE';
@@ -153,12 +153,18 @@ export class InvoicePdfService {
       ? Number(order.originalTotalAmount)
       : (total + totalReturnRefund);
 
+    const isFlatDiscount = order.discountType === 'FIXED';
+    const discountPercent = !isFlatDiscount
+      ? (Number(order.discountRate) || (subtotalVal > 0 ? ((discountVal / subtotalVal) * 100) : 0))
+      : 0;
+
     let discountDisplay = 'Discount:';
     if (discountVal > 0) {
-      const percent = order.discountRate !== undefined && Number(order.discountRate) > 0
-        ? Number(order.discountRate)
-        : (subtotalVal > 0 ? Math.round((discountVal / subtotalVal) * 100) : 0);
-      discountDisplay = percent > 0 ? `Discount (${percent}%):` : 'Discount:';
+      if (discountPercent > 0) {
+        discountDisplay = `Discount (${discountPercent.toFixed(1).replace(/\.0$/, '')}%):`;
+      } else {
+        discountDisplay = 'Discount:';
+      }
     }
 
     // Margins calibrated to 18mm Top/Bottom (51pt), 15mm Left/Right (42.5pt)
