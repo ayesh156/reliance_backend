@@ -453,13 +453,16 @@ export class OrderService {
   }
 
   /**
-   * Get paginated & filtered Invoices list with search & customer filter
+   * Get paginated & filtered Invoices list with multi-word search, customer filter & Sri Lanka timezone date boundaries
    */
   async getInvoices(params: {
     search?: string;
     customerId?: number;
     paymentMethod?: string;
     source?: OrderSource;
+    startDate?: string;
+    endDate?: string;
+    sortBy?: string;
     page?: number;
     limit?: number;
   }) {
@@ -481,15 +484,84 @@ export class OrderService {
       where.paymentMethod = params.paymentMethod;
     }
 
+    // Date range boundaries normalized in Sri Lanka timezone (UTC+05:30)
+    if (params.startDate || params.endDate) {
+      const parseBoundary = (raw: string | undefined, isEnd: boolean): Date | null => {
+        if (!raw || !raw.trim()) return null;
+        const str = raw.trim();
+        const ymdMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(str);
+        if (ymdMatch) {
+          const yr = ymdMatch[1];
+          const mo = ymdMatch[2].padStart(2, '0');
+          const dy = ymdMatch[3].padStart(2, '0');
+          const time = isEnd ? '23:59:59.999' : '00:00:00.000';
+          const d = new Date(`${yr}-${mo}-${dy}T${time}+05:30`);
+          return isNaN(d.getTime()) ? null : d;
+        }
+        const d = new Date(str);
+        return isNaN(d.getTime()) ? null : d;
+      };
+
+      let startBound = parseBoundary(params.startDate, false);
+      let endBound = parseBoundary(params.endDate, true);
+
+      if (startBound && endBound && startBound > endBound) {
+        const temp = startBound;
+        startBound = endBound;
+        endBound = temp;
+      }
+
+      if (startBound || endBound) {
+        where.createdAt = {};
+        if (startBound) where.createdAt.gte = startBound;
+        if (endBound) where.createdAt.lte = endBound;
+      }
+    }
+
+    // Instant Multi-word and Phone Number Matching across all order fields
     if (params.search && params.search.trim()) {
       const q = params.search.trim();
-      const numQuery = Number(q);
-      where.OR = [
-        ...(!isNaN(numQuery) ? [{ id: numQuery }] : []),
-        { customerName: { contains: q } },
-        { customerPhone: { contains: q } },
-        { paymentMethod: { contains: q } },
-      ];
+      const terms = q.split(/\s+/).filter(Boolean);
+
+      if (terms.length === 1) {
+        const term = terms[0];
+        const num = Number(term.replace(/^[#\s]*inv-?/i, ''));
+        where.OR = [
+          ...(!isNaN(num) && num > 0 ? [{ id: num }] : []),
+          { invoiceNumber: { contains: term } },
+          { customerName: { contains: term } },
+          { customerPhone: { contains: term } },
+          { paymentMethod: { contains: term } },
+          { customer: { is: { name: { contains: term } } } },
+          { customer: { is: { phone: { contains: term } } } },
+        ];
+      } else if (terms.length > 1) {
+        where.AND = terms.map((term) => {
+          const num = Number(term.replace(/^[#\s]*inv-?/i, ''));
+          return {
+            OR: [
+              ...(!isNaN(num) && num > 0 ? [{ id: num }] : []),
+              { invoiceNumber: { contains: term } },
+              { customerName: { contains: term } },
+              { customerPhone: { contains: term } },
+              { paymentMethod: { contains: term } },
+              { customer: { is: { name: { contains: term } } } },
+              { customer: { is: { phone: { contains: term } } } },
+            ],
+          };
+        });
+      }
+    }
+
+    let orderBy: any = { createdAt: 'desc' };
+    if (params.sortBy === 'oldest') {
+      orderBy = { createdAt: 'asc' };
+    } else if (params.sortBy === 'highest_amount') {
+      orderBy = { totalAmount: 'desc' };
+    } else if (params.sortBy === 'lowest_amount') {
+      orderBy = { totalAmount: 'asc' };
+    } else if (params.sortBy === 'highest_due') {
+      orderBy = [{ totalAmount: 'desc' }, { paidAmount: 'asc' }];
     }
 
     const [total, orders] = await Promise.all([
@@ -498,7 +570,7 @@ export class OrderService {
         where,
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy,
         include: {
           customer: { select: { id: true, name: true, phone: true, outstandingBalance: true } },
           items: {

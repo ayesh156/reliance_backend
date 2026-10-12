@@ -55,10 +55,13 @@ export const getPosCatalog = async (_req: Request, res: Response, next: NextFunc
  */
 export const getInvoices = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { search, customerId, paymentMethod, source, page, limit } = req.query;
+    const { search, customerId, paymentMethod, source, startDate, endDate, sortBy, page, limit } = req.query;
     const cleanSearch = typeof search === 'string' ? search.trim().slice(0, 100) : undefined;
     const cleanCustomerId = customerId && !isNaN(Number(customerId)) && Number(customerId) > 0 ? Number(customerId) : undefined;
     const cleanPaymentMethod = typeof paymentMethod === 'string' ? paymentMethod.trim().slice(0, 20) : undefined;
+    const cleanStartDate = typeof startDate === 'string' ? startDate.trim() : undefined;
+    const cleanEndDate = typeof endDate === 'string' ? endDate.trim() : undefined;
+    const cleanSortBy = typeof sortBy === 'string' ? sortBy.trim().slice(0, 30) : undefined;
 
     const parsedPage = Math.max(1, parseInt(String(page || 1), 10) || 1);
     const parsedLimit = Math.min(100, Math.max(1, parseInt(String(limit || 15), 10) || 15));
@@ -68,6 +71,9 @@ export const getInvoices = async (req: Request, res: Response, next: NextFunctio
       customerId: cleanCustomerId,
       paymentMethod: cleanPaymentMethod,
       source: source as any,
+      startDate: cleanStartDate,
+      endDate: cleanEndDate,
+      sortBy: cleanSortBy,
       page: parsedPage,
       limit: parsedLimit,
     });
