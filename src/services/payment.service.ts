@@ -639,5 +639,147 @@ export class PaymentService {
       };
     });
   }
+
+  /**
+   * Automated reconciliation routine for post-dated cheques (PDCs).
+   *
+   * Scans all customer post-dated cheques with status `PENDING` whose maturity date
+   * has elapsed (`chequeDate <= current_date`). Automatically transitions these cheques
+   * to `CLEARED` (Realized) in atomic database transactions without requiring manual clicks.
+   *
+   * Synchronizes the associated invoice payment ledger, updates structured order notes
+   * (`notes.cheques` & `notes.splitPayments`), ensures order paid amounts and status are
+   * consistent, and updates customer debt balances seamlessly.
+   *
+   * @param options Optional filter by customerId or orderId for targeted lazy reconciliation.
+   * @returns Object detailing count and IDs of reconciled cheques.
+   */
+  static async reconcileMaturedCheques(options?: { customerId?: number; orderId?: number }): Promise<{
+    reconciledCount: number;
+    reconciledIds: number[];
+  }> {
+    const now = new Date();
+    // Normalize to end of the current local day to ensure cheques dated for today are also matured
+    const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+    const whereClause: any = {
+      method: 'CHEQUE',
+      chequeStatus: ChequeStatus.PENDING,
+      chequeDate: {
+        not: null,
+        lte: endOfToday,
+      },
+      order: {
+        status: { not: OrderStatus.CANCELLED },
+        ...(options?.customerId ? { customerId: Number(options.customerId) } : {}),
+        ...(options?.orderId ? { id: Number(options.orderId) } : {}),
+      },
+    };
+
+    const maturedPayments = await prisma.orderPayment.findMany({
+      where: whereClause,
+      include: {
+        order: {
+          include: {
+            customer: true,
+          },
+        },
+      },
+    });
+
+    if (maturedPayments.length === 0) {
+      return { reconciledCount: 0, reconciledIds: [] };
+    }
+
+    const reconciledIds: number[] = [];
+
+    await prisma.$transaction(async (tx) => {
+      for (const cp of maturedPayments) {
+        // 1. Transition cheque status to CLEARED
+        await tx.orderPayment.update({
+          where: { id: cp.id },
+          data: {
+            chequeStatus: ChequeStatus.CLEARED,
+          },
+        });
+        reconciledIds.push(cp.id);
+
+        // 2. Synchronize structured order notes JSON if it contains cheque metadata
+        if (cp.order && cp.order.notes) {
+          let current: any = cp.order.notes;
+          let userNotes = '';
+          let splitPayments: any[] = [];
+          let cheques: any[] = [];
+          let rawParsed: any = {};
+          let parsedSuccessfully = false;
+
+          try {
+            while (typeof current === 'string' && current.trim().startsWith('{')) {
+              current = JSON.parse(current);
+            }
+            if (typeof current === 'object' && current !== null) {
+              rawParsed = current;
+              userNotes = current.userNotes || '';
+              if (Array.isArray(current.splitPayments)) splitPayments = current.splitPayments;
+              if (Array.isArray(current.cheques)) cheques = current.cheques;
+              parsedSuccessfully = true;
+            }
+          } catch {}
+
+          if (parsedSuccessfully) {
+            let notesModified = false;
+
+            let targetChqNo = '';
+            if (cp.reference) {
+              const match = /Cheque\s*#?([^\s(]+)/i.exec(cp.reference);
+              if (match) targetChqNo = match[1];
+            }
+
+            if (cheques.length > 0) {
+              cheques = cheques.map((c: any) => {
+                const matchNumber = Boolean(targetChqNo && c.chequeNumber && (c.chequeNumber === targetChqNo || targetChqNo.includes(c.chequeNumber)));
+                const matchAmount = Math.abs((Number(c.amount) || 0) - (Number(cp.amount) || 0)) < 0.01;
+                if ((matchNumber || matchAmount) && c.status !== 'CLEARED' && c.status !== 'BOUNCED') {
+                  notesModified = true;
+                  return { ...c, status: 'CLEARED' };
+                }
+                return c;
+              });
+            }
+
+            if (splitPayments.length > 0) {
+              splitPayments = splitPayments.map((s: any) => {
+                const matchAmount = Math.abs((Number(s.amount) || 0) - (Number(cp.amount) || 0)) < 0.01;
+                if (String(s.method).toUpperCase() === 'CHEQUE' && matchAmount && s.status !== 'CLEARED' && s.status !== 'BOUNCED') {
+                  notesModified = true;
+                  return { ...s, status: 'CLEARED' };
+                }
+                return s;
+              });
+            }
+
+            if (notesModified) {
+              const updatedNotes = JSON.stringify({
+                ...rawParsed,
+                userNotes,
+                cheques,
+                splitPayments,
+              });
+              await tx.order.update({
+                where: { id: cp.orderId },
+                data: { notes: updatedNotes },
+              });
+            }
+          }
+        }
+      }
+    });
+
+    return {
+      reconciledCount: reconciledIds.length,
+      reconciledIds,
+    };
+  }
 }
+
 

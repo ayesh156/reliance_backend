@@ -151,5 +151,24 @@ export class PaymentController {
       next(err);
     }
   }
+
+  /**
+   * POST /payments/reconcile-matured
+   * Manual trigger or webhook to reconcile all matured post-dated cheques.
+   */
+  static async reconcileMaturedCheques(req: Request, res: Response, next: NextFunction) {
+    try {
+      const customerId = req.query.customerId ? Number(req.query.customerId) : undefined;
+      const orderId = req.query.orderId ? Number(req.query.orderId) : undefined;
+      const result = await PaymentService.reconcileMaturedCheques({ customerId, orderId });
+      return sendSuccess(res, {
+        success: true,
+        message: 'Matured post-dated cheques reconciled successfully.',
+        ...result,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
 }
 

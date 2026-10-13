@@ -2,6 +2,7 @@ import { prisma } from '../lib/prisma.ts';
 import { CustomerType } from '@prisma/client';
 import { HttpException } from '../middleware/error.middleware.ts';
 import { isValidSriLankanPhone, isValidSriLankanNIC } from '../utils/validators.ts';
+import { PaymentService } from './payment.service.ts';
 
 export class CustomerService {
   /**
@@ -76,6 +77,13 @@ export class CustomerService {
    * Retrieve a single customer profile by primary key ID with live reconciled debt
    */
   async getCustomerById(id: number) {
+    // Automatically reconcile matured cheques for this customer before retrieving profile
+    try {
+      await PaymentService.reconcileMaturedCheques({ customerId: Number(id) });
+    } catch (reconcileErr) {
+      console.error('[CustomerService.getCustomerById] Warning: Failed to reconcile matured cheques:', reconcileErr);
+    }
+
     const customer = await prisma.customer.findUnique({
       where: { id: Number(id) },
       include: {
@@ -298,6 +306,13 @@ export class CustomerService {
    * Updates any customer whose stored outstandingBalance does not match the sum of open invoices (creditDue > 0).
    */
   async reconcileCustomerBalances(customerId?: number) {
+    // Reconcile matured cheques before recalculating active customer balances
+    try {
+      await PaymentService.reconcileMaturedCheques(customerId ? { customerId: Number(customerId) } : undefined);
+    } catch (reconcileErr) {
+      console.error('[CustomerService.reconcileCustomerBalances] Warning: Failed to reconcile matured cheques:', reconcileErr);
+    }
+
     const whereClause = {
       ...(customerId ? { id: Number(customerId) } : {}),
       isActive: true,

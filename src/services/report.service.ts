@@ -1,6 +1,7 @@
 import { prisma } from '../lib/prisma.ts';
 import { HttpException } from '../middleware/error.middleware.ts';
 import { parseOrderStructuredNotes } from './order.service.ts';
+import { PaymentService } from './payment.service.ts';
 import { OrderStatus } from '@prisma/client';
 
 export type ReportPreset = 'daily' | 'monthly' | 'yearly' | 'custom';
@@ -168,6 +169,13 @@ export class ReportService {
    */
   async getSalesReport(dateFilter: DateFilterResult, repUserId?: number) {
     const { startDate, endDate } = dateFilter;
+
+    // Trigger automated reconciliation of matured post-dated cheques before calculating sales & collections
+    try {
+      await PaymentService.reconcileMaturedCheques();
+    } catch (err) {
+      console.error('[ReportService.getSalesReport] Warning: reconcileMaturedCheques failed:', err);
+    }
 
     // Use strictly indexed createdAt & status filters (with optional repUserId filter)
     const whereClause: any = {
@@ -1015,6 +1023,13 @@ export class ReportService {
   async getChequesReport(dateFilter: DateFilterResult, repUserId?: number) {
     const { startDate, endDate } = dateFilter;
 
+    // 1. Trigger automated reconciliation of matured post-dated cheques before compiling report
+    try {
+      await PaymentService.reconcileMaturedCheques();
+    } catch (err) {
+      console.error('[ReportService.getChequesReport] Warning: reconcileMaturedCheques failed:', err);
+    }
+
     // Fetch all cheque payments linked to non-cancelled orders
     const whereClause: any = {
       method: 'CHEQUE',
@@ -1057,7 +1072,7 @@ export class ReportService {
     });
 
     const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
 
     let totalChequesCount = 0;
     let totalPendingAmount = 0;
@@ -1101,17 +1116,21 @@ export class ReportService {
         }
       }
 
-      const status = cp.chequeStatus || 'PENDING';
+      const rawStatus = cp.chequeStatus || 'PENDING';
+      // Automated Matured Cheque Inflow Determination:
+      // Any cheque whose maturity date is on or before today is treated as CLEARED / REALIZED (unless BOUNCED)
+      const isPastMaturity = chqDate.getTime() <= todayEnd.getTime();
+      const status = (rawStatus === 'PENDING' && isPastMaturity) ? 'CLEARED' : rawStatus;
       const isRealized = status === 'CLEARED';
       const isBounced = status === 'BOUNCED';
       const isPending = status === 'PENDING';
 
-      // Compute maturity status for pending cheques
+      // Compute maturity status for genuine upcoming pending cheques
       let maturityAlert: 'OVERDUE' | 'DUE_THIS_WEEK' | 'UPCOMING' | 'N/A' = 'N/A';
       let daysToMaturity = 0;
 
       if (isPending) {
-        const diffMs = chqDate.getTime() - todayStart.getTime();
+        const diffMs = chqDate.getTime() - todayEnd.getTime();
         daysToMaturity = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
         if (daysToMaturity < 0) {
           maturityAlert = 'OVERDUE';

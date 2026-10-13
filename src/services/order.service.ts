@@ -3,6 +3,7 @@ import { HttpException } from '../middleware/error.middleware.ts';
 import { OrderSource, OrderStatus } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { InvoicePdfService } from './invoice-pdf.service.ts';
+import { PaymentService } from './payment.service.ts';
 
 export interface ReturnedItemRecord {
   variantId: number;
@@ -470,6 +471,13 @@ export class OrderService {
     page?: number;
     limit?: number;
   }) {
+    // Automatically reconcile matured post-dated cheques before returning invoice query results
+    try {
+      await PaymentService.reconcileMaturedCheques(params.customerId ? { customerId: Number(params.customerId) } : undefined);
+    } catch (reconcileErr) {
+      console.error('[OrderService.getInvoices] Warning: Failed to reconcile matured cheques:', reconcileErr);
+    }
+
     const page = Math.max(1, Number(params.page) || 1);
     const limit = Math.max(1, Number(params.limit) || 15);
     const skip = (page - 1) * limit;
@@ -682,6 +690,13 @@ export class OrderService {
    * Get single invoice order details for editing in POS modal
    */
   async getInvoiceById(id: number) {
+    // Automatically reconcile matured cheques for this order before returning details
+    try {
+      await PaymentService.reconcileMaturedCheques({ orderId: Number(id) });
+    } catch (reconcileErr) {
+      console.error('[OrderService.getInvoiceById] Warning: Failed to reconcile matured cheques:', reconcileErr);
+    }
+
     const order = await prisma.order.findUnique({
       where: { id: Number(id) },
       include: {

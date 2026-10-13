@@ -4,6 +4,9 @@ import { verifyToken, requireRole } from '../middleware/auth.middleware.ts';
 
 const router = Router();
 
+// Automated reconciliation route
+router.post('/reconcile-matured', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), PaymentController.reconcileMaturedCheques);
+
 // Generic routes
 router.delete('/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), PaymentController.deletePayment);
 router.put('/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), PaymentController.editPayment);
