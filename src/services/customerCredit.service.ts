@@ -98,12 +98,23 @@ export class CustomerCreditService {
       .filter((bill) => bill.dueAmount > 0.01);
 
     const computedBillsDue = bills.reduce((acc, b) => acc + b.dueAmount, 0);
-    const effectiveTotalDue = Math.max(Number(customer.outstandingBalance) || 0, Math.round(computedBillsDue * 100) / 100);
+    const effectiveTotalDue = Math.round(computedBillsDue * 100) / 100;
+
+    // Atomically synchronize customer.outstandingBalance with verified invoice debts
+    if (Math.abs((Number(customer.outstandingBalance) || 0) - effectiveTotalDue) > 0.01) {
+      await prisma.customer.update({
+        where: { id: customerId },
+        data: { outstandingBalance: effectiveTotalDue },
+      });
+      customer.outstandingBalance = effectiveTotalDue;
+    }
 
     return {
       customer: {
         ...customer,
+        outstandingBalance: effectiveTotalDue,
         computedTotalDue: effectiveTotalDue,
+        totalOutstandingDue: effectiveTotalDue,
       },
       bills,
     };

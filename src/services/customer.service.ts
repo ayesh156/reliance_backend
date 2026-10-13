@@ -5,12 +5,13 @@ import { isValidSriLankanPhone, isValidSriLankanNIC } from '../utils/validators.
 
 export class CustomerService {
   /**
-   * Fetch customers with connection pool protection, explicit projection, and query limits
+   * Fetch customers with connection pool protection, explicit projection, query limits,
+   * and live dynamic debt reconciliation against active non-cancelled invoice ledgers.
    */
   async getCustomers(query?: string, type?: CustomerType) {
     const cleanQuery = query ? query.trim().slice(0, 100) : undefined;
 
-    return prisma.customer.findMany({
+    const customers = await prisma.customer.findMany({
       where: {
         isActive: true, // ⭐ Exclude archived customers
         ...(type ? { type } : {}),
@@ -42,14 +43,37 @@ export class CustomerService {
         rep: {
           select: { id: true, name: true },
         },
+        orders: {
+          where: { status: { not: 'CANCELLED' } },
+          select: {
+            totalAmount: true,
+            paidAmount: true,
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
       take: 200,
     });
+
+    // Reconcile and calculate live dynamic debt for each customer
+    return customers.map((c) => {
+      const liveDebt = c.orders.reduce(
+        (sum, o) => sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0)),
+        0
+      );
+      const reconciledDebt = Math.round(liveDebt * 100) / 100;
+      const { orders: _orders, ...rest } = c;
+
+      return {
+        ...rest,
+        outstandingBalance: reconciledDebt,
+        totalOutstandingDue: reconciledDebt,
+      };
+    });
   }
 
   /**
-   * Retrieve a single customer profile by primary key ID
+   * Retrieve a single customer profile by primary key ID with live reconciled debt
    */
   async getCustomerById(id: number) {
     const customer = await prisma.customer.findUnique({
@@ -57,7 +81,7 @@ export class CustomerService {
       include: {
         rep: { select: { id: true, name: true } },
         orders: {
-          take: 10,
+          take: 20,
           orderBy: { createdAt: 'desc' },
           select: {
             id: true,
@@ -76,7 +100,30 @@ export class CustomerService {
       throw new HttpException(404, 'Customer record not found');
     }
 
-    return customer;
+    const allActiveOrders = await prisma.order.findMany({
+      where: { customerId: Number(id), status: { not: 'CANCELLED' } },
+      select: { totalAmount: true, paidAmount: true },
+    });
+
+    const liveDebt = allActiveOrders.reduce(
+      (sum, o) => sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0)),
+      0
+    );
+    const reconciledDebt = Math.round(liveDebt * 100) / 100;
+
+    // Atomically fix stored balance if mismatched
+    if (Math.abs((Number(customer.outstandingBalance) || 0) - reconciledDebt) > 0.01) {
+      await prisma.customer.update({
+        where: { id: Number(id) },
+        data: { outstandingBalance: reconciledDebt },
+      });
+    }
+
+    return {
+      ...customer,
+      outstandingBalance: reconciledDebt,
+      totalOutstandingDue: reconciledDebt,
+    };
   }
 
   /**
@@ -209,9 +256,24 @@ export class CustomerService {
       ? Math.max(0, Number(data.creditLimit) || 0)
       : undefined;
 
-    const updatedOutstandingBalance = data.outstandingBalance !== undefined
+    let updatedOutstandingBalance = data.outstandingBalance !== undefined
       ? Number(data.outstandingBalance) || 0
       : undefined;
+
+    // Financial Safety Guard: prevent accidental zero-overwrites from wiping active invoice debt
+    if (updatedOutstandingBalance !== undefined) {
+      const activeDebtOrders = await prisma.order.findMany({
+        where: { customerId: Number(id), status: { not: 'CANCELLED' } },
+        select: { totalAmount: true, paidAmount: true },
+      });
+      const computedInvoiceDebt = activeDebtOrders.reduce(
+        (sum, o) => sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0)),
+        0
+      );
+      if (computedInvoiceDebt > 0 && updatedOutstandingBalance < computedInvoiceDebt) {
+        updatedOutstandingBalance = Math.round(computedInvoiceDebt * 100) / 100;
+      }
+    }
 
     return prisma.customer.update({
       where: { id: Number(id) },
@@ -229,6 +291,58 @@ export class CustomerService {
         repId: data.repId !== undefined ? (data.repId && !isNaN(Number(data.repId)) && Number(data.repId) > 0 ? Number(data.repId) : null) : undefined,
       },
     });
+  }
+
+  /**
+   * Reconcile customer outstanding balances with actual active invoice debts.
+   * Updates any customer whose stored outstandingBalance does not match the sum of open invoices (creditDue > 0).
+   */
+  async reconcileCustomerBalances(customerId?: number) {
+    const whereClause = {
+      ...(customerId ? { id: Number(customerId) } : {}),
+      isActive: true,
+    };
+
+    const customers = await prisma.customer.findMany({
+      where: whereClause,
+      include: {
+        orders: {
+          where: { status: { not: 'CANCELLED' } },
+          select: { totalAmount: true, paidAmount: true },
+        },
+      },
+    });
+
+    const reconciled: Array<{ id: number; name: string; oldBalance: number; newBalance: number }> = [];
+
+    for (const c of customers) {
+      const liveDebt = c.orders.reduce(
+        (sum, o) => sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0)),
+        0
+      );
+      const roundedDebt = Math.round(liveDebt * 100) / 100;
+      const storedDebt = Number(c.outstandingBalance) || 0;
+
+      if (Math.abs(storedDebt - roundedDebt) > 0.01) {
+        await prisma.customer.update({
+          where: { id: c.id },
+          data: { outstandingBalance: roundedDebt },
+        });
+        reconciled.push({
+          id: c.id,
+          name: c.name,
+          oldBalance: storedDebt,
+          newBalance: roundedDebt,
+        });
+      }
+    }
+
+    return {
+      success: true,
+      totalChecked: customers.length,
+      reconciledCount: reconciled.length,
+      reconciled,
+    };
   }
 
   /**

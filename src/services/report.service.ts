@@ -12,7 +12,8 @@ export type ReportModule =
   | 'materials'
   | 'production'
   | 'suppliers'
-  | 'audit';
+  | 'audit'
+  | 'cheques';
 
 export interface DateFilterResult {
   startDate: Date;
@@ -248,6 +249,18 @@ export class ReportService {
     const orderCount = orders.length;
     const averageOrderValue = orderCount > 0 ? Math.round((netSales / orderCount) * 100) / 100 : 0;
 
+    let totalReturns = 0;
+    for (const order of orders) {
+      if (order.notes && order.notes.includes('returns')) {
+        const parsed = parseOrderStructuredNotes(order.notes);
+        if (Array.isArray(parsed.returns)) {
+          for (const ret of parsed.returns) {
+            totalReturns += Number(ret.totalReturnRefund || 0);
+          }
+        }
+      }
+    }
+
     return {
       module: 'sales',
       dateFilter,
@@ -255,6 +268,7 @@ export class ReportService {
         orderCount,
         grossRevenue: Math.round(grossRevenue * 100) / 100,
         totalDiscount: Math.round(totalDiscount * 100) / 100,
+        totalReturns: Math.round(totalReturns * 100) / 100,
         netSales: Math.round(netSales * 100) / 100,
         totalPaid: Math.round(totalPaid * 100) / 100,
         totalDue: Math.round(totalDue * 100) / 100,
@@ -994,6 +1008,188 @@ export class ReportService {
   }
 
   /**
+   * 9. CHEQUE LEDGER & REALIZATION FORECAST REPORT
+   * Aggregates received and realized cheques, pending post-dated maturities,
+   * realization alerts (Overdue, Due This Week, Upcoming), and bounce rates.
+   */
+  async getChequesReport(dateFilter: DateFilterResult, repUserId?: number) {
+    const { startDate, endDate } = dateFilter;
+
+    // Fetch all cheque payments linked to non-cancelled orders
+    const whereClause: any = {
+      method: 'CHEQUE',
+      order: {
+        status: { not: OrderStatus.CANCELLED },
+        ...(repUserId ? { userId: repUserId } : {}),
+      },
+      OR: [
+        { chequeDate: { gte: startDate, lte: endDate } },
+        { createdAt: { gte: startDate, lte: endDate } },
+      ],
+    };
+
+    const chequePayments = await prisma.orderPayment.findMany({
+      where: whereClause,
+      include: {
+        order: {
+          select: {
+            id: true,
+            invoiceNumber: true,
+            totalAmount: true,
+            paidAmount: true,
+            status: true,
+            createdAt: true,
+            notes: true,
+            customer: {
+              select: {
+                id: true,
+                name: true,
+                phone: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: [
+        { chequeDate: 'asc' },
+        { createdAt: 'desc' },
+      ],
+    });
+
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+
+    let totalChequesCount = 0;
+    let totalPendingAmount = 0;
+    let pendingCount = 0;
+    let totalRealizedAmount = 0;
+    let realizedCount = 0;
+    let totalBouncedAmount = 0;
+    let bounceCount = 0;
+
+    let overdueCount = 0;
+    let overdueAmount = 0;
+    let dueThisWeekCount = 0;
+    let dueThisWeekAmount = 0;
+    let upcomingCount = 0;
+    let upcomingAmount = 0;
+
+    const realizedCheques: any[] = [];
+    const pendingCheques: any[] = [];
+    const bouncedCheques: any[] = [];
+    const tableItems: any[] = [];
+
+    for (const cp of chequePayments) {
+      totalChequesCount += 1;
+      const amt = Number(cp.amount) || 0;
+      const chqDate = cp.chequeDate ? new Date(cp.chequeDate) : new Date(cp.createdAt);
+      const chqDateStr = chqDate.toISOString().split('T')[0];
+
+      // Extract Bank Name and Cheque Number from reference if formatted
+      let chequeNumber = '-';
+      let bankName = '-';
+      if (cp.reference) {
+        const chqMatch = /Cheque\s*#?([^\s(]+)/i.exec(cp.reference);
+        if (chqMatch) {
+          chequeNumber = chqMatch[1];
+        } else {
+          chequeNumber = cp.reference.slice(0, 30);
+        }
+        const bankMatch = /\(([^)]+)\)/.exec(cp.reference);
+        if (bankMatch) {
+          bankName = bankMatch[1];
+        }
+      }
+
+      const status = cp.chequeStatus || 'PENDING';
+      const isRealized = status === 'CLEARED';
+      const isBounced = status === 'BOUNCED';
+      const isPending = status === 'PENDING';
+
+      // Compute maturity status for pending cheques
+      let maturityAlert: 'OVERDUE' | 'DUE_THIS_WEEK' | 'UPCOMING' | 'N/A' = 'N/A';
+      let daysToMaturity = 0;
+
+      if (isPending) {
+        const diffMs = chqDate.getTime() - todayStart.getTime();
+        daysToMaturity = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+        if (daysToMaturity < 0) {
+          maturityAlert = 'OVERDUE';
+          overdueCount += 1;
+          overdueAmount += amt;
+        } else if (daysToMaturity <= 7) {
+          maturityAlert = 'DUE_THIS_WEEK';
+          dueThisWeekCount += 1;
+          dueThisWeekAmount += amt;
+        } else {
+          maturityAlert = 'UPCOMING';
+          upcomingCount += 1;
+          upcomingAmount += amt;
+        }
+        totalPendingAmount += amt;
+        pendingCount += 1;
+      } else if (isRealized) {
+        totalRealizedAmount += amt;
+        realizedCount += 1;
+      } else if (isBounced) {
+        totalBouncedAmount += amt;
+        bounceCount += 1;
+      }
+
+      const chequeEntry = {
+        id: cp.id,
+        orderId: cp.orderId,
+        invoiceNumber: cp.order?.invoiceNumber || `INV${cp.orderId}`,
+        customerName: cp.order?.customer?.name || 'Walk-in Customer',
+        customerPhone: cp.order?.customer?.phone || '-',
+        amount: Math.round(amt * 100) / 100,
+        chequeNumber,
+        bankName,
+        chequeDate: chqDateStr,
+        createdAt: cp.createdAt.toISOString(),
+        status, // 'PENDING' | 'CLEARED' | 'BOUNCED'
+        statusLabel: isRealized ? 'REALIZED' : status,
+        maturityAlert,
+        daysToMaturity,
+        reference: cp.reference || '-',
+      };
+
+      tableItems.push(chequeEntry);
+      if (isRealized) {
+        realizedCheques.push(chequeEntry);
+      } else if (isBounced) {
+        bouncedCheques.push(chequeEntry);
+      } else {
+        pendingCheques.push(chequeEntry);
+      }
+    }
+
+    return {
+      module: 'cheques',
+      dateFilter,
+      summary: {
+        totalChequesCount,
+        totalPendingAmount: Math.round(totalPendingAmount * 100) / 100,
+        pendingCount,
+        totalRealizedAmount: Math.round(totalRealizedAmount * 100) / 100,
+        realizedCount,
+        totalBouncedAmount: Math.round(totalBouncedAmount * 100) / 100,
+        bounceCount,
+        overdueCount,
+        overdueAmount: Math.round(overdueAmount * 100) / 100,
+        dueThisWeekCount,
+        dueThisWeekAmount: Math.round(dueThisWeekAmount * 100) / 100,
+        upcomingCount,
+        upcomingAmount: Math.round(upcomingAmount * 100) / 100,
+      },
+      realizedCheques,
+      pendingCheques,
+      bouncedCheques,
+      tableItems,
+    };
+  }
+
+  /**
    * Master Consolidated Audit Compiler:
    * Aggregates all domain modules (Sales, Returns, Inventory, Products, Materials, Production, GRN, Audit Edits)
    * into a single unified analytical report payload with master executive summary.
@@ -1068,6 +1264,8 @@ export class ReportService {
         return this.getSuppliersReport(filter);
       case 'audit':
         return this.getAuditReport(filter);
+      case 'cheques':
+        return this.getChequesReport(filter, repUserId);
       default:
         throw new HttpException(400, `Unsupported report domain module: ${module}`);
     }

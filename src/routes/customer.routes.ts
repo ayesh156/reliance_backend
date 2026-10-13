@@ -8,6 +8,7 @@ const router = Router();
  * Routes guarded for ADMIN, STAFF, CASHIER, and REP members
  */
 router.get('/', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), customerController.getCustomers);
+router.post('/reconcile', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), customerController.reconcileCustomerBalances);
 router.get('/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), customerController.getCustomerById);
 router.post('/', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), customerController.createCustomer);
 router.put('/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), customerController.updateCustomer);

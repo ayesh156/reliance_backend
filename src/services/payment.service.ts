@@ -1,15 +1,17 @@
 import { prisma } from '../lib/prisma.ts';
 import { HttpException } from '../middleware/error.middleware.ts';
-import { OrderStatus, PurchasePaymentStatus } from '@prisma/client';
+import { OrderStatus, PurchasePaymentStatus, ChequeStatus } from '@prisma/client';
 
 export interface EditPaymentDTO {
-  amount: number;
+  amount?: number;
   paymentDate?: string | Date;
   reference?: string;
   method?: string;
   notes?: string; // Optional audit note / reason
   purchaseId?: number;
   type?: 'customer' | 'supplier';
+  chequeDate?: string | Date;
+  chequeStatus?: ChequeStatus | string;
 }
 
 export class PaymentService {
@@ -237,16 +239,11 @@ export class PaymentService {
   }
 
   /**
-   * Edit Payment details (Amount, Date, Reference, Method) with optional audit note & delta calculation
+   * Edit Payment details (Amount, Date, Reference, Method, Cheque Info) with optional audit note & delta calculation
    */
   static async editPayment(paymentId: number, data: EditPaymentDTO) {
     if (!paymentId || isNaN(paymentId)) {
       throw new HttpException(400, 'A valid Payment ID is required.');
-    }
-
-    const newAmount = Math.round(Number(data.amount) * 100) / 100;
-    if (isNaN(newAmount) || newAmount <= 0) {
-      throw new HttpException(400, 'Payment amount must be greater than Rs. 0.00.');
     }
 
     const auditNote = data.notes?.trim() || 'Payment details adjusted';
@@ -254,7 +251,11 @@ export class PaymentService {
     return await prisma.$transaction(async (tx) => {
       // 1. Check Supplier Purchase Payment
       if (data.type === 'supplier' || data.purchaseId) {
-        return await this.editSupplierPaymentTx(tx, paymentId, newAmount, data, auditNote);
+        const supAmount = data.amount !== undefined ? Math.round(Number(data.amount) * 100) / 100 : undefined;
+        if (supAmount !== undefined && (isNaN(supAmount) || supAmount <= 0)) {
+          throw new HttpException(400, 'Payment amount must be greater than Rs. 0.00.');
+        }
+        return await this.editSupplierPaymentTx(tx, paymentId, supAmount || 0, data, auditNote);
       }
 
       // 2. Try Customer OrderPayment
@@ -269,6 +270,11 @@ export class PaymentService {
 
       if (orderPayment) {
         const oldAmount = Number(orderPayment.amount) || 0;
+        const newAmount = data.amount !== undefined ? Math.round(Number(data.amount) * 100) / 100 : oldAmount;
+        if (isNaN(newAmount) || newAmount <= 0) {
+          throw new HttpException(400, 'Payment amount must be greater than Rs. 0.00.');
+        }
+
         const delta = Math.round((newAmount - oldAmount) * 100) / 100;
         const currentPaid = Number(orderPayment.order.paidAmount) || 0;
         const orderTotal = Number(orderPayment.order.totalAmount) || 0;
@@ -290,15 +296,17 @@ export class PaymentService {
           ? new Date(data.paymentDate)
           : orderPayment.createdAt;
 
-        // 1. Update Order paidAmount and status
-        await tx.order.update({
-          where: { id: orderPayment.orderId },
-          data: {
-            paidAmount: newPaidAmount,
-            status: isFullyPaid ? OrderStatus.PAID : OrderStatus.PROCESSING,
-            updatedAt: new Date(),
-          },
-        });
+        // 1. Update Order paidAmount and status if delta exists
+        if (delta !== 0) {
+          await tx.order.update({
+            where: { id: orderPayment.orderId },
+            data: {
+              paidAmount: newPaidAmount,
+              status: isFullyPaid ? OrderStatus.PAID : OrderStatus.PROCESSING,
+              updatedAt: new Date(),
+            },
+          });
+        }
 
         // 2. Adjust Customer outstanding credit balance with net difference (delta)
         if (orderPayment.order.customerId && delta !== 0) {
@@ -312,10 +320,32 @@ export class PaymentService {
           });
         }
 
-        // 3. Update OrderPayment record
+        // 3. Resolve cheque date and status
+        let resolvedChequeDate: Date | null | undefined = undefined;
+        if (data.chequeDate !== undefined) {
+          if (data.chequeDate && !isNaN(new Date(data.chequeDate).getTime())) {
+            resolvedChequeDate = new Date(data.chequeDate);
+          } else {
+            resolvedChequeDate = null;
+          }
+        }
+
+        let resolvedChequeStatus: any = undefined;
+        if (data.chequeStatus) {
+          const rawStatus = String(data.chequeStatus).toUpperCase();
+          if (rawStatus === 'REALIZED' || rawStatus === 'CLEARED') {
+            resolvedChequeStatus = 'CLEARED';
+          } else if (rawStatus === 'BOUNCED') {
+            resolvedChequeStatus = 'BOUNCED';
+          } else {
+            resolvedChequeStatus = 'PENDING';
+          }
+        }
+
+        // 4. Update OrderPayment record
         const formattedRef = data.reference !== undefined
-          ? (data.reference.trim() ? `${data.reference.trim()} [Edit: ${auditNote}]` : `[Edit: ${auditNote}]`)
-          : (orderPayment.reference ? `${orderPayment.reference} [Edit: ${auditNote}]` : `[Edit: ${auditNote}]`);
+          ? (data.reference.trim() ? `${data.reference.trim()}` : null)
+          : orderPayment.reference;
 
         const updatedPayment = await tx.orderPayment.update({
           where: { id: paymentId },
@@ -324,13 +354,15 @@ export class PaymentService {
             method: data.method || orderPayment.method,
             reference: formattedRef,
             createdAt: resolvedDate,
+            ...(resolvedChequeDate !== undefined ? { chequeDate: resolvedChequeDate } : {}),
+            ...(resolvedChequeStatus !== undefined ? { chequeStatus: resolvedChequeStatus } : {}),
           },
         });
 
         return {
           success: true,
           type: 'customer',
-          message: `Payment updated to Rs. ${newAmount.toFixed(2)} successfully.`,
+          message: `Payment updated successfully.`,
           updatedPayment,
           delta,
           newPaidAmount,
@@ -340,7 +372,8 @@ export class PaymentService {
       }
 
       // 3. If not in OrderPayment, check Supplier Purchase Payment
-      return await this.editSupplierPaymentTx(tx, paymentId, newAmount, data, auditNote);
+      const supAmount = data.amount !== undefined ? Math.round(Number(data.amount) * 100) / 100 : 0;
+      return await this.editSupplierPaymentTx(tx, paymentId, supAmount, data, auditNote);
     });
   }
 
@@ -467,4 +500,144 @@ export class PaymentService {
 
     throw new HttpException(404, 'Payment record not found.');
   }
+
+  /**
+   * Cancel and optionally replace a customer cheque tied to an order.
+   * Marks the target cheque as BOUNCED, adjusts order paid/due balances,
+   * updates customer debt balance, and optionally issues a replacement cheque atomically.
+   */
+  static async cancelAndReplaceCustomerCheque(
+    paymentId: number,
+    data: {
+      orderId?: number;
+      action?: 'CANCEL' | 'REPLACE';
+      replacement?: {
+        chequeNumber: string;
+        bankName?: string;
+        chequeDate: string | Date;
+        amount: number;
+      };
+      reason?: string;
+    }
+  ) {
+    if ((!paymentId || isNaN(paymentId)) && (!data.orderId || isNaN(data.orderId))) {
+      throw new HttpException(400, 'A valid Payment ID or Order ID is required.');
+    }
+
+    return await prisma.$transaction(async (tx) => {
+      let orderPayment: any = null;
+      if (paymentId && !isNaN(paymentId)) {
+        orderPayment = await tx.orderPayment.findUnique({
+          where: { id: paymentId },
+          include: {
+            order: {
+              include: { customer: true },
+            },
+          },
+        });
+      }
+
+      // If not found by paymentId but orderId is provided, look up order
+      let order: any = null;
+      if (orderPayment) {
+        order = orderPayment.order;
+      } else if (data.orderId && !isNaN(data.orderId)) {
+        order = await tx.order.findUnique({
+          where: { id: Number(data.orderId) },
+          include: { customer: true, payments: true },
+        });
+        if (!order) {
+          throw new HttpException(404, `Invoice Order #${data.orderId} not found.`);
+        }
+      } else {
+        throw new HttpException(404, `Payment record #${paymentId} not found.`);
+      }
+
+      const cancelledAmount = orderPayment ? (Number(orderPayment.amount) || 0) : (data.replacement ? Number(data.replacement.amount) : Number(order.paidAmount));
+      const cancelReason = (data.reason || 'Bounced / Cancelled').trim();
+
+      // Mark original cheque as BOUNCED if orderPayment exists
+      let updatedOriginal: any = null;
+      if (orderPayment) {
+        updatedOriginal = await tx.orderPayment.update({
+          where: { id: paymentId },
+          data: {
+            chequeStatus: ChequeStatus.BOUNCED,
+            reference: `${orderPayment.reference || 'Cheque'} [CANCELLED: ${cancelReason}]`,
+          },
+        });
+      }
+
+      let replacementPayment: any = null;
+      let replacementAmount = 0;
+
+      if (data.action === 'REPLACE' || (data.replacement && Number(data.replacement.amount) > 0)) {
+        if (!data.replacement?.chequeNumber) {
+          throw new HttpException(400, 'Replacement cheque number is required.');
+        }
+        replacementAmount = Math.max(0, Math.round(Number(data.replacement.amount) * 100) / 100);
+        const repChqNo = data.replacement.chequeNumber.trim();
+        const repBank = (data.replacement.bankName || '').trim();
+        const repDate = data.replacement.chequeDate ? new Date(data.replacement.chequeDate) : new Date();
+
+        replacementPayment = await tx.orderPayment.create({
+          data: {
+            orderId: order.id,
+            amount: replacementAmount,
+            method: 'CHEQUE',
+            reference: `Cheque #${repChqNo}${repBank ? ` (${repBank})` : ''}${paymentId ? ` [Replacement for #${paymentId}]` : ''}`,
+            chequeDate: isNaN(repDate.getTime()) ? new Date() : repDate,
+            chequeStatus: ChequeStatus.PENDING,
+            createdAt: new Date(),
+          },
+        });
+      }
+
+      // Calculate net delta on invoice paidAmount: delta = replacementAmount - cancelledAmount
+      const delta = Math.round((replacementAmount - cancelledAmount) * 100) / 100;
+      const currentOrderPaid = Number(order.paidAmount) || 0;
+      const newOrderPaid = Math.max(0, Math.round((currentOrderPaid + delta) * 100) / 100);
+      const orderTotal = Number(order.totalAmount) || 0;
+      const isFullyPaid = newOrderPaid >= orderTotal;
+
+      const updatedOrder = await tx.order.update({
+        where: { id: order.id },
+        data: {
+          paidAmount: newOrderPaid,
+          status: isFullyPaid ? OrderStatus.PAID : OrderStatus.PROCESSING,
+          updatedAt: new Date(),
+        },
+        include: {
+          customer: true,
+          payments: { orderBy: { createdAt: 'asc' } },
+        },
+      });
+
+      // Adjust customer outstanding balance: if delta < 0 (paid dropped), customer debt increases!
+      if (order.customerId && delta !== 0) {
+        await tx.customer.update({
+          where: { id: order.customerId },
+          data: {
+            outstandingBalance: {
+              decrement: delta,
+            },
+          },
+        });
+      }
+
+      return {
+        success: true,
+        message: replacementPayment
+          ? `Cheque cancelled and replacement cheque #${data.replacement?.chequeNumber} issued successfully.`
+          : `Cheque marked cancelled. Invoice balance and customer credit ledger adjusted.`,
+        cancelledPayment: updatedOriginal,
+        replacementPayment,
+        orderId: order.id,
+        newPaidAmount: newOrderPaid,
+        balanceDue: Math.max(0, Math.round((orderTotal - newOrderPaid) * 100) / 100),
+        updatedOrder,
+      };
+    });
+  }
 }
+

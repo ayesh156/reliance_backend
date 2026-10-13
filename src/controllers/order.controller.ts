@@ -51,7 +51,16 @@ export const getPosCatalog = async (_req: Request, res: Response, next: NextFunc
 
 
 /**
- * Handle listing paginated invoices with sanitized search and safe limits
+ * Handle listing paginated invoices with sanitized search, multi-tenant filters, and safe limits.
+ *
+ * Supported `sortBy` modes:
+ * - 'newest': Descending issue timestamp (default)
+ * - 'oldest': Ascending issue timestamp
+ * - 'most_overdue' / 'overdue_oldest': Isolates unpaid invoices (creditDue > 0) ordered by oldest issue date first (createdAt ASC)
+ * - 'least_overdue' / 'overdue_newest': Isolates unpaid invoices (creditDue > 0) ordered by newest issue date first (createdAt DESC)
+ * - 'highest_amount': Orders by totalAmount DESC
+ * - 'lowest_amount': Orders by totalAmount ASC
+ * - 'highest_due': Orders by totalAmount DESC, paidAmount ASC
  */
 export const getInvoices = async (req: Request, res: Response, next: NextFunction) => {
   try {

@@ -12,6 +12,7 @@ const VALID_MODULES: ReportModule[] = [
   'production',
   'suppliers',
   'audit',
+  'cheques',
 ];
 
 /**

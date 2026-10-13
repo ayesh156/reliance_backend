@@ -142,3 +142,16 @@ export const deleteCustomer = async (req: Request, res: Response, next: NextFunc
     next(err);
   }
 };
+
+/**
+ * Handle on-demand reconciliation of customer balances against active invoice ledgers
+ */
+export const reconcileCustomerBalances = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const customerId = req.body?.customerId ? Number(req.body.customerId) : undefined;
+    const result = await customerService.reconcileCustomerBalances(customerId);
+    sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+};

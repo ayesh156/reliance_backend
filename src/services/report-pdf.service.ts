@@ -43,6 +43,7 @@ const MODULE_TITLES: Record<ReportModule, string> = {
   production: 'GARMENT PRODUCTION & YIELD',
   suppliers: 'SUPPLIERS & GOODS RECEIVED NOTES',
   audit: 'INVOICE MODIFICATIONS & AUDIT',
+  cheques: 'CHEQUE LEDGER & REALIZATION FORECAST',
 };
 
 // Module column definitions for tables
@@ -141,6 +142,18 @@ function getModuleColumns(module: ReportModule): ColumnDef[] {
         { header: 'AMOUNT', width: 55, align: 'right', key: 'totalAmount', format: (v) => formatCurrency(v).replace('Rs. ', '') },
         { header: 'STATUS', width: 40.28, align: 'center', key: 'status' },
       ];
+
+    case 'cheques':
+      return [
+        { header: 'CHQ #', width: 60, key: 'chequeNumber' },
+        { header: 'BANK', width: 70, key: 'bankName' },
+        { header: 'CHQ DATE', width: 65, key: 'chequeDate' },
+        { header: 'INV #', width: 55, key: 'invoiceNumber' },
+        { header: 'CUSTOMER', width: 95, key: 'customerName' },
+        { header: 'AMOUNT', width: 75, align: 'right', key: 'amount', format: (v) => formatCurrency(v).replace('Rs. ', '') },
+        { header: 'STATUS', width: 50, align: 'center', key: 'statusLabel' },
+        { header: 'ALERT', width: 40.28, align: 'center', key: 'maturityAlert' },
+      ];
   }
 }
 
@@ -204,6 +217,13 @@ function getModuleKpiCards(module: ReportModule, sum: any): KpiCard[] {
       { label: 'MODIFIED INVOICES', value: String(sum.modifiedInvoicesCount || 0) },
       { label: 'MODIFICATION RATE', value: `${sum.modificationRate || 0}%` },
       { label: 'TOP REVISOR', value: String(sum.topCashierWithEdits || 'N/A') }
+    );
+  } else if (module === 'cheques') {
+    cards.push(
+      { label: 'TOTAL CHEQUES', value: `${sum.totalChequesCount || 0}` },
+      { label: 'PENDING RECEIVABLES', value: formatCurrency(sum.totalPendingAmount) },
+      { label: 'REALIZED INFLOW', value: formatCurrency(sum.totalRealizedAmount) },
+      { label: 'BOUNCED CHEQUES', value: `${sum.bounceCount || 0} (${formatCurrency(sum.totalBouncedAmount)})` }
     );
   }
   return cards;

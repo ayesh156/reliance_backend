@@ -280,10 +280,12 @@ export class OrderService {
         },
       });
 
-      // 3. Secure Customer Credit Verification & Outstanding Sync
+      // 3. Secure Customer Credit Verification & Atomic Outstanding Debt Propagation
+      // Automatically triggers for ANY remaining unpaid invoice debt, regardless of whether
+      // the payment method was CREDIT, CHEQUE, CASH, or SPLIT payments.
       if (data.customerId) {
         const custId = Number(data.customerId);
-        const creditDue = Math.max(0, total - paid);
+        const unpaidBalance = Math.max(0, Math.round((total - paid) * 100) / 100);
         const targetCustomer = await tx.customer.findUnique({
           where: { id: custId },
         });
@@ -293,7 +295,7 @@ export class OrderService {
         }
 
         // Check if customer exceeds allowable credit limit
-        if (creditDue > 0 && targetCustomer.creditLimit > 0 && (targetCustomer.outstandingBalance + creditDue) > targetCustomer.creditLimit) {
+        if (unpaidBalance > 0 && targetCustomer.creditLimit > 0 && (targetCustomer.outstandingBalance + unpaidBalance) > targetCustomer.creditLimit) {
           throw new HttpException(
             400,
             `Transaction exceeds allowed credit limit of Rs. ${targetCustomer.creditLimit}. Current outstanding: Rs. ${targetCustomer.outstandingBalance}`
@@ -348,10 +350,12 @@ export class OrderService {
           }
         }
 
-        if (creditDue > 0) {
+        // 2. Atomic Customer Debt Synchronization:
+        // Increments Customer.outstandingBalance whenever unpaid balance remains on ANY payment method
+        if (unpaidBalance > 0) {
           await tx.customer.update({
             where: { id: custId },
-            data: { outstandingBalance: { increment: creditDue } },
+            data: { outstandingBalance: { increment: unpaidBalance } },
           });
         }
 
@@ -518,43 +522,92 @@ export class OrderService {
       }
     }
 
-    // Instant Multi-word and Phone Number Matching across all order fields
+    /**
+     * Helper to sanitize and parse numerical invoice IDs from search queries.
+     * Matches patterns: #INV123, INV123, INV-123, #123, raw digits 123, or space-separated #INV 123.
+     */
+    const parseInvoiceId = (term: string): number | null => {
+      const cleaned = term.trim();
+      const match = cleaned.match(/^(?:#\s*)?(?:INV[-_\s]*|ORD[-_\s]*)?(\d+)$/i);
+      if (match) {
+        const parsed = parseInt(match[1], 10);
+        return !isNaN(parsed) && parsed > 0 ? parsed : null;
+      }
+      return null;
+    };
+
+    /**
+     * Builds comprehensive Prisma OR conditions for an individual search term.
+     */
+    const buildSearchConditions = (term: string) => {
+      const parsedInvoiceId = parseInvoiceId(term);
+      const cleanTerm = term.replace(/^#\s*/, '');
+
+      const orConditions: any[] = [];
+
+      // Include numerical invoice ID match if valid
+      if (parsedInvoiceId) {
+        orConditions.push({ id: parsedInvoiceId });
+      }
+
+      // Exact and sanitized invoice number contains matches
+      orConditions.push({ invoiceNumber: { contains: term } });
+      if (cleanTerm && cleanTerm !== term) {
+        orConditions.push({ invoiceNumber: { contains: cleanTerm } });
+      }
+
+      // Customer name, phone, and payment method matches
+      orConditions.push(
+        { customerName: { contains: term } },
+        { customerPhone: { contains: term } },
+        { paymentMethod: { contains: term } },
+        { customer: { is: { name: { contains: term } } } },
+        { customer: { is: { phone: { contains: term } } } }
+      );
+
+      return orConditions;
+    };
+
+    // Instant Multi-word, Invoice Number, and Phone Number Matching across all order fields
     if (params.search && params.search.trim()) {
       const q = params.search.trim();
+      const entireInvoiceId = parseInvoiceId(q);
       const terms = q.split(/\s+/).filter(Boolean);
 
-      if (terms.length === 1) {
-        const term = terms[0];
-        const num = Number(term.replace(/^[#\s]*inv-?/i, ''));
+      if (entireInvoiceId) {
+        // Direct numerical ID priority condition
+        const cleanQuery = q.replace(/^#\s*/, '');
         where.OR = [
-          ...(!isNaN(num) && num > 0 ? [{ id: num }] : []),
-          { invoiceNumber: { contains: term } },
-          { customerName: { contains: term } },
-          { customerPhone: { contains: term } },
-          { paymentMethod: { contains: term } },
-          { customer: { is: { name: { contains: term } } } },
-          { customer: { is: { phone: { contains: term } } } },
+          { id: entireInvoiceId },
+          { invoiceNumber: { contains: q } },
+          ...(cleanQuery !== q ? [{ invoiceNumber: { contains: cleanQuery } }] : []),
+          { customerName: { contains: q } },
+          { customerPhone: { contains: q } },
+          { customer: { is: { name: { contains: q } } } },
+          { customer: { is: { phone: { contains: q } } } },
         ];
+      } else if (terms.length === 1) {
+        where.OR = buildSearchConditions(terms[0]);
       } else if (terms.length > 1) {
-        where.AND = terms.map((term) => {
-          const num = Number(term.replace(/^[#\s]*inv-?/i, ''));
-          return {
-            OR: [
-              ...(!isNaN(num) && num > 0 ? [{ id: num }] : []),
-              { invoiceNumber: { contains: term } },
-              { customerName: { contains: term } },
-              { customerPhone: { contains: term } },
-              { paymentMethod: { contains: term } },
-              { customer: { is: { name: { contains: term } } } },
-              { customer: { is: { phone: { contains: term } } } },
-            ],
-          };
-        });
+        where.AND = terms.map((term) => ({
+          OR: buildSearchConditions(term),
+        }));
       }
     }
 
     let orderBy: any = { createdAt: 'desc' };
-    if (params.sortBy === 'oldest') {
+    const isOverdueOldest = params.sortBy === 'most_overdue' || params.sortBy === 'overdue_oldest';
+    const isOverdueRecent = params.sortBy === 'least_overdue' || params.sortBy === 'overdue_newest';
+
+    /**
+     * Dual Overdue Sorting Options:
+     * - 'most_overdue' / 'overdue_oldest': Filters unpaid/due invoices (creditDue > 0) and orders by oldest issue date first (createdAt ASC).
+     * - 'least_overdue' / 'overdue_newest': Filters unpaid/due invoices (creditDue > 0) and orders by newest issue date first (createdAt DESC).
+     */
+    if (isOverdueOldest || isOverdueRecent) {
+      where.status = { notIn: [OrderStatus.PAID, OrderStatus.CANCELLED] };
+      orderBy = isOverdueOldest ? { createdAt: 'asc' } : { createdAt: 'desc' };
+    } else if (params.sortBy === 'oldest') {
       orderBy = { createdAt: 'asc' };
     } else if (params.sortBy === 'highest_amount') {
       orderBy = { totalAmount: 'desc' };
@@ -582,6 +635,9 @@ export class OrderService {
               },
             },
           },
+          payments: {
+            orderBy: { createdAt: 'desc' },
+          },
           user: { select: { id: true, name: true } },
         },
       }),
@@ -604,13 +660,20 @@ export class OrderService {
       };
     });
 
+    let resultOrders = mappedOrders;
+    if (isOverdueOldest || isOverdueRecent) {
+      resultOrders = mappedOrders.filter(
+        (order) => Math.max(0, (Number(order.totalAmount) || 0) - (Number(order.paidAmount) || 0)) > 0
+      );
+    }
+
     return {
-      data: mappedOrders,
+      data: resultOrders,
       pagination: {
-        total,
+        total: isOverdueOldest || isOverdueRecent ? resultOrders.length : total,
         page,
         limit,
-        totalPages: Math.ceil(total / limit) || 1,
+        totalPages: isOverdueOldest || isOverdueRecent ? Math.ceil(resultOrders.length / limit) || 1 : Math.ceil(total / limit) || 1,
       },
     };
   }
@@ -863,14 +926,20 @@ export class OrderService {
             });
           }
         } else {
-          // Same customer: apply net difference
-          const balanceAdjustment = (newCreditDue - oldCreditDue) - (newSettledDue - oldSettledDue);
-          if (balanceAdjustment !== 0) {
-            await tx.customer.update({
-              where: { id: custId },
-              data: { outstandingBalance: { increment: balanceAdjustment } },
-            });
-          }
+          // Same customer: calculate true live outstanding balance from all active orders to prevent any desync
+          const allActiveCustomerOrders = await tx.order.findMany({
+            where: { customerId: custId, status: { not: OrderStatus.CANCELLED } },
+            select: { id: true, totalAmount: true, paidAmount: true },
+          });
+          const trueLiveDebt = allActiveCustomerOrders.reduce((sum, o) => {
+            const ordTotal = o.id === orderId ? newTotal : Number(o.totalAmount || 0);
+            const ordPaid = o.id === orderId ? newPaid : Number(o.paidAmount || 0);
+            return sum + Math.max(0, ordTotal - ordPaid);
+          }, 0);
+          await tx.customer.update({
+            where: { id: custId },
+            data: { outstandingBalance: Math.round(trueLiveDebt * 100) / 100 },
+          });
         }
       }
 

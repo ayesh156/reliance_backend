@@ -29,16 +29,18 @@ export class PaymentController {
     try {
       const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const paymentId = Number(rawId);
-      const { amount, paymentDate, reference, method, notes, purchaseId, type } = req.body;
+      const { amount, paymentDate, reference, method, notes, purchaseId, type, chequeDate, chequeStatus } = req.body;
 
       const result = await PaymentService.editPayment(paymentId, {
-        amount: Number(amount),
+        amount: amount !== undefined ? Number(amount) : undefined,
         paymentDate,
         reference,
         method,
         notes,
         purchaseId: purchaseId ? Number(purchaseId) : undefined,
         type,
+        chequeDate,
+        chequeStatus,
       });
 
       return sendSuccess(res, result);
@@ -68,15 +70,17 @@ export class PaymentController {
     try {
       const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const paymentId = Number(rawId);
-      const { amount, paymentDate, reference, method, notes } = req.body;
+      const { amount, paymentDate, reference, method, notes, chequeDate, chequeStatus } = req.body;
 
       const result = await PaymentService.editPayment(paymentId, {
-        amount: Number(amount),
+        amount: amount !== undefined ? Number(amount) : undefined,
         paymentDate,
         reference,
         method,
         notes,
         type: 'customer',
+        chequeDate,
+        chequeStatus,
       });
 
       return sendSuccess(res, result);
@@ -123,4 +127,29 @@ export class PaymentController {
       next(err);
     }
   }
+
+  /**
+   * POST /payments/:id/cancel-replace
+   * POST /payments/customer/:id/cancel-replace
+   * Cancels a bounced/cancelled cheque and optionally issues a replacement cheque atomically.
+   */
+  static async cancelAndReplacePayment(req: Request, res: Response, next: NextFunction) {
+    try {
+      const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const paymentId = Number(rawId);
+      const { action, replacement, reason, orderId } = req.body;
+
+      const result = await PaymentService.cancelAndReplaceCustomerCheque(paymentId, {
+        orderId: orderId ? Number(orderId) : undefined,
+        action: action || (replacement ? 'REPLACE' : 'CANCEL'),
+        replacement,
+        reason,
+      });
+
+      return sendSuccess(res, result);
+    } catch (err) {
+      next(err);
+    }
+  }
 }
+
