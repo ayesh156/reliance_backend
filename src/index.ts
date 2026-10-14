@@ -135,8 +135,9 @@ app.use(
 // Utilizes official cors() middleware with dynamic origin resolver and 24h preflight cache
 // ===================================
 const configuredAllowedOrigins = [
-  'https://reliance.ecosystemlk.app',
-  'https://api.reliance.ecosystemlk.app',
+  // [UPDATE] පැරණි ecosystemlk ඩොමේන් ඉවත් කර අලුත් Frontend සහ Backend ඩොමේන් මෙතැනට ඇතුළත් කර ඇත
+  'https://relianceapparel.lk',
+  'https://api-reliance.nebulainfinite.com',
   'http://localhost:5173',
   'http://127.0.0.1:5173',
   'http://localhost:3000',
@@ -155,14 +156,16 @@ app.use(
       const isAllowed =
         configuredAllowedOrigins.some((item) => cleanOrigin === item.replace(/\/+$/, '')) ||
         /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(cleanOrigin) ||
-        /\.ecosystemlk\.app$/i.test(cleanOrigin);
+        // [UPDATE] අලුත් ඩොමේන් වලට අදාළව Sub-domain සහ Root domain අනුමත කිරීම සඳහා වෙනස් කරන ලදී
+        /relianceapparel\.lk$/i.test(cleanOrigin) ||
+        /nebulainfinite\.com$/i.test(cleanOrigin);
 
       if (isAllowed) {
         return callback(null, cleanOrigin);
       }
 
-      // Safe Fallback: Echoes default domain instead of crashing with a 500 error
-      return callback(null, 'https://reliance.ecosystemlk.app');
+      // [UPDATE] Safe Fallback: දෝෂයක් ආවොත් අලුත් ප්‍රධාන ඩොමේන් එකට (Frontend) යොමු කිරීම
+      return callback(null, 'https://relianceapparel.lk');
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
