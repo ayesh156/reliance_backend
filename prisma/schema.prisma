@@ -47,6 +47,13 @@ enum ChequeStatus {
   BOUNCED
 }
 
+enum SalesOrderStatus {
+  PENDING
+  CONFIRMED
+  CONVERTED
+  CANCELLED
+}
+
 // ----------------------------------------------------
 // USERS & CUSTOMERS
 // ----------------------------------------------------
@@ -62,6 +69,7 @@ model User {
   
   assignedCustomers Customer[] @relation("RepCustomers")
   createdOrders     Order[]    @relation("UserOrders")
+  createdSalesOrders SalesOrder[] @relation("UserSalesOrders")
 
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
@@ -87,6 +95,7 @@ model Customer {
   rep                User?        @relation("RepCustomers", fields: [repId], references: [id])
 
   orders             Order[]
+  salesOrders        SalesOrder[] @relation("CustomerSalesOrders")
   // ⭐ Soft delete / Archive support: Keeps sales ledger history while hiding customer from UI
   isActive           Boolean      @default(true)
   createdAt          DateTime     @default(now())
@@ -173,6 +182,7 @@ model ProductVariant {
   
   images         ProductImage[]
   orderItems     OrderItem[]
+  salesOrderItems SalesOrderItem[]
   productionOrders ProductionOrder[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
@@ -265,6 +275,7 @@ model Order {
   
   items             OrderItem[]
   payments          OrderPayment[]
+  salesOrder        SalesOrder?   @relation("SalesOrderInvoice")
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 
@@ -298,6 +309,76 @@ model OrderPayment {
   chequeStatus ChequeStatus? @default(PENDING)
   createdAt    DateTime      @default(now())
   @@map("order_payments")
+}
+
+// ----------------------------------------------------
+// PRESALES ORDERS (Sales Representatives Presales Engine)
+// ----------------------------------------------------
+
+model SalesOrder {
+  id              Int              @id @default(autoincrement())
+  orderNumber     String?          @unique // e.g. "ORD-1001" or "SO-1001"
+  
+  userId          Int?
+  user            User?            @relation("UserSalesOrders", fields: [userId], references: [id])
+  
+  customerId      Int?
+  customer        Customer?        @relation("CustomerSalesOrders", fields: [customerId], references: [id])
+  customerName    String?          // Snapshot for registered customer or name of on-the-fly guest customer
+  customerPhone   String?
+  customerAddress String?          @db.Text
+  customerCity    String?
+  
+  subtotal        Float            @default(0)
+  discount        Float            @default(0)
+  totalAmount     Float            @default(0)
+  
+  status          SalesOrderStatus @default(PENDING)
+  notes           String?          @db.Text
+  
+  // Future "Convert to Invoice" linkage
+  invoiceId       Int?             @unique
+  invoice         Order?           @relation("SalesOrderInvoice", fields: [invoiceId], references: [id])
+  
+  items           SalesOrderItem[]
+  
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([customerPhone])
+  @@index([status])
+  @@index([orderNumber])
+  @@index([customerId])
+  @@index([userId])
+  @@map("sales_orders")
+}
+
+model SalesOrderItem {
+  id           Int             @id @default(autoincrement())
+  salesOrderId Int
+  salesOrder   SalesOrder      @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
+  
+  variantId    Int?
+  variant      ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  
+  productName  String?
+  variantName  String?
+  sku          String?
+  imageUrl     String?         @db.LongText
+  
+  quantity     Int             @default(1)
+  unitPrice    Float           @default(0)
+  discount     Float           @default(0)
+  totalPrice   Float           @default(0)
+  
+  notes        String?
+  
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  @@index([salesOrderId])
+  @@index([variantId])
+  @@map("sales_order_items")
 }
 
 model Subscriber {

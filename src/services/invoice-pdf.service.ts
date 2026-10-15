@@ -319,7 +319,9 @@ export class InvoicePdfService {
         metaHeight = doc.heightOfString(meta, { width: descAvailableWidth });
       }
 
-      const totalDescHeight = nameHeight + (meta ? metaHeight + 2 : 0);
+      const itemDiscVal = Number(item.discount || 0);
+      const discHeight = itemDiscVal > 0 ? 10 : 0;
+      const totalDescHeight = nameHeight + (meta ? metaHeight + 2 : 0) + (itemDiscVal > 0 ? discHeight + 2 : 0);
       const rowHeight = Math.max(22, totalDescHeight + 8);
 
       // ⭐ Safe Page Break Guard: Prevents items from printing outside A4 bounds
@@ -343,12 +345,17 @@ export class InvoicePdfService {
       doc.fontSize(8.6).font('Helvetica-Bold').fillColor('#444444').text(String(idx + 1), colX.num, curY, { width: colWidths.num, align: 'center', lineBreak: false });
       doc.font('Helvetica-Bold').fillColor('#000000').text(styleNo, colX.style + 3, curY, { width: colWidths.style - 3, lineBreak: false });
       
-      // Item Description (Title + Multi-line Variant Wrap)
+      // Item Description (Title + Multi-line Variant Wrap + Item Discount)
       doc.fontSize(9).font('Helvetica-Bold').fillColor('#000000').text(name, colX.desc + 3, curY, { width: descAvailableWidth });
 
+      let runningY = curY + nameHeight + 2;
       if (meta) {
-        const metaY = curY + nameHeight + 2;
-        doc.fontSize(7.8).font('Helvetica').fillColor('#555555').text(meta, colX.desc + 3, metaY, { width: descAvailableWidth, lineBreak: true });
+        doc.fontSize(7.8).font('Helvetica').fillColor('#555555').text(meta, colX.desc + 3, runningY, { width: descAvailableWidth, lineBreak: true });
+        runningY += metaHeight + 2;
+      }
+
+      if (itemDiscVal > 0) {
+        doc.fontSize(7.5).font('Helvetica-Bold').fillColor('#059669').text(`(Item Disc: -Rs ${itemDiscVal.toLocaleString('en-LK', { minimumFractionDigits: 2 })})`, colX.desc + 3, runningY, { width: descAvailableWidth, lineBreak: false });
       }
 
       doc.fontSize(8.6).font('Helvetica').fillColor('#000000').text(`Rs ${Number(item.unitPrice).toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, colX.price, curY, { width: colWidths.price - 13.5, align: 'right', lineBreak: false });
@@ -586,18 +593,16 @@ export class InvoicePdfService {
       curY += 8;
     }
 
-    // ── 5. SIGNATURES (Dynamically positioned with a generous 1-inch gap) ──
+    // ── 5. SIGNATURES (Dynamically positioned with clear vertical gaps) ──
+    // Provide a clear vertical gap directly above signature lines (min 50pt)
+    // If not enough room before footer, carry over to next page with generous top breathing room
+    let sigY = curY + 50;
     
-    // Require at least 80px (approx 1 inch gap + signature lines) space to print signatures on the same page.
-    // If not enough space before footer policy (approx Y: 776), move to a new page.
-    let sigY = curY + 65; // ~1 inch gap from the bottom of the summary
-    
-    if (sigY + 30 > 750) {
+    if (sigY + 75 > 740) {
       doc.addPage();
-      sigY = 700; // Place cleanly at the bottom of the new page
+      sigY = 100; // Generous margin when carried over to a new page
     } else {
-      // Pin to bottom if there's plenty of space, otherwise keep the 1-inch gap
-      sigY = Math.max(sigY, 720); 
+      sigY = Math.max(sigY, 715); 
     }
 
     const sigWidth = 95; 
@@ -609,8 +614,8 @@ export class InvoicePdfService {
       doc.fontSize(7.1).font('Helvetica-Bold').fillColor('#000000').text(title, sX, sigY + 4, { width: sigWidth, align: 'center', characterSpacing: 0.5, lineBreak: false });
     });
 
-    // ── 6. FOOTER POLICY (Pinned Exactly to Bottom Margin) ──
-    const footerLineY = 776;
+    // ── 6. FOOTER POLICY (Clear gap below signatures and below footer text) ──
+    const footerLineY = Math.max(sigY + 45, 770);
     doc.moveTo(startX, footerLineY).lineTo(rightMargin, footerLineY).lineWidth(0.75).strokeColor('#000000').stroke();
     doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#000000').text('THANK YOU FOR YOUR BUSINESS', startX, footerLineY + 8, { width: pageWidth, align: 'center', characterSpacing: 1.1, lineBreak: false });
     doc.fontSize(7.5).font('Helvetica').fillColor('#222222').text('Returns and exchanges are valid only for 7 days with original invoice.', startX, footerLineY + 20, { width: pageWidth, align: 'center', lineBreak: false });

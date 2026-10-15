@@ -13,6 +13,7 @@ import paymentRoutes from './payment.routes.ts';
 import productionRoutes from './production.routes.ts';
 import reportRoutes from './report.routes.ts';
 import userRoutes from './user.routes.ts';
+import salesOrderRoutes from './salesOrder.routes.ts';
 
 const router = Router();
 
@@ -26,6 +27,8 @@ router.use('/customers', customerRoutes);
 router.use('/orders', orderRoutes);
 // Alias route for Frontend Invoice PDF and ledger endpoints
 router.use('/invoices', orderRoutes);
+// Presales Orders routes
+router.use('/sales-orders', salesOrderRoutes);
 router.use('/buy-raw-materials', buyRawMaterialRoutes);
 router.use('/raw-material-shops', rawMaterialShopRoutes);
 router.use('/raw-material-items', rawMaterialItemRoutes);

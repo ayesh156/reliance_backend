@@ -50,6 +50,10 @@ export function parseOrderStructuredNotes(notes: any) {
   let itemVariants: any[] = [];
   let returns: ReturnRecord[] = [];
   let originalTotalAmount: number | undefined = undefined;
+  let discountType: string | undefined = undefined;
+  let discountInput: number | undefined = undefined;
+  let discountRate: number | undefined = undefined;
+  let itemDiscounts: any[] | undefined = undefined;
   let rawParsed: any = {};
 
   if (notes) {
@@ -65,6 +69,12 @@ export function parseOrderStructuredNotes(notes: any) {
         if (Array.isArray(current.itemVariants)) itemVariants = current.itemVariants;
         if (Array.isArray(current.returns)) returns = current.returns;
         if (typeof current.originalTotalAmount === 'number') originalTotalAmount = current.originalTotalAmount;
+        if (typeof current.discountType === 'string') discountType = current.discountType;
+        if (typeof current.discountInput === 'number' || (typeof current.discountInput === 'string' && current.discountInput !== '')) {
+          discountInput = Number(current.discountInput);
+        }
+        if (typeof current.discountRate === 'number') discountRate = current.discountRate;
+        if (Array.isArray(current.itemDiscounts)) itemDiscounts = current.itemDiscounts;
         userNotes = current.userNotes || '';
       } else {
         userNotes = String(current || '');
@@ -82,6 +92,10 @@ export function parseOrderStructuredNotes(notes: any) {
     itemVariants,
     returns,
     originalTotalAmount,
+    discountType,
+    discountInput,
+    discountRate,
+    itemDiscounts,
   };
 }
 
@@ -224,15 +238,34 @@ export class OrderService {
         color: i.color || i.selectedColor || '',
       }));
 
+      const itemDiscounts = (data.items || []).map((i: any) => ({
+        discountType: (i as any).discountType || 'FIXED',
+        discountInput: (i as any).discountInput !== undefined && (i as any).discountInput !== '' ? Number((i as any).discountInput) : 0,
+        discount: Number(i.discount) || 0,
+      }));
+
       const hasItemVariants = itemVariants.some((iv: any) => iv.size || iv.color);
+      const hasItemDiscounts = itemDiscounts.some((id: any) => id.discount > 0 || id.discountInput > 0);
+      const hasOrderDiscount = (data as any).discountType || (data as any).discountInput !== undefined;
+
       let finalOrderNotes: string | null = cleanUserNote || null;
-      if ((data.splitPayments && data.splitPayments.length > 0) || (data.cheques && data.cheques.length > 0) || hasItemVariants) {
+      if (
+        (data.splitPayments && data.splitPayments.length > 0) ||
+        (data.cheques && data.cheques.length > 0) ||
+        hasItemVariants ||
+        hasItemDiscounts ||
+        hasOrderDiscount
+      ) {
         try {
           finalOrderNotes = JSON.stringify({
             userNotes: cleanUserNote,
             splitPayments: data.splitPayments || [],
             cheques: data.cheques || (data.splitPayments ? data.splitPayments.filter((s) => s.method === 'CHEQUE') : []),
             itemVariants: hasItemVariants ? itemVariants : undefined,
+            discountType: (data as any).discountType,
+            discountInput: (data as any).discountInput,
+            discountRate: (data as any).discountRate,
+            itemDiscounts: hasItemDiscounts ? itemDiscounts : undefined,
           });
         } catch {
           finalOrderNotes = cleanUserNote || null;
@@ -277,7 +310,7 @@ export class OrderService {
             },
           },
           customer: true,
-          user: { select: { id: true, name: true } },
+          user: { select: { id: true, name: true, role: true } },
         },
       });
 
@@ -646,7 +679,7 @@ export class OrderService {
           payments: {
             orderBy: { createdAt: 'desc' },
           },
-          user: { select: { id: true, name: true } },
+          user: { select: { id: true, name: true, role: true } },
         },
       }),
     ]);
@@ -729,6 +762,7 @@ export class OrderService {
             },
           },
         },
+        user: { select: { id: true, name: true, role: true } },
       },
     });
 
@@ -760,6 +794,16 @@ export class OrderService {
         : order.totalAmount
     );
 
+    // Attach line-level discount properties if itemDiscounts array exists
+    if (parsed.itemDiscounts && parsed.itemDiscounts.length > 0) {
+      (order.items || []).forEach((it: any, idx: number) => {
+        if (parsed.itemDiscounts && parsed.itemDiscounts[idx]) {
+          it.discountType = parsed.itemDiscounts[idx].discountType;
+          it.discountInput = parsed.itemDiscounts[idx].discountInput;
+        }
+      });
+    }
+
     return {
       ...order,
       splitPayments: parsed.splitPayments.length > 0 ? parsed.splitPayments : undefined,
@@ -767,6 +811,10 @@ export class OrderService {
       returns: parsed.returns,
       originalTotalAmount,
       userNotes: parsed.userNotes,
+      discountType: parsed.discountType || (parsed.rawParsed?.discountType),
+      discountInput: parsed.discountInput !== undefined ? parsed.discountInput : parsed.rawParsed?.discountInput,
+      discountRate: parsed.discountRate !== undefined ? parsed.discountRate : parsed.rawParsed?.discountRate,
+      itemDiscounts: parsed.itemDiscounts || parsed.rawParsed?.itemDiscounts,
     };
   }
 
@@ -787,10 +835,14 @@ export class OrderService {
         variantId: number;
         quantity: number;
         unitPrice: number;
+        discount?: number;
         price: number;
       }[];
       subtotal: number;
       discount?: number;
+      discountType?: string;
+      discountInput?: number;
+      discountRate?: number;
       totalAmount: number;
       paidAmount: number;
       settledDueAmount?: number;
@@ -1016,6 +1068,14 @@ export class OrderService {
       }));
       const hasItemVariants = itemVariants.some((iv: any) => iv.size || iv.color);
 
+      const itemDiscounts = (data.items || []).map((i: any) => ({
+        discountType: (i as any).discountType || 'FIXED',
+        discountInput: (i as any).discountInput !== undefined && (i as any).discountInput !== '' ? Number((i as any).discountInput) : 0,
+        discount: Number(i.discount) || 0,
+      }));
+      const hasItemDiscounts = itemDiscounts.some((id: any) => id.discount > 0 || id.discountInput > 0);
+      const hasOrderDiscount = (data as any).discountType || (data as any).discountInput !== undefined;
+
       const existingParsed = parseOrderStructuredNotes(existing.notes);
 
       let finalOrderNotes: string | null = cleanUserNote || null;
@@ -1023,6 +1083,8 @@ export class OrderService {
         (data.splitPayments && data.splitPayments.length > 0) ||
         (data.cheques && data.cheques.length > 0) ||
         hasItemVariants ||
+        hasItemDiscounts ||
+        hasOrderDiscount ||
         existingParsed.returns.length > 0
       ) {
         try {
@@ -1032,6 +1094,10 @@ export class OrderService {
             splitPayments: data.splitPayments || existingParsed.splitPayments || [],
             cheques: data.cheques || (data.splitPayments ? data.splitPayments.filter((s) => s.method === 'CHEQUE') : existingParsed.cheques || []),
             itemVariants: hasItemVariants ? itemVariants : existingParsed.itemVariants,
+            discountType: (data as any).discountType || existingParsed.discountType,
+            discountInput: (data as any).discountInput !== undefined ? (data as any).discountInput : existingParsed.discountInput,
+            discountRate: (data as any).discountRate !== undefined ? (data as any).discountRate : existingParsed.discountRate,
+            itemDiscounts: hasItemDiscounts ? itemDiscounts : existingParsed.itemDiscounts,
             returns: existingParsed.returns,
             originalTotalAmount: existingParsed.originalTotalAmount,
           });
@@ -1060,6 +1126,7 @@ export class OrderService {
               variantId: i.variantId,
               quantity: i.quantity,
               unitPrice: i.unitPrice,
+              discount: i.discount || 0,
               price: i.price,
             })),
           },
@@ -1076,6 +1143,7 @@ export class OrderService {
             },
           },
           customer: true,
+          user: { select: { id: true, name: true, role: true } },
         },
       });
 
@@ -1629,7 +1697,7 @@ export class OrderService {
           payments: {
             orderBy: { createdAt: 'desc' },
           },
-          user: { select: { id: true, name: true } },
+          user: { select: { id: true, name: true, role: true } },
         },
       });
 
