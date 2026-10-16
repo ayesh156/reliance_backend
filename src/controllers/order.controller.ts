@@ -296,4 +296,27 @@ export const processInvoiceReturn = async (req: Request, res: Response, next: Ne
   } catch (err) {
     next(err);
   }
+};
+
+/**
+ * Handle toggling or updating invoice dispatch tracking status (Rep Sent)
+ * Records isDispatched and captures the authenticated user's role into dispatchedByRole
+ * PATCH /api/invoices/:id/dispatch or PATCH /api/orders/:id/dispatch
+ */
+export const toggleInvoiceDispatch = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const id = parseInt(String(rawId), 10);
+    if (!id || isNaN(id) || id <= 0) {
+      return res.status(400).json({ error: 'Valid positive integer invoice ID is required' });
+    }
+
+    const user = (req as any).user;
+    const isDispatched = typeof req.body?.isDispatched === 'boolean' ? req.body.isDispatched : undefined;
+
+    const result = await orderService.toggleInvoiceDispatch(id, { isDispatched }, user);
+    sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
 };

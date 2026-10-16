@@ -1245,6 +1245,50 @@ export class OrderService {
   }
 
   /**
+   * Safely toggle or update Rep Dispatch Tracking status on an invoice.
+   * Records whether the order/invoice was dispatched with a sales representative
+   * and captures the operator's role (e.g. ADMIN, STAFF, CASHIER, REP).
+   */
+  async toggleInvoiceDispatch(
+    orderId: number,
+    options?: { isDispatched?: boolean },
+    user?: { role?: string; userId?: number; name?: string }
+  ) {
+    const existing = await prisma.order.findUnique({
+      where: { id: Number(orderId) },
+      select: { id: true, isDispatched: true, dispatchedByRole: true, invoiceNumber: true },
+    });
+
+    if (!existing) {
+      throw new Error(`Target invoice #${orderId} could not be found.`);
+    }
+
+    const nextIsDispatched = typeof options?.isDispatched === 'boolean'
+      ? options.isDispatched
+      : !existing.isDispatched;
+
+    const operatorRole = user?.role ? String(user.role).toUpperCase() : 'ADMIN';
+    const nextDispatchedByRole = nextIsDispatched ? operatorRole : null;
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: Number(orderId) },
+      data: {
+        isDispatched: nextIsDispatched,
+        dispatchedByRole: nextDispatchedByRole,
+      },
+      select: {
+        id: true,
+        invoiceNumber: true,
+        isDispatched: true,
+        dispatchedByRole: true,
+        updatedAt: true,
+      },
+    });
+
+    return updatedOrder;
+  }
+
+  /**
    * Delegates PDF rendering to dedicated InvoicePdfService with fully hydrated variant & customer models
    */
   async generateInvoicePdf(orderId: number) {

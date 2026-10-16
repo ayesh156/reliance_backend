@@ -4,6 +4,21 @@ import { sendSuccess } from '../utils/response.ts';
 
 export class ProductionController {
   /**
+   * POST /api/production/cut-batch
+   * Stage 1: Create a new multi-material cut batch (status: CUTTING, stock synced: false).
+   */
+  async createCutBatch(req: Request, res: Response, next: NextFunction) {
+    try {
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const order = await productionService.createMaterialCutBatch(req.body, userId, userRole);
+      return sendSuccess(res, order, 201);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
    * POST /api/production
    * Create a new production batch with raw material deductions & finished stock increments.
    */
@@ -123,8 +138,67 @@ export class ProductionController {
         return res.status(400).json({ error: 'Valid integer ID is required' });
       }
       const userId = (req as any).user?.id;
-      const updatedOrder = await productionService.returnLeftoverMaterials(id, req.body, userId);
+      const userRole = (req as any).user?.role;
+      const updatedOrder = await productionService.returnLeftoverMaterials(id, req.body, userId, userRole);
       return sendSuccess(res, updatedOrder);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * POST /api/production/:id/sync-stock
+   * Stage 3: Confirm & Sync Finished Garments to Product Inventory.
+   * Increments product variant stock, updates isStockSynced & isSyncedToStock, and marks COMPLETED.
+   */
+  async syncStock(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: 'Valid integer ID is required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const updatedOrder = await productionService.syncStockToInventory(id, userId, userRole);
+      return sendSuccess(res, updatedOrder);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * POST /api/production/:id/cut-logs
+   * Asynchronously log a material cutting event for this production order
+   */
+  async addCutLog(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: 'Valid integer production order ID is required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const updatedOrder = await productionService.addMaterialCutLog(id, req.body, userId, userRole);
+      return sendSuccess(res, updatedOrder, 201);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * POST /api/production/:id/finish-logs
+   * Asynchronously log a garment finishing event for this production order
+   */
+  async addFinishLog(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: 'Valid integer production order ID is required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const updatedOrder = await productionService.addGarmentFinishLog(id, req.body, userId, userRole);
+      return sendSuccess(res, updatedOrder, 201);
     } catch (err) {
       next(err);
     }

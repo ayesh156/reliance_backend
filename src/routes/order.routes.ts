@@ -31,6 +31,11 @@ router.post('/orders/:id/returns', verifyToken, requireRole('ADMIN', 'STAFF', 'C
 router.post('/invoices/:id/returns', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), orderController.processInvoiceReturn);
 router.post('/:id/returns', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), orderController.processInvoiceReturn);
 
+// Toggle Rep Dispatch Tracking status (Rep Sent / Dispatched)
+router.patch('/invoices/:id/dispatch', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.toggleInvoiceDispatch);
+router.patch('/orders/:id/dispatch', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.toggleInvoiceDispatch);
+router.patch('/:id/dispatch', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.toggleInvoiceDispatch);
+
 
 // Restrict destructive invoice deletion: ADMIN has global access; REP is scoped to their own wholesale invoices
 router.delete('/invoices/:id', verifyToken, requireRole('ADMIN', 'REP'), orderController.deleteInvoiceOrder);

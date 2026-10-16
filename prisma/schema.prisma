@@ -273,6 +273,10 @@ model Order {
   paymentReceiptUrl String?
   notes             String?       @db.Text
   
+  // Rep Dispatch Tracking (Sent to sales rep / delivery tracking)
+  isDispatched      Boolean       @default(false)
+  dispatchedByRole  String?
+  
   items             OrderItem[]
   payments          OrderPayment[]
   salesOrder        SalesOrder?   @relation("SalesOrderInvoice")
@@ -282,6 +286,7 @@ model Order {
   @@index([customerPhone])
   @@index([status])
   @@index([invoiceNumber])
+  @@index([isDispatched])
   @@map("orders")
 }
 
@@ -452,6 +457,7 @@ model RawMaterialItem {
   purchaseItems   BuyRawMaterialItem[]
   movements       RawMaterialMovement[] // ⭐ Added relation to track usage, scrap return, and wastage
   productionUsages ProductionMaterialUsage[]
+  cutLogs         MaterialCutLog[]
   // ⭐ Soft delete / Archive support: Retains stock movement ledger and GRN logs
   isActive        Boolean              @default(true)
   createdAt       DateTime             @default(now())
@@ -574,12 +580,17 @@ model ProductionOrder {
   variant         ProductVariant?           @relation(fields: [variantId], references: [id], onDelete: SetNull)
   targetQuantity  Int                       @default(0) @map("target_quantity")
   completedQty    Int                       @default(0) @map("completed_qty")
-  status          String                    @default("COMPLETED")
-  reason          String?                   @db.Text
-  notes           String?                   @db.Text
-  productionDate  DateTime                  @default(now()) @map("production_date")
+  status            String                    @default("CUTTING")
+  isStockSynced     Boolean                   @default(false) @map("is_stock_synced")
+  stockSyncedAt     DateTime?                 @map("stock_synced_at")
+  stockSyncedByRole String?                   @map("stock_synced_by_role")
+  reason            String?                   @db.Text
+  notes             String?                   @db.Text
+  productionDate    DateTime                  @default(now()) @map("production_date")
   
   materialUsages  ProductionMaterialUsage[]
+  cutLogs         MaterialCutLog[]
+  finishLogs      GarmentFinishLog[]
   
   createdAt       DateTime                  @default(now()) @map("created_at")
   updatedAt       DateTime                  @updatedAt @map("updated_at")
@@ -588,6 +599,7 @@ model ProductionOrder {
   @@index([variantId])
   @@index([productionDate])
   @@index([productionNo])
+  @@index([isStockSynced])
   @@map("production_orders")
 }
 
@@ -610,4 +622,44 @@ model ProductionMaterialUsage {
   @@index([productionOrderId])
   @@index([rawMaterialId])
   @@map("production_material_usages")
+}
+
+model MaterialCutLog {
+  id                Int             @id @default(autoincrement())
+  productionOrderId Int             @map("production_order_id")
+  productionOrder   ProductionOrder @relation(fields: [productionOrderId], references: [id], onDelete: Cascade)
+  rawMaterialId     Int             @map("raw_material_id")
+  rawMaterial       RawMaterialItem @relation(fields: [rawMaterialId], references: [id], onDelete: Cascade)
+  
+  quantityCut       Float           @map("quantity_cut")
+  cutDate           DateTime        @default(now()) @map("cut_date")
+  loggedByRole      String?         @map("logged_by_role")
+  
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+
+  @@index([productionOrderId])
+  @@index([rawMaterialId])
+  @@index([cutDate])
+  @@map("material_cut_logs")
+}
+
+model GarmentFinishLog {
+  id                Int             @id @default(autoincrement())
+  productionOrderId Int             @map("production_order_id")
+  productionOrder   ProductionOrder @relation(fields: [productionOrderId], references: [id], onDelete: Cascade)
+  
+  quantityFinished  Int             @map("quantity_finished")
+  isSyncedToStock   Boolean         @default(false) @map("is_synced_to_stock")
+  syncedAt          DateTime?       @map("synced_at")
+  finishDate        DateTime        @default(now()) @map("finish_date")
+  loggedByRole      String?         @map("logged_by_role")
+  
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+
+  @@index([productionOrderId])
+  @@index([finishDate])
+  @@index([isSyncedToStock])
+  @@map("garment_finish_logs")
 }

@@ -35,6 +35,8 @@ router.use('/raw-material-items', rawMaterialItemRoutes);
 router.use('/credit', customerCreditRoutes);
 router.use('/payments', paymentRoutes);
 router.use('/production', productionRoutes);
+// Production Orders alias route
+router.use('/production-orders', productionRoutes);
 router.use('/reports', reportRoutes);
 
 export default router;

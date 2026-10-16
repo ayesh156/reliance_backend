@@ -11,12 +11,28 @@ router.get('/summary', verifyToken, productionController.getSummary);
 router.get('/', verifyToken, productionController.getAll);
 router.get('/:id', verifyToken, productionController.getById);
 
-// Create new production batch (Deducts raw materials, increases product stock)
+// Stage 1: Create new material cut batch (Starts WIP batch in CUTTING status)
+router.post(
+  '/cut-batch',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.createCutBatch
+);
+
+// Create new production batch (Legacy / direct all-in-one run)
 router.post(
   '/',
   verifyToken,
   requireRole('ADMIN', 'STAFF'),
   productionController.create
+);
+
+// Stage 3: Confirm & Sync Finished Garments to Product Inventory
+router.post(
+  '/:id/sync-stock',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.syncStock
 );
 
 // Update existing production batch (Syncs raw materials & finished product stock)
@@ -33,6 +49,34 @@ router.put(
   verifyToken,
   requireRole('ADMIN', 'STAFF'),
   productionController.returnMaterials
+);
+
+// Asynchronous Material Cutting Log (Separate date/time logging)
+router.post(
+  '/:id/cut-logs',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.addCutLog
+);
+router.post(
+  '/:id/cuts',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.addCutLog
+);
+
+// Asynchronous Garment Finishing Log (Separate date/time logging)
+router.post(
+  '/:id/finish-logs',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.addFinishLog
+);
+router.post(
+  '/:id/finish',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.addFinishLog
 );
 
 // Rollback and delete a production order

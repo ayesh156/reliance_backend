@@ -741,12 +741,27 @@ export class ReportService {
         ],
       },
       include: {
-        product: { select: { id: true, name: true } },
-        variant: { select: { id: true, size: true, color: true } },
+        product: {
+          select: {
+            id: true,
+            name: true,
+            images: { select: { id: true, imageUrl: true } },
+          },
+        },
+        variant: { select: { id: true, size: true, color: true, sku: true } },
         materialUsages: {
           include: {
-            rawMaterial: { select: { id: true, name: true, unit: true } },
+            rawMaterial: { select: { id: true, name: true, code: true, unit: true } },
           },
+        },
+        cutLogs: {
+          orderBy: { cutDate: 'desc' },
+          include: {
+            rawMaterial: { select: { id: true, name: true, code: true, unit: true } },
+          },
+        },
+        finishLogs: {
+          orderBy: { finishDate: 'desc' },
         },
       },
       orderBy: { productionDate: 'desc' },
@@ -757,12 +772,27 @@ export class ReportService {
     let completedQuantity = 0;
     let totalMaterialCost = 0;
     let scrapVariance = 0;
+    let totalMaterialsCut = 0;
+    let totalGarmentsFinished = 0;
+    let currentWip = 0;
+    let pendingStockSync = 0;
+    let syncedToInventory = 0;
+
+    const dateTrendsMap: Record<string, { date: string; cutQty: number; finishedQty: number; batchesCount: number }> = {};
 
     const tableItems = productionOrders.map((batch) => {
       const target = Number(batch.targetQuantity || 0);
       const completed = Number(batch.completedQty || 0);
       targetQuantity += target;
       completedQuantity += completed;
+
+      if (batch.status !== 'CANCELLED') {
+        if (batch.isStockSynced) {
+          syncedToInventory += completed;
+        } else if (completed > 0) {
+          pendingStockSync += completed;
+        }
+      }
 
       let batchCost = 0;
       let batchReturned = 0;
@@ -777,6 +807,40 @@ export class ReportService {
       totalMaterialCost += batchCost;
       scrapVariance += batchReturned;
 
+      // Calculate batch cut & finish logs
+      const batchCutUnits = (batch.cutLogs || []).reduce((acc, c) => acc + c.quantityCut, 0);
+      const batchFinishedUnits = (batch.finishLogs || []).reduce((acc, f) => acc + f.quantityFinished, 0) || completed;
+      totalMaterialsCut += batchCutUnits;
+      totalGarmentsFinished += batchFinishedUnits;
+
+      const batchWip = batch.status !== 'CANCELLED' && batch.status !== 'COMPLETED'
+        ? Math.max(0, target - completed)
+        : 0;
+      currentWip += batchWip;
+
+      // Group into date trends
+      const pDate = new Date(batch.productionDate).toISOString().split('T')[0];
+      if (!dateTrendsMap[pDate]) {
+        dateTrendsMap[pDate] = { date: pDate, cutQty: 0, finishedQty: 0, batchesCount: 0 };
+      }
+      dateTrendsMap[pDate].batchesCount++;
+
+      (batch.cutLogs || []).forEach((cl) => {
+        const cDate = new Date(cl.cutDate).toISOString().split('T')[0];
+        if (!dateTrendsMap[cDate]) {
+          dateTrendsMap[cDate] = { date: cDate, cutQty: 0, finishedQty: 0, batchesCount: 0 };
+        }
+        dateTrendsMap[cDate].cutQty += cl.quantityCut;
+      });
+
+      (batch.finishLogs || []).forEach((fl) => {
+        const fDate = new Date(fl.finishDate).toISOString().split('T')[0];
+        if (!dateTrendsMap[fDate]) {
+          dateTrendsMap[fDate] = { date: fDate, cutQty: 0, finishedQty: 0, batchesCount: 0 };
+        }
+        dateTrendsMap[fDate].finishedQty += fl.quantityFinished;
+      });
+
       const yieldPercentage = target > 0 ? Math.round((completed / target) * 1000) / 10 : 0;
       const vDesc = batch.variant
         ? [batch.variant.size, batch.variant.color].filter(Boolean).join(' / ')
@@ -785,20 +849,39 @@ export class ReportService {
       return {
         id: batch.id,
         productionNo: batch.productionNo,
+        product: batch.product,
         productName: batch.product?.name || 'Garment Production Order',
+        productImage: batch.product?.images?.[0]?.imageUrl || null,
         variant: vDesc,
         targetQuantity: target,
         completedQty: completed,
+        isStockSynced: batch.isStockSynced,
+        stockSyncedAt: batch.stockSyncedAt ? batch.stockSyncedAt.toISOString() : null,
+        stockSyncedByRole: batch.stockSyncedByRole,
+        totalCutUnits: Math.round(batchCutUnits * 100) / 100,
+        totalFinishedUnits: batchFinishedUnits,
+        wipUnits: batchWip,
+        cutLogsCount: batch.cutLogs?.length || 0,
+        finishLogsCount: batch.finishLogs?.length || 0,
+        lastCutDate: batch.cutLogs && batch.cutLogs[0] ? batch.cutLogs[0].cutDate.toISOString() : null,
+        lastFinishDate: batch.finishLogs && batch.finishLogs[0] ? batch.finishLogs[0].finishDate.toISOString() : null,
         yieldPercentage,
         materialCost: Math.round(batchCost * 100) / 100,
         scrapReturned: Math.round(batchReturned * 100) / 100,
         productionDate: batch.productionDate.toISOString(),
-        status: batch.status || 'COMPLETED',
+        status: batch.status || 'CUTTING',
+        notes: batch.notes,
+        reason: batch.reason,
+        materialUsages: batch.materialUsages,
+        cutLogs: batch.cutLogs,
+        finishLogs: batch.finishLogs,
       };
     });
 
     const overallYieldPercentage =
       targetQuantity > 0 ? Math.round((completedQuantity / targetQuantity) * 1000) / 10 : 0;
+
+    const dailyTrends = Object.values(dateTrendsMap).sort((a, b) => b.date.localeCompare(a.date));
 
     return {
       module: 'production',
@@ -810,6 +893,13 @@ export class ReportService {
         overallYieldPercentage,
         totalMaterialCost: Math.round(totalMaterialCost * 100) / 100,
         scrapVariance: Math.round(scrapVariance * 100) / 100,
+        totalScrapReturned: Math.round(scrapVariance * 100) / 100,
+        totalMaterialsCut: Math.round(totalMaterialsCut * 100) / 100,
+        totalGarmentsFinished: completedQuantity,
+        pendingStockSync,
+        syncedToInventory,
+        currentWip,
+        dailyTrends,
       },
       tableItems,
     };
