@@ -2,7 +2,7 @@ import { prisma } from '../lib/prisma.ts';
 import { HttpException } from '../middleware/error.middleware.ts';
 import { SalesOrderStatus } from '@prisma/client';
 import { SalesOrderPdfService } from './sales-order-pdf.service.ts';
-import { sseGateway } from '../gateways/sse.gateway.ts';
+import { broadcastLiveEvent, sseGateway } from '../gateways/sse.gateway.ts';
 
 export interface CreateSalesOrderItemInput {
   variantId?: number;
@@ -205,10 +205,18 @@ export class SalesOrderService {
       return salesOrder;
     });
 
+    /**
+     * ========================================================================
+     * SSE REAL-TIME CROSS-DEVICE BROADCAST HOOK
+     * ========================================================================
+     * Executed strictly AFTER prisma.$transaction has committed successfully.
+     * Event name: 'order_created' (strictly matches frontend EventSource listener).
+     * Transmits the newly created presales order payload across all connected terminals.
+     */
     try {
-      sseGateway.broadcastOrderCreated(salesOrder);
+      broadcastLiveEvent('order_created', salesOrder);
     } catch (sseErr) {
-      console.error('[SSE Gateway] Broadcast error on sales order creation:', sseErr);
+      console.error('[SSE Broadcast] Failed to broadcast order_created after transaction commit:', sseErr);
     }
 
     return salesOrder;
@@ -508,10 +516,17 @@ export class SalesOrderService {
       return updatedOrder;
     });
 
+    /**
+     * ========================================================================
+     * SSE REAL-TIME CROSS-DEVICE BROADCAST HOOK
+     * ========================================================================
+     * Executed strictly AFTER prisma.$transaction has committed successfully.
+     * Event name: 'order_updated' (strictly matches frontend EventSource listener).
+     */
     try {
-      sseGateway.broadcastOrderUpdated(updatedOrder);
+      broadcastLiveEvent('order_updated', updatedOrder);
     } catch (sseErr) {
-      console.error('[SSE Gateway] Broadcast error on sales order update:', sseErr);
+      console.error('[SSE Broadcast] Failed to broadcast order_updated after transaction commit:', sseErr);
     }
 
     return updatedOrder;
@@ -535,10 +550,13 @@ export class SalesOrderService {
       },
     });
 
+    /**
+     * SSE Real-time Cross-Device Broadcast Hook for status change
+     */
     try {
-      sseGateway.broadcastOrderUpdated(updated);
+      broadcastLiveEvent('order_updated', updated);
     } catch (sseErr) {
-      console.error('[SSE Gateway] Broadcast error on sales order status update:', sseErr);
+      console.error('[SSE Broadcast] Failed to broadcast order_updated on status change:', sseErr);
     }
 
     return updated;
@@ -692,10 +710,17 @@ export class SalesOrderService {
       };
     });
 
+    /**
+     * ========================================================================
+     * SSE REAL-TIME CROSS-DEVICE BROADCAST HOOK
+     * ========================================================================
+     * Executed strictly AFTER prisma.$transaction has committed successfully.
+     * Event name: 'order_deleted' (strictly matches frontend EventSource listener).
+     */
     try {
-      sseGateway.broadcastOrderDeleted(orderId);
+      broadcastLiveEvent('order_deleted', { id: Number(orderId), orderId: Number(orderId) });
     } catch (sseErr) {
-      console.error('[SSE Gateway] Broadcast error on sales order deletion:', sseErr);
+      console.error('[SSE Broadcast] Failed to broadcast order_deleted after transaction commit:', sseErr);
     }
 
     return result;

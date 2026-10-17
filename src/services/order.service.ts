@@ -4,7 +4,7 @@ import { OrderSource, OrderStatus } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { InvoicePdfService } from './invoice-pdf.service.ts';
 import { PaymentService } from './payment.service.ts';
-import { sseGateway } from '../gateways/sse.gateway.ts';
+import { broadcastLiveEvent, sseGateway } from '../gateways/sse.gateway.ts';
 
 export interface ReturnedItemRecord {
   variantId: number;
@@ -404,13 +404,18 @@ export class OrderService {
       return order;
     });
 
+    /**
+     * ========================================================================
+     * SSE REAL-TIME CROSS-DEVICE BROADCAST HOOK
+     * ========================================================================
+     * Executed strictly AFTER prisma.$transaction has committed successfully.
+     * Event name: 'invoice_created' (strictly matches frontend EventSource listener).
+     * Transmits the newly generated invoice across all terminals (POS, Mobile, Desktop).
+     */
     try {
-      // Direct Invoicing & Quick Checkout: Broadcast invoice_created lifecycle event.
-      // We selectively skip broadcastOrderCreated here to eliminate duplicate dual notifications
-      // since presales pipeline orders are independently created via salesOrder.service.ts.
-      sseGateway.broadcastInvoiceCreated(createdOrder);
+      broadcastLiveEvent('invoice_created', createdOrder);
     } catch (sseErr) {
-      console.error('[SSE Gateway] Broadcast error on order creation:', sseErr);
+      console.error('[SSE Broadcast] Failed to broadcast invoice_created after transaction commit:', sseErr);
     }
 
     return createdOrder;
@@ -1162,11 +1167,18 @@ export class OrderService {
       return updatedOrder;
     });
 
+    /**
+     * ========================================================================
+     * SSE REAL-TIME CROSS-DEVICE BROADCAST HOOK
+     * ========================================================================
+     * Executed strictly AFTER prisma.$transaction has committed successfully.
+     * Event names: 'invoice_updated' and 'order_updated' (strictly match frontend listeners).
+     */
     try {
-      sseGateway.broadcastInvoiceUpdated(updatedOrder);
-      sseGateway.broadcastOrderUpdated(updatedOrder);
+      broadcastLiveEvent('invoice_updated', updatedOrder);
+      broadcastLiveEvent('order_updated', updatedOrder);
     } catch (sseErr) {
-      console.error('[SSE Gateway] Broadcast error on order update:', sseErr);
+      console.error('[SSE Broadcast] Failed to broadcast invoice_updated / order_updated after transaction commit:', sseErr);
     }
 
     return updatedOrder;
@@ -1264,11 +1276,18 @@ export class OrderService {
       };
     });
 
+    /**
+     * ========================================================================
+     * SSE REAL-TIME CROSS-DEVICE BROADCAST HOOK
+     * ========================================================================
+     * Executed strictly AFTER prisma.$transaction has committed successfully.
+     * Event names: 'invoice_deleted' and 'order_deleted' (strictly match frontend listeners).
+     */
     try {
-      sseGateway.broadcastInvoiceDeleted(orderId);
-      sseGateway.broadcastOrderDeleted(orderId);
+      broadcastLiveEvent('invoice_deleted', { id: Number(orderId), invoiceId: Number(orderId) });
+      broadcastLiveEvent('order_deleted', { id: Number(orderId), orderId: Number(orderId) });
     } catch (sseErr) {
-      console.error('[SSE Gateway] Broadcast error on invoice deletion:', sseErr);
+      console.error('[SSE Broadcast] Failed to broadcast invoice_deleted / order_deleted after transaction commit:', sseErr);
     }
 
     return result;
@@ -1314,6 +1333,15 @@ export class OrderService {
         updatedAt: true,
       },
     });
+
+    /**
+     * SSE Real-time Cross-Device Broadcast Hook for dispatch tracking toggle
+     */
+    try {
+      broadcastLiveEvent('invoice_updated', updatedOrder);
+    } catch (sseErr) {
+      console.error('[SSE Broadcast] Failed to broadcast invoice_updated on dispatch toggle:', sseErr);
+    }
 
     return updatedOrder;
   }
@@ -1561,7 +1589,7 @@ export class OrderService {
     data: ProcessReturnInput,
     user?: { userId?: number; name?: string; role?: string }
   ) {
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       // 1. Fetch order with items, variants, linked customer, and payments
       const order = await tx.order.findUnique({
         where: { id: Number(orderId) },
@@ -1790,6 +1818,17 @@ export class OrderService {
         },
       };
     });
+
+    /**
+     * SSE Real-time Cross-Device Broadcast Hook for returns processing
+     */
+    try {
+      broadcastLiveEvent('invoice_updated', result.order);
+    } catch (sseErr) {
+      console.error('[SSE Broadcast] Failed to broadcast invoice_updated on item return:', sseErr);
+    }
+
+    return result;
   }
 }
 

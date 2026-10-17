@@ -28,6 +28,29 @@ export interface BroadcastOptions {
 
 /**
  * ============================================================================
+ * CRITICAL ARCHITECTURAL WARNING: PM2 CLUSTER MODE VS IN-MEMORY CLIENT MAP
+ * ============================================================================
+ * WARNING:
+ * If this application is deployed using PM2 in cluster mode (e.g. `instances: max`
+ * or `instances: 2+`), Node.js worker processes execute in completely isolated
+ * memory spaces. In cluster mode:
+ * - A mobile device connected to Worker #1 is registered in Worker #1's in-memory Map.
+ * - An order created by a desktop user handled by Worker #2 iterates Worker #2's Map.
+ * - Result: Broadcast updates SILENTLY FAIL across devices connected to different workers!
+ *
+ * PRODUCTION DEPLOYMENT REQUIREMENT:
+ * The backend MUST run in FORK MODE (`instances: 1` / `exec_mode: 'fork'`) for native
+ * in-memory global Maps (`activeClients = new Map()`) to broadcast reliably across all
+ * connected terminals and devices.
+ *
+ * If multi-core horizontal clustering is required in future infrastructure, an external
+ * pub/sub bus (such as Redis Pub/Sub or Redis Streams adapter) must be introduced to
+ * bridge broadcast events across cluster worker boundaries.
+ * ============================================================================
+ */
+
+/**
+ * ============================================================================
  * 1. GLOBAL CLIENT MAP (Senari Production Architecture)
  * ============================================================================
  *
