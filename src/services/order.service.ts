@@ -405,8 +405,10 @@ export class OrderService {
     });
 
     try {
+      // Direct Invoicing & Quick Checkout: Broadcast invoice_created lifecycle event.
+      // We selectively skip broadcastOrderCreated here to eliminate duplicate dual notifications
+      // since presales pipeline orders are independently created via salesOrder.service.ts.
       sseGateway.broadcastInvoiceCreated(createdOrder);
-      sseGateway.broadcastOrderCreated(createdOrder);
     } catch (sseErr) {
       console.error('[SSE Gateway] Broadcast error on order creation:', sseErr);
     }
