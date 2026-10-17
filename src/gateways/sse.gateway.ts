@@ -33,7 +33,7 @@ export interface BroadcastOptions {
  * 1. OS-Level TCP Keep-Alive and NoDelay to prevent dropped sockets through firewalls/proxies.
  * 2. Unbuffered SSE streaming headers ('X-Accel-Buffering: no') for Nginx / OpenLiteSpeed / CyberPanel compatibility.
  * 3. Dead socket detection with backpressure monitoring and proactive kernel socket destruction.
- * 4. Automatic 20-second heartbeat ping with immediate disconnect cleanup.
+ * 4. Automatic 15-second heartbeat ping with immediate disconnect cleanup to prevent edge reverse proxy timeouts.
  * 5. Memory-leak-proof client tracking with automatic channel cleanup.
  */
 export class SseGateway {
@@ -259,17 +259,38 @@ syncRouter.get('/stream', (req: Request, res: Response) => {
     }
   };
 
-  // 6. Safe Heartbeat: 20-second ping to prevent idle connection termination
+  /**
+   * 6. Safe Server Heartbeat: 15-Second Ping & Watchdog Synchronization
+   *
+   * Reverse Proxy & Edge CDN Keep-Alive:
+   * Aggressive edge reverse proxies (Cloudflare has a 100s HTTP idle timeout; OpenLiteSpeed
+   * and CyberPanel default to 30-60s timeouts) terminate idle HTTP streams if zero bytes
+   * are transmitted over the connection. Broadcasting an SSE ping comment (`:\n\n`) every
+   * 15 seconds keeps proxy buffers active and guarantees the HTTP stream is never severed
+   * due to inactivity.
+   *
+   * Watchdog Synchronization & TCP Half-Open Recovery:
+   * Under standard W3C EventSource specifications, pure comment lines (`:\n\n`) are
+   * stripped by browser networking layers and do not fire JavaScript `onmessage` handlers.
+   * To ensure client-side watchdog timers (`WATCHDOG_TIMEOUT_MS = 35000`) continuously
+   * receive liveness pulses even during zero-business-traffic intervals, we bundle both
+   * the reverse-proxy comment (`:\n\n`) and a lightweight heartbeat data frame (`data: :\n\n`).
+   *
+   * Dead Socket Detection & Backpressure Cleanup:
+   * If an idle client experiences an ungraceful disconnect (TCP half-open, Wi-Fi handover,
+   * mobile device sleep), the local socket buffer will quickly saturate. `res.write()`
+   * will return `false`, immediately triggering socket teardown and kernel resource disposal.
+   */
   const keepAliveTimer = setInterval(() => {
     if (res.writableEnded || !res.writable) {
       cleanup();
       return;
     }
-    const writeOk = res.write(':\n\n');
+    const writeOk = res.write(':\n\ndata: :\n\n');
     if (!writeOk) {
       cleanup();
     }
-  }, 20000);
+  }, 15000);
 
   // 7. Socket and response disconnect listeners
   req.on('close', cleanup);
