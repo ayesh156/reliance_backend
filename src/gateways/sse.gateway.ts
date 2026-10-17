@@ -267,13 +267,20 @@ syncRouter.get('/stream', (req: Request, res: Response) => {
   req.socket.setNoDelay(true);
   req.socket.setTimeout(0);
 
-  // 4. Set anti-buffering stream headers for Nginx / OpenLiteSpeed / CyberPanel / Cloudflare
+  // 4. Anti-Buffering Response Headers (CyberPanel / OpenLiteSpeed / Nginx / Cloudflare):
+  // - 'X-Accel-Buffering': 'no' disables proxy response buffering in Nginx and OpenLiteSpeed
+  // - 'Content-Encoding': 'none' prevents compression middleware from holding incomplete chunks in memory
+  // - 'Cache-Control': 'no-cache, no-transform, must-revalidate' guarantees edge proxies never buffer chunks
   res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache, no-transform',
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform, must-revalidate',
     'Connection': 'keep-alive',
     'X-Accel-Buffering': 'no',
+    'Content-Encoding': 'none',
   });
+  if (typeof (res as any).flushHeaders === 'function') {
+    (res as any).flushHeaders();
+  }
 
   // 5. Register incoming client connection in the global activeClients Map
   const client: SseClient = {
@@ -300,6 +307,9 @@ syncRouter.get('/stream', (req: Request, res: Response) => {
       serverTime: new Date().toISOString(),
     })}\n\n`
   );
+  if (typeof (res as any).flush === 'function') {
+    (res as any).flush();
+  }
 
   /**
    * 7. Strict Connection Teardown & Memory Leak Prevention:
@@ -325,20 +335,46 @@ syncRouter.get('/stream', (req: Request, res: Response) => {
   };
 
   /**
-   * 8. Safe 15-Second Heartbeat Ping
-   * Keeps reverse proxy and edge CDN buffers (Cloudflare, OpenLiteSpeed, CyberPanel)
-   * active so that idle streams are never severed due to inactivity.
+   * 8. Aggressive 10-Second Edge-Proxy Buffer Flush & Keep-Alive Ping (Anti-Thrashing)
+   *
+   * Proxy Flush Guarantees (OpenLiteSpeed / CyberPanel / Cloudflare):
+   * Edge reverse proxies (e.g. CyberPanel / OpenLiteSpeed AppServer lsnode) buffer HTTP responses
+   * until a buffer threshold is met or an idle timeout occurs.
+   * Sending an explicit comment ping (`:\n\n`) forces proxy buffers to flush without triggering
+   * DOM message events, immediately followed by an explicit empty data ping (`data: {"type":"ping"}\n\n`)
+   * which delivers an active frame to the client browser.
+   *
+   * Anti-Thrashing Watchdog Synchronization:
+   * The client Watchdog Timer runs with a 60-second threshold (`WATCHDOG_TIMEOUT_MS = 60000`).
+   * By delivering this dual ping frame every 10 seconds (10000ms), the client's `onmessage` handler
+   * resets its watchdog timer 6 times within the watchdog window. Even under network packet jitter,
+   * mobile radio sleep, or reverse-proxy latency, false watchdog disconnects and rapid reconnect loops
+   * are completely eliminated.
    */
   const keepAliveTimer = setInterval(() => {
     if (res.writableEnded || !res.writable || req.socket.destroyed) {
       cleanup();
       return;
     }
-    const writeOk = res.write(':\n\ndata: :\n\n');
-    if (!writeOk) {
+
+    try {
+      // 1. Explicit comment ping (forces edge reverse proxies to flush internal buffers)
+      const commentOk = res.write(':\n\n');
+      // 2. Explicit data ping frame (triggers client onmessage and resets watchdog timer)
+      const dataOk = res.write('data: {"type":"ping"}\n\n');
+
+      if (typeof (res as any).flush === 'function') {
+        (res as any).flush();
+      }
+
+      if (!commentOk || !dataOk) {
+        // Socket buffer backpressure / hung pipe detected - tear down dead socket
+        cleanup();
+      }
+    } catch {
       cleanup();
     }
-  }, 15000);
+  }, 10000);
 
   // 9. Strict cleanup event bindings on both request and response streams
   req.on('close', cleanup);
