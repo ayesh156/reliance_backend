@@ -26,14 +26,14 @@ router.get(
 router.get(
   '/:module/data',
   verifyToken,
-  requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'),
+  requireRole('ADMIN', 'STAFF', 'CASHIER'),
   reportController.getReportData
 );
 
 router.get(
   '/:module/pdf',
   verifyToken,
-  requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'),
+  requireRole('ADMIN', 'STAFF', 'CASHIER'),
   reportController.downloadReportPdf
 );
 

@@ -14,6 +14,7 @@ import productionRoutes from './production.routes.ts';
 import reportRoutes from './report.routes.ts';
 import userRoutes from './user.routes.ts';
 import salesOrderRoutes from './salesOrder.routes.ts';
+import syncRouter from '../gateways/sse.gateway.ts';
 
 const router = Router();
 
@@ -38,5 +39,8 @@ router.use('/production', productionRoutes);
 // Production Orders alias route
 router.use('/production-orders', productionRoutes);
 router.use('/reports', reportRoutes);
+// Real-time Server-Sent Events (SSE) Synchronization Routes
+router.use('/sync', syncRouter);
+router.use('/sse', syncRouter);
 
 export default router;

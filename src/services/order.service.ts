@@ -4,6 +4,7 @@ import { OrderSource, OrderStatus } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { InvoicePdfService } from './invoice-pdf.service.ts';
 import { PaymentService } from './payment.service.ts';
+import { sseGateway } from '../gateways/sse.gateway.ts';
 
 export interface ReturnedItemRecord {
   variantId: number;
@@ -144,7 +145,7 @@ export class OrderService {
       throw new HttpException(400, 'Order must contain at least one item');
     }
 
-    return prisma.$transaction(async (tx) => {
+    const createdOrder = await prisma.$transaction(async (tx) => {
       // 1. Verify and reduce variant inventory stock with strict input sanitization
       for (const item of data.items) {
         const qty = parseInt(String(item.quantity), 10);
@@ -402,6 +403,15 @@ export class OrderService {
 
       return order;
     });
+
+    try {
+      sseGateway.broadcastInvoiceCreated(createdOrder);
+      sseGateway.broadcastOrderCreated(createdOrder);
+    } catch (sseErr) {
+      console.error('[SSE Gateway] Broadcast error on order creation:', sseErr);
+    }
+
+    return createdOrder;
   }
 
   /**
@@ -866,7 +876,7 @@ export class OrderService {
       }>;
     }
   ) {
-    return prisma.$transaction(async (tx) => {
+    const updatedOrder = await prisma.$transaction(async (tx) => {
       const existing = await tx.order.findUnique({
         where: { id: orderId },
         include: { items: true },
@@ -1149,6 +1159,15 @@ export class OrderService {
 
       return updatedOrder;
     });
+
+    try {
+      sseGateway.broadcastInvoiceUpdated(updatedOrder);
+      sseGateway.broadcastOrderUpdated(updatedOrder);
+    } catch (sseErr) {
+      console.error('[SSE Gateway] Broadcast error on order update:', sseErr);
+    }
+
+    return updatedOrder;
   }
 
   /**
@@ -1172,7 +1191,7 @@ export class OrderService {
     orderId: number,
     currentUser?: { id?: number | string; userId?: number | string; role?: string; name?: string; email?: string }
   ) {
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const order = await tx.order.findUnique({
         where: { id: orderId },
         include: { items: true },
@@ -1242,6 +1261,15 @@ export class OrderService {
         message: `Invoice #${orderId} deleted successfully and inventory stock restored`,
       };
     });
+
+    try {
+      sseGateway.broadcastInvoiceDeleted(orderId);
+      sseGateway.broadcastOrderDeleted(orderId);
+    } catch (sseErr) {
+      console.error('[SSE Gateway] Broadcast error on invoice deletion:', sseErr);
+    }
+
+    return result;
   }
 
   /**

@@ -183,3 +183,31 @@ export const downloadSalesOrderPdf = async (req: Request, res: Response, next: N
     }
   }
 };
+
+/**
+ * Handle safe atomic presales order deletion with rollback of reserved stock and customer balances
+ */
+export const deleteSalesOrder = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const id = parseInt(String(rawId), 10);
+    if (!id || isNaN(id) || id <= 0) {
+      return res.status(400).json({ error: 'Valid positive integer order ID is required' });
+    }
+    const user = (req as any).user;
+    if (!user) {
+      return res.status(401).json({ error: 'Authenticated user session invalid' });
+    }
+    const currentUser = {
+      id: Number(user.userId ?? user.id),
+      userId: Number(user.userId ?? user.id),
+      role: String(user.role || ''),
+      name: user.name,
+      email: user.email,
+    };
+    const result = await salesOrderService.deleteSalesOrder(id, currentUser);
+    sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+};

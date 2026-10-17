@@ -60,4 +60,12 @@ router.post(
   salesOrderController.convertSalesOrderToInvoice
 );
 
+// Safe atomic presales order deletion (ADMIN has global access; REP can delete own orders)
+router.delete(
+  '/:id',
+  verifyToken,
+  requireRole('ADMIN', 'REP'),
+  salesOrderController.deleteSalesOrder
+);
+
 export default router;

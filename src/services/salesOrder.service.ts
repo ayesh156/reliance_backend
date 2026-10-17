@@ -2,6 +2,7 @@ import { prisma } from '../lib/prisma.ts';
 import { HttpException } from '../middleware/error.middleware.ts';
 import { SalesOrderStatus } from '@prisma/client';
 import { SalesOrderPdfService } from './sales-order-pdf.service.ts';
+import { sseGateway } from '../gateways/sse.gateway.ts';
 
 export interface CreateSalesOrderItemInput {
   variantId?: number;
@@ -52,7 +53,7 @@ export class SalesOrderService {
       throw new HttpException(400, 'Order must contain at least one line item');
     }
 
-    return prisma.$transaction(async (tx) => {
+    const salesOrder = await prisma.$transaction(async (tx) => {
       // 1. Resolve customer details (if registered customer was selected)
       let resolvedCustomerName = data.customerName?.trim() || '';
       let resolvedCustomerPhone = data.customerPhone?.trim() || '';
@@ -203,6 +204,14 @@ export class SalesOrderService {
 
       return salesOrder;
     });
+
+    try {
+      sseGateway.broadcastOrderCreated(salesOrder);
+    } catch (sseErr) {
+      console.error('[SSE Gateway] Broadcast error on sales order creation:', sseErr);
+    }
+
+    return salesOrder;
   }
 
   /**
@@ -374,7 +383,7 @@ export class SalesOrderService {
       throw new HttpException(400, 'Order must contain at least one line item');
     }
 
-    return prisma.$transaction(async (tx) => {
+    const updatedOrder = await prisma.$transaction(async (tx) => {
       // 1. Resolve customer details
       let resolvedCustomerName = data.customerName?.trim() || existing.customerName || '';
       let resolvedCustomerPhone = data.customerPhone?.trim() || existing.customerPhone || '';
@@ -498,6 +507,14 @@ export class SalesOrderService {
 
       return updatedOrder;
     });
+
+    try {
+      sseGateway.broadcastOrderUpdated(updatedOrder);
+    } catch (sseErr) {
+      console.error('[SSE Gateway] Broadcast error on sales order update:', sseErr);
+    }
+
+    return updatedOrder;
   }
 
   /**
@@ -509,7 +526,7 @@ export class SalesOrderService {
       throw new HttpException(404, `Sales Order #${id} not found`);
     }
 
-    return prisma.salesOrder.update({
+    const updated = await prisma.salesOrder.update({
       where: { id: Number(id) },
       data: { status },
       include: {
@@ -517,6 +534,14 @@ export class SalesOrderService {
         items: true,
       },
     });
+
+    try {
+      sseGateway.broadcastOrderUpdated(updated);
+    } catch (sseErr) {
+      console.error('[SSE Gateway] Broadcast error on sales order status update:', sseErr);
+    }
+
+    return updated;
   }
 
   /**
@@ -554,6 +579,126 @@ export class SalesOrderService {
       status: 'READY_FOR_INVOICE_CONVERSION',
       nextSteps: 'Pending live stock reservation and invoice settlement assignment in subsequent phase.',
     };
+  }
+
+  /**
+   * Safe Atomic Deletion of a Presales / Sales Order.
+   * Completely removes the order and associated line items within an atomic transaction.
+   * If the order was converted into or linked to an Invoice (Order), rolls back:
+   * 1. Any variant stock decremented for that invoice's line items.
+   * 2. Any customer ledger/balance adjustments (credit due & settled due).
+   * 3. Deletes associated invoice payments and items, unlinking/removing the invoice.
+   *
+   * Permission Rules:
+   * - ADMIN: Global unrestricted deletion.
+   * - REP: Scoped strictly to their own orders (`order.userId === currentUser.userId`).
+   */
+  async deleteSalesOrder(
+    orderId: number,
+    currentUser?: { id?: number | string; userId?: number | string; role?: string }
+  ) {
+    const result = await prisma.$transaction(async (tx) => {
+      const order = await tx.salesOrder.findUnique({
+        where: { id: Number(orderId) },
+        include: {
+          items: true,
+          invoice: {
+            include: {
+              items: true,
+              payments: true,
+            },
+          },
+        },
+      });
+
+      if (!order) {
+        throw new HttpException(404, `Sales Order #${orderId} not found`);
+      }
+
+      // Enforce Role-Based Access Control on deletion
+      if (currentUser) {
+        const userRole = String(currentUser.role || '').toUpperCase();
+        const requestingUserId = Number(currentUser.id ?? currentUser.userId);
+        const isOwner = Number(order.userId) === requestingUserId;
+
+        if (userRole === 'ADMIN') {
+          // ADMIN has global deletion authorization
+        } else if (userRole === 'REP') {
+          if (!isOwner) {
+            throw new HttpException(
+              403,
+              'Unauthorized: Sales Representatives can only delete their own orders'
+            );
+          }
+        } else {
+          throw new HttpException(
+            403,
+            'Unauthorized: Insufficient permissions to delete orders'
+          );
+        }
+      }
+
+      // Rollback any stock or financial records if linked to an Invoice (Order)
+      if (order.invoice) {
+        const linkedInvoice = order.invoice;
+
+        // 1. Rollback stock for all variant items in the linked invoice
+        for (const item of linkedInvoice.items) {
+          if (item.variantId && item.quantity > 0) {
+            await tx.productVariant.update({
+              where: { id: item.variantId },
+              data: { stock: { increment: item.quantity } },
+            });
+          }
+        }
+
+        // 2. Rollback financial impact on customer ledger
+        const creditDue = Math.max(0, linkedInvoice.totalAmount - linkedInvoice.paidAmount);
+        const settledDue = Number((linkedInvoice as any).settledDueAmount || 0);
+        const adjustment = -creditDue + settledDue;
+        if (linkedInvoice.customerId && adjustment !== 0) {
+          await tx.customer.update({
+            where: { id: linkedInvoice.customerId },
+            data: { outstandingBalance: { increment: adjustment } },
+          });
+        }
+
+        // 3. Delete payments and items of the linked invoice
+        await tx.orderPayment.deleteMany({ where: { orderId: linkedInvoice.id } });
+        await tx.orderItem.deleteMany({ where: { orderId: linkedInvoice.id } });
+
+        // Unlink invoice from salesOrder before deleting invoice
+        await tx.salesOrder.update({
+          where: { id: order.id },
+          data: { invoiceId: null },
+        });
+
+        await tx.order.delete({ where: { id: linkedInvoice.id } });
+      }
+
+      // 4. Atomically delete sales order line items
+      await tx.salesOrderItem.deleteMany({
+        where: { salesOrderId: Number(orderId) },
+      });
+
+      // 5. Delete the sales order itself
+      await tx.salesOrder.delete({
+        where: { id: Number(orderId) },
+      });
+
+      return {
+        success: true,
+        message: `Order #${order.orderNumber || orderId} deleted successfully and any reserved stock/financial records rolled back`,
+      };
+    });
+
+    try {
+      sseGateway.broadcastOrderDeleted(orderId);
+    } catch (sseErr) {
+      console.error('[SSE Gateway] Broadcast error on sales order deletion:', sseErr);
+    }
+
+    return result;
   }
 
   /**
