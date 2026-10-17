@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express';
+import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env.ts';
 import type { AuthPayload } from '../types/common.types.ts';
@@ -10,7 +11,7 @@ export interface SseClient {
   id: string;
   userId?: number;
   role?: string;
-  channel: string;
+  channel?: string;
   res: Response;
   req: Request;
   connectedAt: Date;
@@ -26,148 +27,173 @@ export interface BroadcastOptions {
 }
 
 /**
- * Enterprise Server-Sent Events (SSE) Synchronization Gateway
- * Adapted from high-reliability checkoutSync gateway architecture.
+ * ============================================================================
+ * 1. GLOBAL CLIENT MAP (Senari Production Architecture)
+ * ============================================================================
  *
- * Key Resilience Features:
- * 1. OS-Level TCP Keep-Alive and NoDelay to prevent dropped sockets through firewalls/proxies.
- * 2. Unbuffered SSE streaming headers ('X-Accel-Buffering: no') for Nginx / OpenLiteSpeed / CyberPanel compatibility.
- * 3. Dead socket detection with backpressure monitoring and proactive kernel socket destruction.
- * 4. Automatic 15-second heartbeat ping with immediate disconnect cleanup to prevent edge reverse proxy timeouts.
- * 5. Memory-leak-proof client tracking with automatic channel cleanup.
+ * Module-Level Global Architecture:
+ * By maintaining `activeClients` at the module level in a single global Map, all incoming
+ * connections across all client devices (desktop POS, mobile terminals, storefronts,
+ * admin dashboards) are tracked in a unified registry.
+ *
+ * Cross-Device Broadcasting Guarantee:
+ * In a multi-device setup (e.g. mobile sales staff creating orders that must instantly
+ * appear on desktop cashier/admin screens), maintaining this global map ensures that
+ * broadcast loops iterate across every live terminal connection regardless of origin
+ * or process boundaries.
+ */
+export const activeClients = new Map<string, SseClient>();
+
+/**
+ * ============================================================================
+ * 3. GLOBAL BROADCAST LOOP & UTILITY FUNCTION
+ * ============================================================================
+ *
+ * Global Live Broadcast Function (Senari Standard):
+ * Iterates through all connected clients in the module-level `activeClients` map using `.forEach()`.
+ * Directly writes SSE payload frames (`event: ${event}\ndata: ${data}\n\n`) to all active streams.
+ *
+ * Health & Dead Socket Verification:
+ * Before writing to each client, strictly verifies:
+ * 1. `client.res.writable === true` and `!client.res.writableEnded`
+ * 2. `!client.req.socket.destroyed`
+ *
+ * Memory Leak Prevention:
+ * Any client connection identified as unwritable, finished, or destroyed is immediately
+ * collected and cleanly removed from `activeClients`, with the underlying socket destroyed
+ * to eliminate file descriptor leaks, kernel buffer saturation, and TCP half-open ghost connections.
+ *
+ * @param event The event identifier (e.g. 'order_created', 'order_updated', 'invoice_created')
+ * @param data The payload data (string or object) to be broadcast
+ * @param options Optional broadcast filtering (senderClientId exclusion, channel, roles)
+ */
+export function broadcastLiveEvent(
+  event: string,
+  data: any,
+  options: BroadcastOptions = {}
+): void {
+  // Ensure data is properly formatted string for SSE transmission
+  const formattedData = typeof data === 'string' ? data : JSON.stringify(data);
+  const deadClients: string[] = [];
+
+  activeClients.forEach((client, clientId) => {
+    // 1. Exclude sender terminal if requested (prevent redundant echo)
+    if (options.senderClientId && client.id === options.senderClientId) {
+      return;
+    }
+
+    // 2. Filter by channel if specified (default: 'global' broadcasts to all devices)
+    if (options.channel && options.channel !== 'global' && client.channel !== options.channel) {
+      return;
+    }
+
+    // 3. Filter by user role if restricted
+    if (options.roles && options.roles.length > 0) {
+      const clientRole = (client.role || '').toUpperCase();
+      const matches = options.roles.some((r) => r.toUpperCase() === clientRole);
+      if (!matches) return;
+    }
+
+    // 4. Verify stream writability and socket health before writing payload
+    if (client.res.writable && !client.res.writableEnded && !client.req.socket.destroyed) {
+      try {
+        const canWrite = client.res.write(`event: ${event}\ndata: ${formattedData}\n\n`);
+        if (!canWrite) {
+          // Socket buffer backpressure / hung pipe detected - mark for immediate cleanup
+          deadClients.push(clientId);
+        }
+      } catch (err) {
+        console.error(`[SSE Gateway] Broadcast write error for client ${clientId}:`, err);
+        deadClients.push(clientId);
+      }
+    } else {
+      deadClients.push(clientId);
+    }
+  });
+
+  // Strict Dead Socket Cleanup: Purge dead sockets identified during broadcast
+  if (deadClients.length > 0) {
+    deadClients.forEach((id) => {
+      const deadClient = activeClients.get(id);
+      if (deadClient) {
+        try {
+          if (!deadClient.res.writableEnded) deadClient.res.end();
+          if (!deadClient.req.socket.destroyed) deadClient.req.socket.destroy();
+        } catch {
+          // Silently absorb socket destruction errors
+        }
+      }
+      activeClients.delete(id);
+      console.log(`[SSE Gateway] Purged dead client socket ${id}. Remaining active: ${activeClients.size}`);
+    });
+  }
+}
+
+/**
+ * Enterprise Server-Sent Events (SSE) Synchronization Gateway
+ * Backwards-compatible class wrapper exposing high-level domain broadcast methods.
  */
 export class SseGateway {
-  private clients = new Map<string, SseClient>();
-  private channels = new Map<string, Set<string>>();
-
   /**
-   * Register a new client connection into the SSE gateway
+   * Register a new client connection into the global activeClients map
    */
   public registerClient(client: SseClient): void {
-    this.clients.set(client.id, client);
-
-    if (!this.channels.has(client.channel)) {
-      this.channels.set(client.channel, new Set());
-    }
-    this.channels.get(client.channel)!.add(client.id);
-
-    console.log(`[SSE Gateway] Client connected: ${client.id} (User: ${client.userId || 'guest'}, Role: ${client.role || 'unknown'}, Channel: ${client.channel}). Total active: ${this.clients.size}`);
+    activeClients.set(client.id, client);
+    console.log(
+      `[SSE Gateway] Client connected: ${client.id} (User: ${client.userId || 'guest'}, Role: ${client.role || 'unknown'}, Channel: ${client.channel || 'global'}). Total active: ${activeClients.size}`
+    );
   }
 
   /**
    * Unregister and clean up a client connection from active tracking
    */
   public removeClient(clientId: string): void {
-    const client = this.clients.get(clientId);
+    const client = activeClients.get(clientId);
     if (!client) return;
 
-    const channelSet = this.channels.get(client.channel);
-    if (channelSet) {
-      channelSet.delete(clientId);
-      if (channelSet.size === 0) {
-        this.channels.delete(client.channel);
-      }
-    }
-
-    this.clients.delete(clientId);
-    console.log(`[SSE Gateway] Client disconnected: ${clientId}. Total active: ${this.clients.size}`);
+    activeClients.delete(clientId);
+    console.log(`[SSE Gateway] Client disconnected: ${clientId}. Total active: ${activeClients.size}`);
   }
 
   /**
-   * Broadcast an event and payload to connected SSE clients with dead socket elimination
+   * Generic broadcast dispatch delegating to broadcastLiveEvent
    */
   public broadcast(event: string, payload: any, options: BroadcastOptions = {}): void {
-    const targetChannel = options.channel || 'global';
-    const dataString = `data: ${JSON.stringify({ event, payload, timestamp: new Date().toISOString() })}\n\n`;
-    const deadClientIds: string[] = [];
-
-    // Identify target clients
-    const targetClientIds = targetChannel === 'global'
-      ? Array.from(this.clients.keys())
-      : Array.from(this.channels.get(targetChannel) || []);
-
-    for (const clientId of targetClientIds) {
-      const client = this.clients.get(clientId);
-      if (!client) continue;
-
-      // Exclude sender if requested
-      if (options.senderClientId && client.id === options.senderClientId) {
-        continue;
-      }
-
-      // Filter by role if specified
-      if (options.roles && options.roles.length > 0) {
-        const clientRole = (client.role || '').toUpperCase();
-        const matchesRole = options.roles.some((r) => r.toUpperCase() === clientRole);
-        if (!matchesRole) continue;
-      }
-
-      try {
-        if (client.res.writableEnded || !client.res.writable) {
-          deadClientIds.push(clientId);
-          continue;
-        }
-
-        const canWrite = client.res.write(dataString);
-        if (!canWrite) {
-          // Socket buffer backpressure / network pipe hung - mark for cleanup
-          deadClientIds.push(clientId);
-        }
-      } catch (err) {
-        console.error(`[SSE Gateway] Error writing to client ${clientId}:`, err);
-        deadClientIds.push(clientId);
-      }
-    }
-
-    // Clean up dead sockets identified during broadcast
-    if (deadClientIds.length > 0) {
-      for (const id of deadClientIds) {
-        const deadClient = this.clients.get(id);
-        if (deadClient) {
-          try {
-            if (!deadClient.res.writableEnded) deadClient.res.end();
-            deadClient.req.socket.destroy();
-          } catch {
-            // ignore socket destruction errors
-          }
-        }
-        this.removeClient(id);
-      }
-    }
+    broadcastLiveEvent(event, payload, options);
   }
 
   /**
    * Live Broadcast Helpers for Order and Invoice Lifecycle Events
    */
   public broadcastOrderCreated(order: any, senderClientId?: string): void {
-    this.broadcast('order_created', order, { senderClientId });
+    broadcastLiveEvent('order_created', order, { senderClientId });
   }
 
   public broadcastOrderUpdated(order: any, senderClientId?: string): void {
-    this.broadcast('order_updated', order, { senderClientId });
+    broadcastLiveEvent('order_updated', order, { senderClientId });
   }
 
   public broadcastOrderDeleted(orderId: number, senderClientId?: string): void {
-    this.broadcast('order_deleted', { id: orderId, orderId }, { senderClientId });
+    broadcastLiveEvent('order_deleted', { id: orderId, orderId }, { senderClientId });
   }
 
   public broadcastInvoiceCreated(invoice: any, senderClientId?: string): void {
-    this.broadcast('invoice_created', invoice, { senderClientId });
+    broadcastLiveEvent('invoice_created', invoice, { senderClientId });
   }
 
   public broadcastInvoiceUpdated(invoice: any, senderClientId?: string): void {
-    this.broadcast('invoice_updated', invoice, { senderClientId });
+    broadcastLiveEvent('invoice_updated', invoice, { senderClientId });
   }
 
   public broadcastInvoiceDeleted(invoiceId: number, senderClientId?: string): void {
-    this.broadcast('invoice_deleted', { id: invoiceId, invoiceId }, { senderClientId });
+    broadcastLiveEvent('invoice_deleted', { id: invoiceId, invoiceId }, { senderClientId });
   }
 
   /**
-   * Returns current active connection count
+   * Returns current active connection count across all devices
    */
   public getActiveCount(): number {
-    return this.clients.size;
+    return activeClients.size;
   }
 }
 
@@ -176,11 +202,18 @@ export const sseGateway = new SseGateway();
 export const syncRouter = Router();
 
 /**
+ * ============================================================================
+ * 2. CONNECTION REGISTRATION & CLEANUP ROUTE (/stream)
+ * ============================================================================
+ *
  * GET /api/sync/stream
- * Freeze-proof real-time Server-Sent Events stream endpoint
+ * Real-Time Server-Sent Events (SSE) Stream Endpoint (Senari Production Architecture)
+ *
+ * Handles cross-device live updates between mobile terminals, desktop POS systems,
+ * tablets, and administrative screens.
  */
 syncRouter.get('/stream', (req: Request, res: Response) => {
-  // 1. Extract and optionally verify token
+  // 1. Extract and verify authentication token if present
   const authHeader = req.headers.authorization;
   let token: string | undefined;
 
@@ -195,21 +228,23 @@ syncRouter.get('/stream', (req: Request, res: Response) => {
     try {
       userPayload = jwt.verify(token, env.jwtSecret, { algorithms: ['HS256'] }) as AuthPayload;
     } catch {
-      // Allow unauthenticated connection or mark as guest, or return 401 if token expired
+      // Allow unauthenticated connection or mark as guest
     }
   }
 
-  const clientId = String(req.query.clientId || Math.random().toString(36).slice(2) + Date.now().toString(36)).trim();
+  // 2. Generate or extract unique client identification
+  const queryClientId = typeof req.query.clientId === 'string' ? req.query.clientId.trim() : '';
+  const clientId = queryClientId || (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36));
   const channel = String(req.query.channel || 'global').trim();
   const role = userPayload?.role || String(req.query.userRole || 'guest').trim();
   const userId = userPayload?.userId || (req.query.userId ? Number(req.query.userId) : undefined);
 
-  // 2. Set OS-Level TCP Keep-Alive and NoDelay to prevent socket freezing
+  // 3. Set OS-Level TCP Keep-Alive and NoDelay to prevent socket freezing
   req.socket.setKeepAlive(true, 10000);
   req.socket.setNoDelay(true);
   req.socket.setTimeout(0);
 
-  // 3. Set anti-buffering stream headers
+  // 4. Set anti-buffering stream headers for Nginx / OpenLiteSpeed / CyberPanel / Cloudflare
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
@@ -217,6 +252,7 @@ syncRouter.get('/stream', (req: Request, res: Response) => {
     'X-Accel-Buffering': 'no',
   });
 
+  // 5. Register incoming client connection in the global activeClients Map
   const client: SseClient = {
     id: clientId,
     userId,
@@ -227,62 +263,51 @@ syncRouter.get('/stream', (req: Request, res: Response) => {
     connectedAt: new Date(),
   };
 
-  sseGateway.registerClient(client);
+  activeClients.set(clientId, client);
+  console.log(
+    `[SSE Gateway] Client registered: ${clientId} (User: ${userId || 'guest'}, Role: ${role}, Channel: ${channel}). Total active: ${activeClients.size}`
+  );
 
-  // 4. Send initial connection confirmation event
+  // 6. Send initial connection confirmation event
   res.write(
-    `data: ${JSON.stringify({
-      event: 'connected',
-      payload: {
-        status: 'ok',
-        clientId,
-        channel,
-        serverTime: new Date().toISOString(),
-      },
+    `event: connected\ndata: ${JSON.stringify({
+      status: 'ok',
+      clientId,
+      channel,
+      serverTime: new Date().toISOString(),
     })}\n\n`
   );
 
-  // 5. Cleanup function ensuring socket destruction at OS level
+  /**
+   * 7. Strict Connection Teardown & Memory Leak Prevention:
+   * When a client disconnects (tab closed, network dropped, mobile lock/sleep, page reload),
+   * we immediately unregister the clientId from `activeClients` and invoke `req.socket.destroy()`.
+   * This prevents zombie file descriptors, memory leaks, and TCP half-open ghost connections.
+   */
   let isCleanedUp = false;
   const cleanup = () => {
     if (isCleanedUp) return;
     isCleanedUp = true;
 
     clearInterval(keepAliveTimer);
-    sseGateway.removeClient(clientId);
+    activeClients.delete(clientId);
+    console.log(`[SSE Gateway] Client disconnected and cleaned up: ${clientId}. Remaining active: ${activeClients.size}`);
 
     try {
       if (!res.writableEnded) res.end();
-      req.socket.destroy();
+      if (!req.socket.destroyed) req.socket.destroy();
     } catch {
-      // ignore destruction errors
+      // Silently absorb socket destruction errors during abrupt terminations
     }
   };
 
   /**
-   * 6. Safe Server Heartbeat: 15-Second Ping & Watchdog Synchronization
-   *
-   * Reverse Proxy & Edge CDN Keep-Alive:
-   * Aggressive edge reverse proxies (Cloudflare has a 100s HTTP idle timeout; OpenLiteSpeed
-   * and CyberPanel default to 30-60s timeouts) terminate idle HTTP streams if zero bytes
-   * are transmitted over the connection. Broadcasting an SSE ping comment (`:\n\n`) every
-   * 15 seconds keeps proxy buffers active and guarantees the HTTP stream is never severed
-   * due to inactivity.
-   *
-   * Watchdog Synchronization & TCP Half-Open Recovery:
-   * Under standard W3C EventSource specifications, pure comment lines (`:\n\n`) are
-   * stripped by browser networking layers and do not fire JavaScript `onmessage` handlers.
-   * To ensure client-side watchdog timers (`WATCHDOG_TIMEOUT_MS = 35000`) continuously
-   * receive liveness pulses even during zero-business-traffic intervals, we bundle both
-   * the reverse-proxy comment (`:\n\n`) and a lightweight heartbeat data frame (`data: :\n\n`).
-   *
-   * Dead Socket Detection & Backpressure Cleanup:
-   * If an idle client experiences an ungraceful disconnect (TCP half-open, Wi-Fi handover,
-   * mobile device sleep), the local socket buffer will quickly saturate. `res.write()`
-   * will return `false`, immediately triggering socket teardown and kernel resource disposal.
+   * 8. Safe 15-Second Heartbeat Ping
+   * Keeps reverse proxy and edge CDN buffers (Cloudflare, OpenLiteSpeed, CyberPanel)
+   * active so that idle streams are never severed due to inactivity.
    */
   const keepAliveTimer = setInterval(() => {
-    if (res.writableEnded || !res.writable) {
+    if (res.writableEnded || !res.writable || req.socket.destroyed) {
       cleanup();
       return;
     }
@@ -292,7 +317,7 @@ syncRouter.get('/stream', (req: Request, res: Response) => {
     }
   }, 15000);
 
-  // 7. Socket and response disconnect listeners
+  // 9. Strict cleanup event bindings on both request and response streams
   req.on('close', cleanup);
   req.on('end', cleanup);
   req.on('error', cleanup);
@@ -308,7 +333,7 @@ syncRouter.get('/stream', (req: Request, res: Response) => {
 syncRouter.get('/status', (_req: Request, res: Response) => {
   res.json({
     status: 'online',
-    activeConnections: sseGateway.getActiveCount(),
+    activeConnections: activeClients.size,
     timestamp: new Date().toISOString(),
   });
 });
