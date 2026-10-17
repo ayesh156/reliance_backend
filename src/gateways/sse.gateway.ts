@@ -161,6 +161,17 @@ export class SseGateway {
    * Register a new client connection into the global activeClients map
    */
   public registerClient(client: SseClient): void {
+    // If a connection arrives with a clientId already in the Map, explicitly destroy old socket
+    const existingClient = activeClients.get(client.id);
+    if (existingClient) {
+      try {
+        if (!existingClient.res.writableEnded) existingClient.res.end();
+        if (!existingClient.req.socket.destroyed) existingClient.req.socket.destroy();
+      } catch {
+        // Silently absorb socket destruction errors
+      }
+    }
+
     activeClients.set(client.id, client);
     console.log(
       `[SSE Gateway] Client connected: ${client.id} (User: ${client.userId || 'guest'}, Role: ${client.role || 'unknown'}, Channel: ${client.channel || 'global'}). Total active: ${activeClients.size}`
@@ -283,6 +294,23 @@ syncRouter.get('/stream', (req: Request, res: Response) => {
   }
 
   // 5. Register incoming client connection in the global activeClients Map
+  /**
+   * Reference Equality & Stale Socket Teardown:
+   * If a new connection arrives with a clientId that already exists in the Map,
+   * explicitly call .destroy() on the old socket before overwriting the Map entry.
+   * This immediately terminates the dangling/stalled connection and frees underlying resources.
+   */
+  const existingClient = activeClients.get(clientId);
+  if (existingClient) {
+    console.log(`[SSE Gateway] Overwriting existing client entry for ${clientId}. Explicitly destroying old socket.`);
+    try {
+      if (!existingClient.res.writableEnded) existingClient.res.end();
+      if (!existingClient.req.socket.destroyed) existingClient.req.socket.destroy();
+    } catch {
+      // Silently absorb socket destruction errors
+    }
+  }
+
   const client: SseClient = {
     id: clientId,
     userId,
@@ -312,10 +340,13 @@ syncRouter.get('/stream', (req: Request, res: Response) => {
   }
 
   /**
-   * 7. Strict Connection Teardown & Memory Leak Prevention:
-   * When a client disconnects (tab closed, network dropped, mobile lock/sleep, page reload),
-   * we immediately unregister the clientId from `activeClients` and invoke `req.socket.destroy()`.
-   * This prevents zombie file descriptors, memory leaks, and TCP half-open ghost connections.
+   * 7. Strict Connection Teardown & Reference Equality Guard:
+   * Prevents the "Ghost Cleanup Race Condition":
+   * When an older stalled connection finally emits its close/end/error event, it must NOT
+   * delete a newly established connection from activeClients if that connection was already replaced.
+   *
+   * Reference Equality Check:
+   * Strictly verify if (activeClients.get(clientId)?.res === res) before deleting the Map entry.
    */
   let isCleanedUp = false;
   const cleanup = () => {
@@ -323,8 +354,16 @@ syncRouter.get('/stream', (req: Request, res: Response) => {
     isCleanedUp = true;
 
     clearInterval(keepAliveTimer);
-    activeClients.delete(clientId);
-    console.log(`[SSE Gateway] Client disconnected and cleaned up: ${clientId}. Remaining active: ${activeClients.size}`);
+
+    // Reference Equality Guard: Prevent old socket from deleting a new connection's Map entry
+    if (activeClients.get(clientId)?.res === res) {
+      activeClients.delete(clientId);
+      console.log(`[SSE Gateway] Client disconnected and cleaned up: ${clientId}. Remaining active: ${activeClients.size}`);
+    } else {
+      console.log(
+        `[SSE Gateway] Stale socket cleanup triggered for ${clientId}, but active Map entry belongs to a newer socket. Preserving active connection.`
+      );
+    }
 
     try {
       if (!res.writableEnded) res.end();
