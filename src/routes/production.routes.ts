@@ -19,6 +19,14 @@ router.post(
   productionController.createCutBatch
 );
 
+// Finishing-First Workflow: Create new production batch directly from finished garments
+router.post(
+  '/finish-batch',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.createFinishBatch
+);
+
 // Create new production batch (Legacy / direct all-in-one run)
 router.post(
   '/',
@@ -77,6 +85,20 @@ router.post(
   verifyToken,
   requireRole('ADMIN', 'STAFF'),
   productionController.addFinishLog
+);
+
+// Cancel an active production order at any stage (Reverses materials and product stock)
+router.put(
+  '/:id/cancel',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.cancel
+);
+router.post(
+  '/:id/cancel',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.cancel
 );
 
 // Rollback and delete a production order

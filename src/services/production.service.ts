@@ -21,7 +21,20 @@ export interface CreateProductionPayload {
   reason?: string;
   notes?: string;
   productionDate?: string | Date;
-  materials: ProductionMaterialInput[];
+  materials?: ProductionMaterialInput[];
+}
+
+export interface CreateFinishBatchPayload {
+  productionNo?: string;
+  productId: number;
+  variantId?: number | null;
+  targetQuantity?: number;
+  completedQty: number;
+  finishDate?: string | Date;
+  notes?: string;
+  reason?: string;
+  loggedByRole?: string;
+  syncToStock?: boolean;
 }
 
 export interface AddMaterialCutLogPayload {
@@ -258,7 +271,118 @@ export class ProductionService {
   }
 
   /**
+   * Finishing-First Stage: Create a brand-new production batch directly from finished garments
+   * (POST /api/production/finish-batch)
+   *
+   * Enables a flexible, bi-directional production lifecycle where operators record finished pieces upfront
+   * without requiring raw material cuts at initiation. Raw materials can be allocated and cut later at any time.
+   *
+   * @param payload - Batch setup details (productId, optional variantId, targetQuantity, completedQty, finishDate, notes, syncToStock)
+   * @param userId - ID of the creating operator
+   * @param userRole - Role of the creating operator
+   * @returns Created ProductionOrder with initial GarmentFinishLog
+   */
+  async createFinishingBatch(payload: CreateFinishBatchPayload, userId?: number, userRole?: string) {
+    const productId = Number(payload.productId);
+    if (!productId || isNaN(productId)) {
+      throw new HttpException(400, 'Valid product ID is required');
+    }
+
+    const completedQty = Math.max(1, Number(payload.completedQty) || 0);
+    const targetQuantity = Math.max(completedQty, Number(payload.targetQuantity) || completedQty);
+
+    // Verify product exists
+    const product = await prisma.product.findUnique({
+      where: { id: productId },
+      include: { variants: true },
+    });
+
+    if (!product) {
+      throw new HttpException(404, 'Product not found');
+    }
+
+    // Resolve variant
+    let targetVariantId: number | null = payload.variantId ? Number(payload.variantId) : null;
+    if (targetVariantId) {
+      const found = product.variants.find((v) => v.id === targetVariantId);
+      if (!found) {
+        throw new HttpException(400, 'Selected variant does not belong to this product');
+      }
+    } else if (product.variants.length > 0) {
+      targetVariantId = product.variants[0].id;
+    }
+
+    const finishDate = payload.finishDate ? new Date(payload.finishDate) : new Date();
+    const productionNo = payload.productionNo?.trim() || (await this.generateProductionNo());
+    const loggedByRole = payload.loggedByRole?.trim() || userRole || 'Finishing Supervisor';
+    const syncToStock = Boolean(payload.syncToStock);
+
+    const isTargetMet = targetQuantity > 0 && completedQty >= targetQuantity;
+    let initialStatus: string;
+    if (syncToStock) {
+      initialStatus = isTargetMet ? 'COMPLETED' : 'IN_PROGRESS';
+    } else {
+      initialStatus = isTargetMet ? 'FINISHED_PENDING_STOCK' : 'IN_PROGRESS';
+    }
+
+    return prisma.$transaction(async (tx) => {
+      // If immediate stock sync was chosen, increment product variant stock
+      if (syncToStock) {
+        if (targetVariantId) {
+          await tx.productVariant.update({
+            where: { id: targetVariantId },
+            data: { stock: { increment: completedQty } },
+          });
+        } else {
+          const firstVariant = await tx.productVariant.findFirst({
+            where: { productId },
+          });
+          if (firstVariant) {
+            await tx.productVariant.update({
+              where: { id: firstVariant.id },
+              data: { stock: { increment: completedQty } },
+            });
+          }
+        }
+      }
+
+      // Create the production order with initial finished output and 0 raw material usages
+      const order = await tx.productionOrder.create({
+        data: {
+          productionNo,
+          productId,
+          variantId: targetVariantId,
+          targetQuantity,
+          completedQty,
+          status: initialStatus,
+          isStockSynced: syncToStock,
+          stockSyncedAt: syncToStock ? finishDate : null,
+          stockSyncedByRole: syncToStock ? loggedByRole : null,
+          reason: payload.reason?.trim() || 'Regular Bulk',
+          notes: payload.notes?.trim() || null,
+          productionDate: finishDate,
+          finishLogs: {
+            create: [
+              {
+                quantityFinished: completedQty,
+                finishDate,
+                loggedByRole,
+                isSyncedToStock: syncToStock,
+                syncedAt: syncToStock ? finishDate : null,
+              },
+            ],
+          },
+        },
+      });
+
+      return this.getByIdWithLogs(order.id, tx);
+    });
+  }
+
+  /**
    * Atomically create a garment production record:
+   * Supports both material-first and finishing-first bi-directional workflows.
+   * If materials are provided:
    * 1. Validates material stock availability.
    * 2. Decrements raw material stock by net consumed (issued - returned).
    * 3. Creates raw material movement ledger entries.
@@ -274,9 +398,7 @@ export class ProductionService {
     const completedQty = Math.max(0, Number(payload.completedQty) || 0);
     const targetQuantity = Math.max(completedQty, Number(payload.targetQuantity) || completedQty);
 
-    if (!payload.materials || !Array.isArray(payload.materials) || payload.materials.length === 0) {
-      throw new HttpException(400, 'At least one raw material line is required for production');
-    }
+    const materialsList = Array.isArray(payload.materials) ? payload.materials : [];
 
     // Verify product
     const product = await prisma.product.findUnique({
@@ -299,8 +421,8 @@ export class ProductionService {
       targetVariantId = product.variants[0].id;
     }
 
-    // Validate raw materials and check stock
-    const sanitizedMaterials = payload.materials.map((m) => {
+    // Validate raw materials if provided
+    const sanitizedMaterials = materialsList.map((m) => {
       const rmId = Number(m.rawMaterialId);
       const issued = Math.max(0, Number(m.issuedQty) || 0);
       const returned = Math.max(0, Number(m.returnedQty) || 0);
@@ -460,10 +582,6 @@ export class ProductionService {
     const completedQty = Math.max(0, Number(payload.completedQty) || 0);
     const targetQuantity = Math.max(completedQty, Number(payload.targetQuantity) || completedQty);
 
-    if (!payload.materials || !Array.isArray(payload.materials) || payload.materials.length === 0) {
-      throw new HttpException(400, 'At least one raw material line is required for production');
-    }
-
     // Verify product
     const product = await prisma.product.findUnique({
       where: { id: productId },
@@ -485,31 +603,36 @@ export class ProductionService {
       targetVariantId = product.variants[0].id;
     }
 
-    const sanitizedMaterials = payload.materials.map((m) => {
-      const rmId = Number(m.rawMaterialId);
-      const issued = Math.max(0, Number(m.issuedQty) || 0);
-      const returned = Math.max(0, Number(m.returnedQty) || 0);
-      const net = Math.max(0, issued - returned);
+    const materialsList = Array.isArray(payload.materials) ? payload.materials : [];
 
-      if (!rmId || isNaN(rmId)) {
-        throw new HttpException(400, 'Invalid raw material ID in material list');
-      }
-      if (issued <= 0) {
-        throw new HttpException(400, 'Issued quantity must be greater than zero');
-      }
-      if (returned > issued) {
-        throw new HttpException(400, 'Returned quantity cannot exceed issued quantity');
-      }
+    // Filter valid material rows and sanitize
+    const sanitizedMaterials = materialsList
+      .filter((m) => m && m.rawMaterialId)
+      .map((m) => {
+        const rmId = Number(m.rawMaterialId);
+        const issued = Math.max(0, Number(m.issuedQty) || 0);
+        const returned = Math.max(0, Number(m.returnedQty) || 0);
+        const net = Math.max(0, issued - returned);
 
-      return {
-        rawMaterialId: rmId,
-        issuedQty: issued,
-        returnedQty: returned,
-        netConsumedQty: net,
-        unitCost: m.unitCost !== undefined ? Number(m.unitCost) : undefined,
-        returnReason: m.returnReason?.trim() || null,
-      };
-    });
+        if (!rmId || isNaN(rmId)) {
+          throw new HttpException(400, 'Invalid raw material ID in material list');
+        }
+        if (issued <= 0) {
+          throw new HttpException(400, 'Issued quantity must be greater than zero');
+        }
+        if (returned > issued) {
+          throw new HttpException(400, 'Returned quantity cannot exceed issued quantity');
+        }
+
+        return {
+          rawMaterialId: rmId,
+          issuedQty: issued,
+          returnedQty: returned,
+          netConsumedQty: net,
+          unitCost: m.unitCost !== undefined ? Number(m.unitCost) : undefined,
+          returnReason: m.returnReason?.trim() || null,
+        };
+      });
 
     return prisma.$transaction(async (tx) => {
       const existingOrder = await tx.productionOrder.findUnique({
@@ -1264,8 +1387,13 @@ export class ProductionService {
 
   /**
    * Asynchronously log a material cutting event for an existing production batch.
-   * Can happen on separate days from garment finishing, consuming from the already-issued batch allocation.
-   * NOTE: Does NOT deduct again from warehouse RawMaterialItem stock.
+   * Supports flexible bi-directional manufacturing lifecycle and backdated cutting entries:
+   * 1. If material is already allocated to the batch with uncut fabric remaining, consumes from it without double-deducting.
+   * 2. If material is NOT yet allocated to the batch (e.g., Finishing-First batch), or if deductInventory is true,
+   *    or if cut quantity exceeds existing uncut allocation:
+   *    Validates warehouse stock, deducts from RawMaterialItem stock, creates a RawMaterialMovement ledger entry,
+   *    and creates or increments ProductionMaterialUsage.
+   * 3. Records MaterialCutLog with custom timestamp and operator role.
    */
   async addMaterialCutLog(
     id: number,
@@ -1306,30 +1434,109 @@ export class ProductionService {
         throw new HttpException(404, 'Production order not found');
       }
 
-      const usage = order.materialUsages.find((u) => u.rawMaterialId === rawMaterialId);
-      if (!usage) {
-        throw new HttpException(
-          400,
-          `Raw material #${rawMaterialId} is not allocated to Batch #${order.productionNo}. Please edit the batch to allocate this material.`
-        );
-      }
+      let usage = order.materialUsages.find((u) => u.rawMaterialId === rawMaterialId);
 
-      // Calculate total cut so far for this material in this batch
+      // Total already cut for this material in this batch
       const totalAlreadyCutQty = (order.cutLogs || [])
         .filter((c) => c.rawMaterialId === rawMaterialId)
         .reduce((sum, c) => sum + Number(c.quantityCut || 0), 0);
 
-      // Remaining uncut allocation in batch = issuedQty - totalAlreadyCutQty - returnedQty
-      const remainingUncut = Math.max(0, usage.issuedQty - totalAlreadyCutQty - usage.returnedQty);
+      const remainingUncut = usage
+        ? Math.max(0, usage.issuedQty - totalAlreadyCutQty - usage.returnedQty)
+        : 0;
 
-      if (quantityCut > remainingUncut) {
-        throw new HttpException(
-          400,
-          `Cannot cut ${quantityCut} ${usage.rawMaterial.unit}. Remaining uncut allocation in batch is only ${remainingUncut} ${usage.rawMaterial.unit} (Allocated: ${usage.issuedQty}, Already Cut: ${totalAlreadyCutQty}, Returned: ${usage.returnedQty}). To allocate additional fabric from warehouse inventory, please use Edit Batch.`
-        );
+      // Determine if warehouse stock deduction is required:
+      // - If deductInventory is explicitly true
+      // - If usage does not exist yet (finishing-first batch or new material)
+      // - If deductInventory is not false and cut quantity exceeds remaining batch allocation
+      const needsWarehouseDeduction =
+        payload.deductInventory === true ||
+        !usage ||
+        (payload.deductInventory !== false && quantityCut > remainingUncut);
+
+      if (!needsWarehouseDeduction && payload.deductInventory === false) {
+        if (!usage) {
+          throw new HttpException(
+            400,
+            `Raw material #${rawMaterialId} is not allocated to Batch #${order.productionNo}. Check "Deduct warehouse inventory" to allocate from warehouse stock.`
+          );
+        }
+        if (quantityCut > remainingUncut) {
+          throw new HttpException(
+            400,
+            `Cannot cut ${quantityCut} ${usage.rawMaterial.unit}. Remaining uncut allocation in batch is only ${remainingUncut} ${usage.rawMaterial.unit}. Check "Deduct warehouse inventory" to allocate additional fabric from warehouse.`
+          );
+        }
       }
 
-      // 1. Create the MaterialCutLog without deducting from warehouse inventory
+      if (needsWarehouseDeduction) {
+        const rawItem = await tx.rawMaterialItem.findUnique({
+          where: { id: rawMaterialId },
+        });
+
+        if (!rawItem || !rawItem.isActive) {
+          throw new HttpException(404, `Raw material #${rawMaterialId} not found or inactive`);
+        }
+
+        // Calculate quantity to deduct from warehouse
+        const qtyToDeductFromWarehouse = usage && payload.deductInventory !== true
+          ? quantityCut - remainingUncut
+          : quantityCut;
+
+        if (qtyToDeductFromWarehouse > 0) {
+          if (rawItem.currentStock < qtyToDeductFromWarehouse) {
+            throw new HttpException(
+              400,
+              `Insufficient warehouse stock for "${rawItem.name}". Available: ${rawItem.currentStock} ${rawItem.unit}, Required: ${qtyToDeductFromWarehouse} ${rawItem.unit}`
+            );
+          }
+
+          const newStock = Math.max(0, rawItem.currentStock - qtyToDeductFromWarehouse);
+          await tx.rawMaterialItem.update({
+            where: { id: rawItem.id },
+            data: { currentStock: newStock },
+          });
+
+          await tx.rawMaterialMovement.create({
+            data: {
+              rawMaterialItemId: rawItem.id,
+              movementType: MaterialMovementType.PRODUCTION_USE,
+              quantity: qtyToDeductFromWarehouse,
+              previousStock: rawItem.currentStock,
+              newStock,
+              reference: `Material cut allocation for Batch #${order.productionNo} (${qtyToDeductFromWarehouse} ${rawItem.unit})`,
+              recordedBy: userId || null,
+              createdAt: cutDate,
+            },
+          });
+
+          if (usage) {
+            await tx.productionMaterialUsage.update({
+              where: { id: usage.id },
+              data: {
+                issuedQty: { increment: qtyToDeductFromWarehouse },
+                netConsumedQty: { increment: qtyToDeductFromWarehouse },
+              },
+            });
+          } else {
+            usage = await tx.productionMaterialUsage.create({
+              data: {
+                productionOrderId: orderId,
+                rawMaterialId,
+                issuedQty: qtyToDeductFromWarehouse,
+                returnedQty: 0,
+                netConsumedQty: qtyToDeductFromWarehouse,
+                unitCost: rawItem.unitCostAverage || 0,
+              },
+              include: {
+                rawMaterial: true,
+              },
+            });
+          }
+        }
+      }
+
+      // Record the MaterialCutLog
       await tx.materialCutLog.create({
         data: {
           productionOrderId: orderId,
@@ -1583,6 +1790,111 @@ export class ProductionService {
   }
 
   /**
+   * Atomic Cancellation of a Production Order at Any Stage:
+   * 1. Reverses consumed raw materials back into warehouse RawMaterialItem stock.
+   * 2. Decrements finished goods from ProductVariant stock ONLY IF already synced to inventory.
+   * 3. Sets batch status to "CANCELLED", updates finish log sync status, and appends cancellation reason.
+   * 4. Retains order history in the ledger for complete accounting audit trail.
+   */
+  async cancelProductionOrder(id: number, userId?: number, userRole?: string, reason?: string) {
+    const orderId = Number(id);
+    if (!orderId || isNaN(orderId)) {
+      throw new HttpException(400, 'Valid production order ID is required');
+    }
+
+    return prisma.$transaction(async (tx) => {
+      const order = await tx.productionOrder.findUnique({
+        where: { id: orderId },
+        include: {
+          product: true,
+          materialUsages: true,
+          finishLogs: true,
+        },
+      });
+
+      if (!order) {
+        throw new HttpException(404, 'Production order not found');
+      }
+
+      if (order.status === 'CANCELLED') {
+        throw new HttpException(400, `Production batch #${order.productionNo} is already cancelled.`);
+      }
+
+      const cancellationDate = new Date();
+
+      // 1. Rollback raw materials stock
+      for (const usage of order.materialUsages) {
+        if (usage.netConsumedQty > 0) {
+          const item = await tx.rawMaterialItem.findUnique({ where: { id: usage.rawMaterialId } });
+          if (item) {
+            const restoredStock = item.currentStock + usage.netConsumedQty;
+            await tx.rawMaterialItem.update({
+              where: { id: item.id },
+              data: { currentStock: restoredStock },
+            });
+
+            await tx.rawMaterialMovement.create({
+              data: {
+                rawMaterialItemId: item.id,
+                movementType: MaterialMovementType.AUDIT_ADJUST,
+                quantity: usage.netConsumedQty,
+                previousStock: item.currentStock,
+                newStock: restoredStock,
+                reference: `Cancellation rollback for Production #${order.productionNo}${reason ? ` (${reason})` : ''}`,
+                recordedBy: userId || null,
+                createdAt: cancellationDate,
+              },
+            });
+          }
+        }
+      }
+
+      // 2. Decrement completed garments from variant stock ONLY IF already synced
+      if (order.isStockSynced && order.completedQty > 0) {
+        let targetVariantId = order.variantId;
+        if (!targetVariantId) {
+          const firstVariant = await tx.productVariant.findFirst({
+            where: { productId: order.productId },
+          });
+          if (firstVariant) targetVariantId = firstVariant.id;
+        }
+
+        if (targetVariantId) {
+          const variant = await tx.productVariant.findUnique({ where: { id: targetVariantId } });
+          if (variant) {
+            const updatedStock = Math.max(0, variant.stock - order.completedQty);
+            await tx.productVariant.update({
+              where: { id: variant.id },
+              data: { stock: updatedStock },
+            });
+          }
+        }
+      }
+
+      // 3. Mark finishLogs synced to false
+      await tx.garmentFinishLog.updateMany({
+        where: { productionOrderId: orderId },
+        data: { isSyncedToStock: false },
+      });
+
+      // 4. Update status to CANCELLED and append cancellation note
+      const cancellationNote = `Cancelled on ${cancellationDate.toISOString().slice(0, 10)}${reason ? `: ${reason}` : ''}${userRole ? ` by ${userRole}` : ''}`;
+      const newNotes = order.notes ? `${order.notes} | ${cancellationNote}` : cancellationNote;
+
+      const updated = await tx.productionOrder.update({
+        where: { id: orderId },
+        data: {
+          status: 'CANCELLED',
+          isStockSynced: false,
+          notes: newNotes,
+        },
+      });
+
+      return this.getByIdWithLogs(updated.id, tx);
+    });
+  }
+
+  /**
    * Atomic Deletion / Rollback of a Production Order:
    * 1. Reverses material deductions (restores RawMaterial stock).
    * 2. Decrements finished goods stock from ProductVariant ONLY IF already synced to stock.
@@ -1633,14 +1945,24 @@ export class ProductionService {
       }
 
       // 2. Decrement completed garments from variant stock ONLY IF already synced
-      if (order.variantId && order.completedQty > 0 && order.isStockSynced) {
-        const variant = await tx.productVariant.findUnique({ where: { id: order.variantId } });
-        if (variant) {
-          const updatedStock = Math.max(0, variant.stock - order.completedQty);
-          await tx.productVariant.update({
-            where: { id: variant.id },
-            data: { stock: updatedStock },
+      if (order.completedQty > 0 && order.isStockSynced) {
+        let targetVariantId = order.variantId;
+        if (!targetVariantId) {
+          const firstVariant = await tx.productVariant.findFirst({
+            where: { productId: order.productId },
           });
+          if (firstVariant) targetVariantId = firstVariant.id;
+        }
+
+        if (targetVariantId) {
+          const variant = await tx.productVariant.findUnique({ where: { id: targetVariantId } });
+          if (variant) {
+            const updatedStock = Math.max(0, variant.stock - order.completedQty);
+            await tx.productVariant.update({
+              where: { id: variant.id },
+              data: { stock: updatedStock },
+            });
+          }
         }
       }
 

@@ -205,6 +205,43 @@ export class ProductionController {
   }
 
   /**
+   * POST /api/production/finish-batch
+   * Finishing-First Stage: Create a new production batch directly from finished garments
+   * with zero initial raw materials required upfront.
+   */
+  async createFinishBatch(req: Request, res: Response, next: NextFunction) {
+    try {
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const order = await productionService.createFinishingBatch(req.body, userId, userRole);
+      return sendSuccess(res, order, 201);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * PUT /api/production/:id/cancel
+   * Cancel an active production order at any stage, safely reversing deducted raw materials
+   * and synced product variant stock inside a Prisma transaction.
+   */
+  async cancel(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: 'Valid integer ID is required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const reason = req.body?.reason;
+      const order = await productionService.cancelProductionOrder(id, userId, userRole, reason);
+      return sendSuccess(res, order);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
    * DELETE /api/production/:id
    * Roll back and delete a production order
    */
