@@ -4,10 +4,11 @@ import { sendCreated, sendSuccess } from '../utils/response.ts';
 
 /**
  * Handle creation of new POS cashier invoice order with authenticated user validation
+ * Allows ADMIN, STAFF, CASHIER, and REP roles.
  */
 export const createPosOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const rawUserId = (req as any).user?.userId;
+    const rawUserId = (req as any).user?.userId ?? (req as any).user?.id;
     const userId = parseInt(String(rawUserId), 10);
     if (!userId || isNaN(userId) || userId <= 0) {
       return res.status(401).json({ error: 'Authenticated user session invalid' });
@@ -53,6 +54,10 @@ export const getPosCatalog = async (_req: Request, res: Response, next: NextFunc
 /**
  * Handle listing paginated invoices with sanitized search, multi-tenant filters, and safe limits.
  *
+ * RBAC Data Scoping:
+ * - REP: Strictly scoped to invoices authored by the authenticated representative (where: { userId }).
+ * - ADMIN, STAFF, CASHIER: Unrestricted access to retrieve the global invoice ledger.
+ *
  * Supported `sortBy` modes:
  * - 'newest': Descending issue timestamp (default)
  * - 'oldest': Ascending issue timestamp
@@ -75,6 +80,15 @@ export const getInvoices = async (req: Request, res: Response, next: NextFunctio
     const parsedPage = Math.max(1, parseInt(String(page || 1), 10) || 1);
     const parsedLimit = Math.min(100, Math.max(1, parseInt(String(limit || 15), 10) || 15));
 
+    // Role-Based Access Control (RBAC) Scoping:
+    // Sales Representatives (REP) are strictly scoped to bills they authored.
+    // ADMIN, STAFF, and CASHIER roles bypass this filter and retrieve the entire ledger.
+    const user = (req as any).user;
+    const userRole = String(user?.role || '').toUpperCase();
+    const rawUserId = user?.userId ?? user?.id;
+    const authUserId = parseInt(String(rawUserId), 10);
+    const repUserId = userRole === 'REP' && !isNaN(authUserId) && authUserId > 0 ? authUserId : undefined;
+
     const result = await orderService.getInvoices({
       search: cleanSearch,
       customerId: cleanCustomerId,
@@ -85,6 +99,7 @@ export const getInvoices = async (req: Request, res: Response, next: NextFunctio
       sortBy: cleanSortBy,
       page: parsedPage,
       limit: parsedLimit,
+      userId: repUserId,
     });
     sendSuccess(res, result);
   } catch (err) {
@@ -93,10 +108,8 @@ export const getInvoices = async (req: Request, res: Response, next: NextFunctio
 };
 
 /**
- * Handle single invoice retrieval
- */
-/**
  * Handle single invoice retrieval with strict positive integer ID validation
+ * Enforces RBAC: REPs are restricted to viewing invoices they authored.
  */
 export const getInvoiceById = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -106,6 +119,21 @@ export const getInvoiceById = async (req: Request, res: Response, next: NextFunc
       return res.status(400).json({ error: 'Valid positive integer invoice ID is required' });
     }
     const invoice = await orderService.getInvoiceById(id);
+    if (!invoice) {
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
+
+    // Role-Based Access Control: REPs can only view invoices they authored
+    const user = (req as any).user;
+    const userRole = String(user?.role || '').toUpperCase();
+    const rawUserId = user?.userId ?? user?.id;
+    const authUserId = parseInt(String(rawUserId), 10);
+    if (userRole === 'REP' && !isNaN(authUserId) && authUserId > 0) {
+      if (invoice.userId && Number(invoice.userId) !== authUserId) {
+        return res.status(403).json({ error: 'Access denied: You can only view invoices you authored' });
+      }
+    }
+
     sendSuccess(res, invoice);
   } catch (err) {
     next(err);
@@ -113,10 +141,8 @@ export const getInvoiceById = async (req: Request, res: Response, next: NextFunc
 };
 
 /**
- * Handle invoice order modification
- */
-/**
  * Handle invoice order modification with parameter sanitization
+ * Enforces RBAC: REPs can edit their own authored bills, while ADMIN, STAFF, CASHIER have full editing authority.
  */
 export const updateInvoiceOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -128,7 +154,26 @@ export const updateInvoiceOrder = async (req: Request, res: Response, next: Next
     if (!req.body || typeof req.body !== 'object') {
       return res.status(400).json({ error: 'Invalid invoice payload provided' });
     }
-    const updated = await orderService.updateInvoiceOrder(id, req.body);
+
+    const user = (req as any).user;
+    const userRole = String(user?.role || '').toUpperCase();
+    const rawUserId = user?.userId ?? user?.id;
+    const authUserId = parseInt(String(rawUserId), 10);
+
+    // Ensure Sales Representatives (REP) stay locked to wholesale POS billing
+    if (userRole === 'REP') {
+      req.body.source = 'POS_WHOLESALE';
+    }
+
+    const currentUser = {
+      id: !isNaN(authUserId) ? authUserId : undefined,
+      userId: !isNaN(authUserId) ? authUserId : undefined,
+      role: userRole,
+      name: user?.name,
+      email: user?.email,
+    };
+
+    const updated = await orderService.updateInvoiceOrder(id, req.body, currentUser);
     sendSuccess(res, updated);
   } catch (err) {
     next(err);

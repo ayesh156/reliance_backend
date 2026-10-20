@@ -508,7 +508,8 @@ export class OrderService {
   }
 
   /**
-   * Get paginated & filtered Invoices list with multi-word search, customer filter & Sri Lanka timezone date boundaries
+   * Get paginated & filtered Invoices list with multi-word search, customer filter & Sri Lanka timezone date boundaries.
+   * Supports RBAC data-scoping: strictly constrains where clause when `userId` is passed for Sales Representatives (REP).
    */
   async getInvoices(params: {
     search?: string;
@@ -520,6 +521,7 @@ export class OrderService {
     sortBy?: string;
     page?: number;
     limit?: number;
+    userId?: number;
   }) {
     // Automatically reconcile matured post-dated cheques before returning invoice query results
     try {
@@ -533,6 +535,11 @@ export class OrderService {
     const skip = (page - 1) * limit;
 
     const where: any = {};
+
+    // Role-Based Access Control (RBAC): Enforce strict scoping to the authoring user (REP role)
+    if (params.userId !== undefined && !isNaN(Number(params.userId)) && Number(params.userId) > 0) {
+      where.userId = Number(params.userId);
+    }
 
     if (params.source) {
       where.source = params.source;
@@ -881,7 +888,8 @@ export class OrderService {
         chequeDate?: string | Date;
         amount: number | string;
       }>;
-    }
+    },
+    currentUser?: { id?: number | string; userId?: number | string; role?: string; name?: string; email?: string }
   ) {
     const updatedOrder = await prisma.$transaction(async (tx) => {
       const existing = await tx.order.findUnique({
@@ -891,6 +899,22 @@ export class OrderService {
 
       if (!existing) {
         throw new HttpException(404, `Invoice #${orderId} not found`);
+      }
+
+      // Role & Ownership Validation: REPs can only edit invoices they authored
+      if (currentUser) {
+        const userRole = String(currentUser.role || '').toUpperCase();
+        const requestingUserId = Number(currentUser.id ?? currentUser.userId);
+
+        if (userRole === 'REP') {
+          const isOwner = Number(existing.userId) === requestingUserId;
+          if (!isOwner) {
+            throw new HttpException(
+              403,
+              'Unauthorized: Representatives can only edit invoices they authored'
+            );
+          }
+        }
       }
 
       // 1. Revert previous stock
