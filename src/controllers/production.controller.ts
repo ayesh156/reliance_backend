@@ -155,6 +155,25 @@ export class ProductionController {
   }
 
   /**
+   * POST /api/production/batches/:id/return-scrap
+   * Return scrap quantities, update material usage & returnedScrap, and atomically increment raw material stock
+   */
+  async returnScrap(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: 'Valid integer ID is required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const updatedOrder = await productionService.returnScrap(id, req.body, userId, userRole);
+      return sendSuccess(res, updatedOrder);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
    * POST /api/production/:id/sync-stock
    * Stage 3: Confirm & Sync Finished Garments to Product Inventory.
    * Increments product variant stock, updates isStockSynced & isSyncedToStock, and marks COMPLETED.

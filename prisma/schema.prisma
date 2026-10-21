@@ -616,6 +616,7 @@ model ProductionMaterialUsage {
   
   issuedQty         Float           @map("issued_qty")
   returnedQty       Float           @default(0) @map("returned_qty")
+  returnedScrap     Float?          @default(0) @map("returned_scrap")
   netConsumedQty    Float           @map("net_consumed_qty")
   unitCost          Float           @default(0) @map("unit_cost")
   returnReason      String?         @map("return_reason") @db.Text

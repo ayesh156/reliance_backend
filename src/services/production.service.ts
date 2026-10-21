@@ -9,8 +9,10 @@ export interface TargetProductMapping {
   sku?: string;
   barcode?: string;
   plannedQty: number;
+  completedQty?: number;
   sentToWashQty?: number;
   washedQty?: number;
+  isSynced?: boolean;
 }
 
 export interface ProductionMaterialInput {
@@ -1259,6 +1261,166 @@ export class ProductionService {
   }
 
   /**
+   * Return Scrap / Material Release Workflow:
+   * (POST /api/production/batches/:id/return-scrap or /api/production/:id/return-scrap)
+   * Receives returned scrap quantities for materials allocated to the batch,
+   * updates the batch's material usage (incrementing returnedScrap & returnedQty, decrementing netConsumedQty),
+   * and atomically increments RawMaterialItem.currentStock in the warehouse.
+   */
+  async returnScrap(
+    productionOrderId: number,
+    payload: {
+      returns?: Array<{
+        usageId?: number;
+        materialId?: number;
+        rawMaterialId?: number;
+        scrapQty?: number;
+        returnedQty?: number;
+        returnedScrap?: number;
+        returnReason?: string;
+      }>;
+      items?: Array<{
+        usageId?: number;
+        materialId?: number;
+        rawMaterialId?: number;
+        scrapQty?: number;
+        returnedQty?: number;
+        returnedScrap?: number;
+        returnReason?: string;
+      }>;
+    } | Array<any>,
+    userId?: number,
+    userRole?: string
+  ) {
+    const orderId = Number(productionOrderId);
+    if (!orderId || isNaN(orderId)) {
+      throw new HttpException(400, 'Valid production order ID is required');
+    }
+
+    const rawList = Array.isArray(payload)
+      ? payload
+      : (Array.isArray(payload.returns) ? payload.returns : (Array.isArray(payload.items) ? payload.items : []));
+
+    if (rawList.length === 0) {
+      throw new HttpException(400, 'At least one material scrap return specification is required');
+    }
+
+    return prisma.$transaction(async (tx) => {
+      const order = await tx.productionOrder.findUnique({
+        where: { id: orderId },
+        include: {
+          product: true,
+          materialUsages: {
+            include: { rawMaterial: true },
+          },
+          cutLogs: true,
+        },
+      });
+
+      if (!order) {
+        throw new HttpException(404, 'Production order not found');
+      }
+
+      for (const ret of rawList) {
+        let usage = order.materialUsages.find(
+          (u) => ret.usageId && u.id === Number(ret.usageId)
+        );
+
+        if (!usage && (ret.rawMaterialId || ret.materialId)) {
+          const targetMatId = Number(ret.rawMaterialId || ret.materialId);
+          usage = order.materialUsages.find((u) => u.rawMaterialId === targetMatId);
+        }
+
+        if (!usage) {
+          throw new HttpException(
+            404,
+            `Material usage record #${ret.usageId || ret.materialId} not found in this order`
+          );
+        }
+
+        const scrapVal = Math.max(
+          0,
+          Number(ret.scrapQty ?? ret.returnedScrap ?? ret.returnedQty ?? 0)
+        );
+
+        if (scrapVal <= 0) continue;
+
+        // Calculate max returnable = max(0, issuedQty - totalCutQty - previouslyReturnedQty)
+        const totalCutQty = (order.cutLogs || [])
+          .filter((c) => c.rawMaterialId === usage.rawMaterialId)
+          .reduce((sum, c) => sum + Number(c.quantityCut || 0), 0);
+
+        const previouslyReturned = Number(usage.returnedQty || 0);
+        const maxReturnable = Math.max(0, usage.issuedQty - totalCutQty - previouslyReturned);
+
+        if (scrapVal > maxReturnable) {
+          throw new HttpException(
+            400,
+            `Returned scrap quantity (${scrapVal} ${usage.rawMaterial.unit}) exceeds available leftover (${maxReturnable} ${usage.rawMaterial.unit}) for "${usage.rawMaterial.name}".`
+          );
+        }
+
+        const newReturnedScrap = ((usage as any).returnedScrap || 0) + scrapVal;
+        const newReturnedQty = previouslyReturned + scrapVal;
+        const newNetConsumed = Math.max(0, usage.issuedQty - newReturnedQty);
+
+        // Update usage with returnedScrap & returnedQty
+        await tx.productionMaterialUsage.update({
+          where: { id: usage.id },
+          data: {
+            returnedScrap: newReturnedScrap,
+            returnedQty: newReturnedQty,
+            netConsumedQty: newNetConsumed,
+            returnReason: ret.returnReason?.trim() || usage.returnReason || 'Scrap returned to warehouse',
+          },
+        });
+
+        // Atomically increment raw material currentStock
+        const currentItem = await tx.rawMaterialItem.findUnique({
+          where: { id: usage.rawMaterialId },
+        });
+
+        if (currentItem) {
+          const updatedStock = currentItem.currentStock + scrapVal;
+          await tx.rawMaterialItem.update({
+            where: { id: currentItem.id },
+            data: { currentStock: updatedStock },
+          });
+
+          // Log movement
+          await tx.rawMaterialMovement.create({
+            data: {
+              rawMaterialItemId: currentItem.id,
+              movementType: MaterialMovementType.SCRAP_RETURN,
+              quantity: scrapVal,
+              previousStock: currentItem.currentStock,
+              newStock: updatedStock,
+              reference: `Scrap returned from Production #${order.productionNo}${ret.returnReason ? ` - ${ret.returnReason}` : ''}`,
+              recordedBy: userId || null,
+            },
+          });
+        }
+
+        // Record activity log
+        await tx.batchActivityLog.create({
+          data: {
+            productionOrderId: orderId,
+            stage: 'SCRAP_RETURN',
+            action: 'RETURNED_SCRAP',
+            notes: ret.returnReason?.trim() || `Returned ${scrapVal} ${usage.rawMaterial.unit} scrap of ${usage.rawMaterial.name} to warehouse inventory`,
+            timestamp: new Date(),
+            userId: userId || null,
+            userName: userRole || 'Warehouse',
+            quantity: scrapVal,
+          },
+        });
+      }
+
+      return this.getByIdWithLogs(orderId, tx);
+    });
+  }
+
+  /**
    * Fetch all production orders with query filtering
    */
   async getProductionOrders(filters: {
@@ -2362,6 +2524,11 @@ export class ProductionService {
     payload: {
       finalQuantity?: number;
       notes?: string;
+      items?: Array<{
+        productId: number;
+        variantId?: number | null;
+        quantity: number;
+      }>;
     },
     userId?: number,
     userRole?: string
@@ -2389,40 +2556,110 @@ export class ProductionService {
         throw new HttpException(400, 'Cannot finalize a cancelled production batch');
       }
 
-      // Determine actual finished pieces
-      const actualQty = payload.finalQuantity !== undefined && Number(payload.finalQuantity) > 0
-        ? Math.floor(Number(payload.finalQuantity))
-        : (order.completedQty > 0 ? order.completedQty : (order.targetQuantity > 0 ? order.targetQuantity : 1));
+      // Parse target products
+      let currentTargetProducts: TargetProductMapping[] = [];
+      if (order.targetProducts) {
+        try {
+          currentTargetProducts = typeof order.targetProducts === 'string'
+            ? JSON.parse(order.targetProducts)
+            : (order.targetProducts as any);
+        } catch {
+          currentTargetProducts = [];
+        }
+      }
+      if (!Array.isArray(currentTargetProducts)) currentTargetProducts = [];
 
-      // Calculate quantity to push to sellable inventory
-      let qtyToPush = actualQty;
-      if (order.isStockSynced) {
-        qtyToPush = Math.max(0, actualQty - order.completedQty);
+      let totalFinishedQty = 0;
+      const isMultiProduct = Array.isArray(payload.items) && payload.items.length > 0;
+
+      if (isMultiProduct) {
+        for (const item of payload.items!) {
+          const qty = Math.floor(Number(item.quantity));
+          if (isNaN(qty) || qty <= 0) continue;
+          totalFinishedQty += qty;
+
+          const pId = Number(item.productId);
+          let targetVariantId = item.variantId ? Number(item.variantId) : null;
+          if (!targetVariantId) {
+            const firstVariant = await tx.productVariant.findFirst({
+              where: { productId: pId },
+            });
+            if (firstVariant) targetVariantId = firstVariant.id;
+          }
+
+          if (targetVariantId) {
+            await tx.productVariant.update({
+              where: { id: targetVariantId },
+              data: {
+                stock: { increment: qty },
+              },
+            });
+          }
+
+          const existingIndex = currentTargetProducts.findIndex(
+            (tp) => Number(tp.productId) === pId &&
+              (!targetVariantId || !tp.variantId || Number(tp.variantId) === targetVariantId)
+          );
+
+          if (existingIndex >= 0) {
+            currentTargetProducts[existingIndex].completedQty =
+              (Number(currentTargetProducts[existingIndex].completedQty) || 0) + qty;
+            (currentTargetProducts[existingIndex] as any).isSynced = true;
+          } else {
+            currentTargetProducts.push({
+              productId: pId,
+              variantId: targetVariantId,
+              plannedQty: qty,
+              completedQty: qty,
+              sentToWashQty: 0,
+              washedQty: 0,
+            });
+          }
+        }
+      } else {
+        // Fallback for single product finalization
+        const actualQty = payload.finalQuantity !== undefined && Number(payload.finalQuantity) > 0
+          ? Math.floor(Number(payload.finalQuantity))
+          : (order.completedQty > 0 ? order.completedQty : (order.targetQuantity > 0 ? order.targetQuantity : 1));
+
+        totalFinishedQty = actualQty;
+        let qtyToPush = actualQty;
+        if (order.isStockSynced) {
+          qtyToPush = Math.max(0, actualQty - order.completedQty);
+        }
+
+        if (qtyToPush > 0) {
+          let targetVariantId = order.variantId;
+          if (!targetVariantId) {
+            const firstVariant = await tx.productVariant.findFirst({
+              where: { productId: order.productId },
+            });
+            if (firstVariant) targetVariantId = firstVariant.id;
+          }
+
+          if (targetVariantId) {
+            await tx.productVariant.update({
+              where: { id: targetVariantId },
+              data: {
+                stock: { increment: qtyToPush },
+              },
+            });
+          }
+        }
+
+        if (currentTargetProducts.length > 0) {
+          currentTargetProducts[0].completedQty = totalFinishedQty;
+        }
       }
 
-      if (qtyToPush > 0) {
-        let targetVariantId = order.variantId;
-        if (!targetVariantId) {
-          const firstVariant = await tx.productVariant.findFirst({
-            where: { productId: order.productId },
-          });
-          if (firstVariant) targetVariantId = firstVariant.id;
-        }
-
-        if (targetVariantId) {
-          await tx.productVariant.update({
-            where: { id: targetVariantId },
-            data: {
-              stock: { increment: qtyToPush },
-            },
-          });
-        }
+      if (totalFinishedQty <= 0) {
+        throw new HttpException(400, 'Final completed pieces count must be greater than zero');
       }
 
       const syncTimestamp = new Date();
       const syncedRole = userRole || 'Inventory Admin';
 
-      // Update finish logs to synced
+      // Update existing finish logs to synced
       await tx.garmentFinishLog.updateMany({
         where: { productionOrderId: orderId },
         data: {
@@ -2431,34 +2668,33 @@ export class ProductionService {
         },
       });
 
-      // If no finish logs existed, create one
-      if (order.finishLogs.length === 0) {
-        await tx.garmentFinishLog.create({
-          data: {
-            productionOrderId: orderId,
-            quantityFinished: actualQty,
-            isSyncedToStock: true,
-            syncedAt: syncTimestamp,
-            loggedByRole: syncedRole,
-            finishDate: syncTimestamp,
-          },
-        });
-      }
+      // Create new finish log for this finalization
+      await tx.garmentFinishLog.create({
+        data: {
+          productionOrderId: orderId,
+          quantityFinished: totalFinishedQty,
+          isSyncedToStock: true,
+          syncedAt: syncTimestamp,
+          loggedByRole: syncedRole,
+          finishDate: syncTimestamp,
+        },
+      });
 
       const finalNotes = payload.notes?.trim()
-        ? (order.notes ? `${order.notes} | Finalized: ${payload.notes.trim()}` : `Finalized: ${payload.notes.trim()}`)
+        ? (order.notes ? `${order.notes} | Finalized to Stock: ${payload.notes.trim()}` : `Finalized to Stock: ${payload.notes.trim()}`)
         : order.notes;
 
       // Update production order to COMPLETED & isStockSynced: true
       await tx.productionOrder.update({
         where: { id: orderId },
         data: {
-          completedQty: actualQty,
+          completedQty: totalFinishedQty,
           isStockSynced: true,
           stockSyncedAt: syncTimestamp,
           stockSyncedByRole: syncedRole,
           status: 'COMPLETED',
           notes: finalNotes,
+          targetProducts: currentTargetProducts.length > 0 ? (currentTargetProducts as any) : order.targetProducts,
         },
       });
 
@@ -2468,11 +2704,11 @@ export class ProductionService {
           productionOrderId: orderId,
           stage: 'COMPLETED',
           action: 'FINALIZED',
-          notes: payload.notes?.trim() || `Finalized ${actualQty} finished products pushed to active sellable stock`,
+          notes: payload.notes?.trim() || `Finalized ${totalFinishedQty} finished products pushed directly to active sellable stock`,
           timestamp: syncTimestamp,
           userId: userId || null,
           userName: syncedRole,
-          quantity: actualQty,
+          quantity: totalFinishedQty,
         },
       });
 

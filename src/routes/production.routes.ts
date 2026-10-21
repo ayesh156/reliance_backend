@@ -141,6 +141,32 @@ router.put(
   productionController.returnMaterials
 );
 
+// Return Scrap / Material Release Workflow
+router.post(
+  '/:id/return-scrap',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.returnScrap
+);
+router.post(
+  '/batches/:id/return-scrap',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.returnScrap
+);
+router.put(
+  '/:id/return-scrap',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.returnScrap
+);
+router.put(
+  '/batches/:id/return-scrap',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.returnScrap
+);
+
 // Asynchronous Material Cutting Log
 router.post(
   '/:id/cut-logs',
