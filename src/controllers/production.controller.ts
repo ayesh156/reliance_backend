@@ -309,6 +309,79 @@ export class ProductionController {
       next(err);
     }
   }
+
+  /**
+   * POST /api/production/:id/append-fabric
+   * Append fabric / raw materials and target products directly to an existing batch without log spam
+   */
+  async appendFabric(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: 'Valid integer ID is required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const order = await productionService.appendFabricToBatch(id, req.body, userId, userRole);
+      return sendSuccess(res, order);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * POST /api/production/:id/send-to-wash
+   * Transition batch to 'WASHING' status recording sewn garments output
+   */
+  async sendToWash(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: 'Valid integer ID is required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const order = await productionService.sendToWash(id, req.body, userId, userRole);
+      return sendSuccess(res, order);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * POST /api/production/:id/wash (or /log-washed)
+   * Log washed ready-to-sell products with immediate stock increment & partial sync
+   */
+  async logWashed(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: 'Valid integer ID is required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const order = await productionService.logWashedItems(id, req.body, userId, userRole);
+      return sendSuccess(res, order);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * GET /api/production/wash/batches
+   * Fetch all batches currently in 'WASHING' status
+   */
+  async getWashBatches(req: Request, res: Response, next: NextFunction) {
+    try {
+      const search = req.query.search as string | undefined;
+      const page = req.query.page ? Number(req.query.page) : undefined;
+      const limit = req.query.limit ? Number(req.query.limit) : undefined;
+      const result = await productionService.getWashBatches({ search, page, limit });
+      return sendSuccess(res, result);
+    } catch (err) {
+      next(err);
+    }
+  }
 }
 
 export default new ProductionController();

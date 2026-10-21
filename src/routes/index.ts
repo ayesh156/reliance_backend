@@ -38,6 +38,9 @@ router.use('/payments', paymentRoutes);
 router.use('/production', productionRoutes);
 // Production Orders alias route
 router.use('/production-orders', productionRoutes);
+// Fallback aliases for duplicate /api requests
+router.use('/api/production', productionRoutes);
+router.use('/api/production-orders', productionRoutes);
 router.use('/reports', reportRoutes);
 // Real-time Server-Sent Events (SSE) Synchronization Routes
 router.use('/sync', syncRouter);
