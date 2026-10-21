@@ -19,6 +19,14 @@ router.post(
   productionController.createCutBatch
 );
 
+// Alias route for creating production batch (POST /api/production/batches)
+router.post(
+  '/batches',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.createCutBatch
+);
+
 // Finishing-First Workflow: Create new production batch directly from finished garments
 router.post(
   '/finish-batch',
@@ -50,6 +58,12 @@ router.put(
   requireRole('ADMIN', 'STAFF'),
   productionController.update
 );
+router.put(
+  '/batches/:id',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.update
+);
 
 // Return leftover materials (Increments raw material stock)
 router.put(
@@ -72,6 +86,18 @@ router.post(
   requireRole('ADMIN', 'STAFF'),
   productionController.addCutLog
 );
+router.put(
+  '/:id/cut-logs/:cutLogId',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.updateCutLog
+);
+router.put(
+  '/cut-logs/:cutLogId',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.updateCutLog
+);
 
 // Asynchronous Garment Finishing Log (Separate date/time logging)
 router.post(
@@ -85,6 +111,20 @@ router.post(
   verifyToken,
   requireRole('ADMIN', 'STAFF'),
   productionController.addFinishLog
+);
+
+// Finalize Batch & push actual finished pieces to sellable stock
+router.post(
+  '/:id/finalize',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.finalize
+);
+router.put(
+  '/:id/finalize',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.finalize
 );
 
 // Cancel an active production order at any stage (Reverses materials and product stock)

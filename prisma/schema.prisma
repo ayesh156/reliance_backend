@@ -587,10 +587,12 @@ model ProductionOrder {
   reason            String?                   @db.Text
   notes             String?                   @db.Text
   productionDate    DateTime                  @default(now()) @map("production_date")
+  targetProducts    Json?                     @map("target_products")
   
   materialUsages  ProductionMaterialUsage[]
   cutLogs         MaterialCutLog[]
   finishLogs      GarmentFinishLog[]
+  activityLogs    BatchActivityLog[]
   
   createdAt       DateTime                  @default(now()) @map("created_at")
   updatedAt       DateTime                  @updatedAt @map("updated_at")
@@ -615,6 +617,8 @@ model ProductionMaterialUsage {
   netConsumedQty    Float           @map("net_consumed_qty")
   unitCost          Float           @default(0) @map("unit_cost")
   returnReason      String?         @map("return_reason") @db.Text
+  piecesCount       Int?            @default(1) @map("pieces_count")
+  targetProducts    Json?           @map("target_products")
   
   createdAt         DateTime        @default(now()) @map("created_at")
   updatedAt         DateTime        @updatedAt @map("updated_at")
@@ -662,4 +666,26 @@ model GarmentFinishLog {
   @@index([finishDate])
   @@index([isSyncedToStock])
   @@map("garment_finish_logs")
+}
+
+model BatchActivityLog {
+  id                Int             @id @default(autoincrement())
+  productionOrderId Int             @map("production_order_id")
+  productionOrder   ProductionOrder @relation(fields: [productionOrderId], references: [id], onDelete: Cascade)
+  
+  stage             String          @default("CUTTING")
+  action            String          @default("INITIAL_CUT")
+  notes             String?         @db.Text
+  timestamp         DateTime        @default(now())
+  userId            Int?            @map("user_id")
+  userName          String?         @map("user_name")
+  quantity          Float           @default(0)
+
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+
+  @@index([productionOrderId])
+  @@index([stage])
+  @@index([timestamp])
+  @@map("batch_activity_logs")
 }

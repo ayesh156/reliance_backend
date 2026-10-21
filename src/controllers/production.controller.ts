@@ -9,9 +9,11 @@ export class ProductionController {
    */
   async createCutBatch(req: Request, res: Response, next: NextFunction) {
     try {
-      const userId = (req as any).user?.id;
-      const userRole = (req as any).user?.role;
-      const order = await productionService.createMaterialCutBatch(req.body, userId, userRole);
+      const user = (req as any).user;
+      const userId = user?.userId || user?.id;
+      const userRole = user?.role;
+      const userName = user?.name;
+      const order = await productionService.createMaterialCutBatch(req.body, userId, userRole, userName);
       return sendSuccess(res, order, 201);
     } catch (err) {
       next(err);
@@ -24,8 +26,11 @@ export class ProductionController {
    */
   async create(req: Request, res: Response, next: NextFunction) {
     try {
-      const userId = (req as any).user?.id;
-      const order = await productionService.createProduction(req.body, userId);
+      const user = (req as any).user;
+      const userId = user?.userId || user?.id;
+      const userRole = user?.role;
+      const userName = user?.name;
+      const order = await productionService.createProduction(req.body, userId, userRole, userName);
       return sendSuccess(res, order, 201);
     } catch (err) {
       next(err);
@@ -42,8 +47,11 @@ export class ProductionController {
       if (!id || isNaN(id)) {
         return res.status(400).json({ error: 'Valid integer ID is required' });
       }
-      const userId = (req as any).user?.id;
-      const order = await productionService.updateProduction(id, req.body, userId);
+      const user = (req as any).user;
+      const userId = user?.userId || user?.id;
+      const userRole = user?.role;
+      const userName = user?.name;
+      const order = await productionService.updateProduction(id, req.body, userId, userRole, userName);
       return sendSuccess(res, order);
     } catch (err) {
       next(err);
@@ -180,6 +188,45 @@ export class ProductionController {
       const userRole = (req as any).user?.role;
       const updatedOrder = await productionService.addMaterialCutLog(id, req.body, userId, userRole);
       return sendSuccess(res, updatedOrder, 201);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * PUT /api/production/:id/cut-logs/:cutLogId
+   * Update an existing material cut log (adjust date, time, quantity cut)
+   */
+  async updateCutLog(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      const cutLogId = Number(req.params.cutLogId);
+      if (!id || isNaN(id) || !cutLogId || isNaN(cutLogId)) {
+        return res.status(400).json({ error: 'Valid integer order ID and cutLogId are required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const updatedOrder = await productionService.updateMaterialCutLog(id, cutLogId, req.body, userId, userRole);
+      return sendSuccess(res, updatedOrder);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * POST /api/production/:id/finalize
+   * Finalize batch and push actual finished garments to sellable inventory
+   */
+  async finalize(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: 'Valid integer ID is required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const updatedOrder = await productionService.finalizeBatch(id, req.body, userId, userRole);
+      return sendSuccess(res, updatedOrder);
     } catch (err) {
       next(err);
     }

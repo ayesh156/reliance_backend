@@ -2,26 +2,43 @@ import { prisma } from '../lib/prisma.ts';
 import { HttpException } from '../middleware/error.middleware.ts';
 import { MaterialMovementType } from '@prisma/client';
 
+export interface TargetProductMapping {
+  productId: number;
+  variantId?: number | null;
+  productName?: string;
+  sku?: string;
+  barcode?: string;
+  plannedQty: number;
+}
+
 export interface ProductionMaterialInput {
   id?: number;
-  rawMaterialId: number;
-  issuedQty: number;
+  rawMaterialId?: number;
+  materialId?: number;
+  issuedQty?: number;
+  cuttingQty?: number;
+  piecesCount?: number;
+  pieces?: number;
   returnedQty?: number;
   unitCost?: number;
   returnReason?: string;
+  targetProducts?: TargetProductMapping[];
 }
 
 export interface CreateProductionPayload {
   productionNo?: string;
-  productId: number;
+  productId?: number;
   variantId?: number | null;
   targetQuantity?: number;
-  completedQty: number;
+  completedQty?: number;
   status?: string;
   reason?: string;
   notes?: string;
   productionDate?: string | Date;
+  cutDate?: string | Date;
+  cuttingDate?: string | Date;
   materials?: ProductionMaterialInput[];
+  targetProducts?: TargetProductMapping[];
 }
 
 export interface CreateFinishBatchPayload {
@@ -63,18 +80,17 @@ export interface ReturnMaterialsPayload {
 
 export interface CreateCutBatchPayload {
   productionNo?: string;
-  productId: number;
+  productId?: number;
   variantId?: number | null;
-  targetQuantity: number;
+  targetQuantity?: number;
+  productionDate?: string | Date;
   cutDate?: string | Date;
+  cuttingDate?: string | Date;
   notes?: string;
   reason?: string;
   loggedByRole?: string;
-  materials: Array<{
-    rawMaterialId: number;
-    issuedQty: number;
-    unitCost?: number;
-  }>;
+  materials: ProductionMaterialInput[];
+  targetProducts?: TargetProductMapping[];
 }
 
 export class ProductionService {
@@ -112,20 +128,92 @@ export class ProductionService {
    * Starts a new production batch (status: "CUTTING", completedQty: 0, isStockSynced: false).
    * Validates raw materials against currentStock, deducts stock, creates usages, initial cutLogs, and movements.
    */
-  async createMaterialCutBatch(payload: CreateCutBatchPayload, userId?: number, userRole?: string) {
-    const productId = Number(payload.productId);
-    if (!productId || isNaN(productId)) {
-      throw new HttpException(400, 'Valid product ID is required');
-    }
-
-    const targetQuantity = Math.max(1, Number(payload.targetQuantity) || 0);
-    if (targetQuantity <= 0) {
-      throw new HttpException(400, 'Target planned quantity must be greater than zero');
-    }
-
+  async createMaterialCutBatch(payload: CreateCutBatchPayload, userId?: number, userRole?: string, userName?: string) {
     if (!payload.materials || !Array.isArray(payload.materials) || payload.materials.length === 0) {
       throw new HttpException(400, 'At least one raw material line is required to start a cut batch');
     }
+
+    // Decoupled payload: Extract target products directly from payload.targetProducts first
+    const rawTargetProducts: TargetProductMapping[] = [];
+    if (Array.isArray(payload.targetProducts) && payload.targetProducts.length > 0) {
+      payload.targetProducts.forEach((tp) => {
+        const prodId = Number(tp.productId || (tp as any).id);
+        const pQty = Number(tp.plannedQty);
+        if (prodId > 0 && pQty > 0) {
+          rawTargetProducts.push({
+            productId: prodId,
+            variantId: tp.variantId ? Number(tp.variantId) : null,
+            productName: tp.productName,
+            sku: tp.sku,
+            barcode: tp.barcode,
+            plannedQty: pQty,
+          });
+        }
+      });
+    }
+
+    // Backward compatibility: If empty, extract mapped products across material rows
+    if (rawTargetProducts.length === 0 && Array.isArray(payload.materials)) {
+      payload.materials.forEach((m) => {
+        if (Array.isArray(m.targetProducts)) {
+          m.targetProducts.forEach((tp) => {
+            const prodId = Number(tp.productId || (tp as any).id);
+            const pQty = Number(tp.plannedQty);
+            if (prodId > 0 && pQty > 0) {
+              rawTargetProducts.push({
+                productId: prodId,
+                variantId: tp.variantId ? Number(tp.variantId) : null,
+                productName: tp.productName,
+                sku: tp.sku,
+                barcode: tp.barcode,
+                plannedQty: pQty,
+              });
+            }
+          });
+        }
+      });
+    }
+
+    // Enrich target products from DB if names or SKUs are missing
+    const targetProductIds = Array.from(new Set(rawTargetProducts.map((p) => p.productId)));
+    const enrichedProducts = targetProductIds.length > 0
+      ? await prisma.product.findMany({
+          where: { id: { in: targetProductIds } },
+          include: { variants: true },
+        })
+      : [];
+    const prodMap = new Map(enrichedProducts.map((p) => [p.id, p]));
+
+    const allMappedProducts: TargetProductMapping[] = rawTargetProducts.map((tp) => {
+      const prod = prodMap.get(tp.productId);
+      const matchedVariant = tp.variantId
+        ? prod?.variants.find((v) => v.id === tp.variantId)
+        : prod?.variants?.[0];
+      return {
+        productId: tp.productId,
+        variantId: matchedVariant?.id || tp.variantId || null,
+        productName: prod?.name || tp.productName || `Product #${tp.productId}`,
+        sku: matchedVariant?.sku || tp.sku || '',
+        barcode: matchedVariant?.barcode || tp.barcode || '',
+        plannedQty: tp.plannedQty,
+      };
+    });
+
+    // Primary product ID: either explicitly supplied or from first mapped target product
+    let productId = payload.productId ? Number(payload.productId) : (allMappedProducts.length > 0 ? Number(allMappedProducts[0].productId) : null);
+    if (!productId || isNaN(productId)) {
+      const fallbackProd = await prisma.product.findFirst({ select: { id: true } });
+      if (!fallbackProd) {
+        throw new HttpException(400, 'Please create at least one product before starting a production batch');
+      }
+      productId = fallbackProd.id;
+    }
+
+    // Compute targetQuantity: sum of planned output across mapped products or explicit targetQuantity
+    const mappedTotalQty = allMappedProducts.reduce((sum, p) => sum + (Number(p.plannedQty) || 0), 0);
+    const targetQuantity = payload.targetQuantity && Number(payload.targetQuantity) > 0
+      ? Number(payload.targetQuantity)
+      : Math.max(1, mappedTotalQty);
 
     // Verify product
     const product = await prisma.product.findUnique({
@@ -142,7 +230,7 @@ export class ProductionService {
     if (targetVariantId) {
       const found = product.variants.find((v) => v.id === targetVariantId);
       if (!found) {
-        throw new HttpException(400, 'Selected variant does not belong to this product');
+        targetVariantId = null;
       }
     } else if (product.variants.length > 0) {
       targetVariantId = product.variants[0].id;
@@ -150,8 +238,11 @@ export class ProductionService {
 
     // Sanitize materials
     const sanitizedMaterials = payload.materials.map((m) => {
-      const rmId = Number(m.rawMaterialId);
-      const issued = Number(m.issuedQty);
+      const rmId = Number(m.rawMaterialId || m.materialId);
+      const issued = Number(m.issuedQty !== undefined ? m.issuedQty : m.cuttingQty);
+      const pieces = m.piecesCount !== undefined && m.piecesCount !== null
+        ? Math.max(1, Number(m.piecesCount) || 1)
+        : (m.pieces !== undefined && m.pieces !== null ? Math.max(1, Number(m.pieces) || 1) : 1);
 
       if (!rmId || isNaN(rmId)) {
         throw new HttpException(400, 'Invalid raw material ID in material list');
@@ -163,11 +254,13 @@ export class ProductionService {
       return {
         rawMaterialId: rmId,
         issuedQty: issued,
+        piecesCount: pieces,
         unitCost: m.unitCost !== undefined ? Number(m.unitCost) : undefined,
+        targetProducts: Array.isArray(m.targetProducts) ? m.targetProducts : [],
       };
     });
 
-    const cutDate = payload.cutDate ? new Date(payload.cutDate) : new Date();
+    const cutDate = payload.cuttingDate ? new Date(payload.cuttingDate) : (payload.cutDate ? new Date(payload.cutDate) : (payload.productionDate ? new Date(payload.productionDate) : new Date()));
     const productionNo = payload.productionNo?.trim() || (await this.generateProductionNo());
     const loggedByRole = payload.loggedByRole?.trim() || userRole || 'Cutting Master';
 
@@ -211,7 +304,7 @@ export class ProductionService {
             quantity: mat.issuedQty,
             previousStock: item.currentStock,
             newStock: newStock,
-            reference: `Cutting log for Batch #${productionNo} (${product.name} - ${mat.issuedQty} ${item.unit})`,
+            reference: `Cutting log for Batch #${productionNo} (${product.name} - ${mat.issuedQty} ${item.unit}, ${mat.piecesCount} Rolls/Pcs)`,
             recordedBy: userId || null,
             createdAt: cutDate,
           },
@@ -232,16 +325,27 @@ export class ProductionService {
           completedQty: 0,
           status: 'CUTTING',
           isStockSynced: false,
-          reason: payload.reason?.trim() || 'Regular Bulk',
+          reason: payload.reason?.trim() || 'Multi-Product Batch',
           notes: payload.notes?.trim() || null,
           productionDate: cutDate,
+          targetProducts: allMappedProducts.length > 0 ? (allMappedProducts as any) : null,
           materialUsages: {
             create: sanitizedMaterials.map((m) => ({
               rawMaterialId: m.rawMaterialId,
+              piecesCount: m.piecesCount,
               issuedQty: m.issuedQty,
               returnedQty: 0,
               netConsumedQty: m.issuedQty,
               unitCost: m.unitCost || 0,
+              targetProducts: m.targetProducts.length > 0 ? (m.targetProducts as any) : null,
+            })),
+          },
+          cutLogs: {
+            create: sanitizedMaterials.map((m) => ({
+              rawMaterialId: m.rawMaterialId,
+              quantityCut: m.issuedQty,
+              cutDate: cutDate,
+              loggedByRole: loggedByRole,
             })),
           },
         },
@@ -266,7 +370,44 @@ export class ProductionService {
         },
       });
 
-      return productionOrder;
+      // Immediately record the initial Cutting stage activity log with unified summary
+      let resolvedUserName = userName;
+      if (!resolvedUserName && userId) {
+        const creator = await tx.user.findUnique({ where: { id: userId }, select: { name: true } });
+        if (creator?.name) resolvedUserName = creator.name;
+      }
+      if (!resolvedUserName) resolvedUserName = loggedByRole || 'Cutting Master';
+
+      const initialPiecesQty = allMappedProducts.reduce((sum, p) => sum + (Number(p.plannedQty) || 0), 0) || targetQuantity;
+
+      // Build summary of materials cut and target products planned
+      const matSummary = sanitizedMaterials
+        .map((m) => {
+          const item = rmMap.get(m.rawMaterialId);
+          return `${m.issuedQty} ${item?.unit || 'units'} of ${item?.name || 'Material'} (${m.piecesCount} Roll${m.piecesCount > 1 ? 's' : ''})`;
+        })
+        .join(', ');
+
+      const prodSummary = allMappedProducts.length > 0
+        ? allMappedProducts.map((p) => `${p.plannedQty} Pcs ${p.productName}`).join(', ')
+        : `${targetQuantity} Pcs ${product.name}`;
+
+      const notesSummary = `Cut ${matSummary} for target output: ${prodSummary}${payload.notes?.trim() ? ` — Notes: ${payload.notes.trim()}` : ''}`;
+
+      await tx.batchActivityLog.create({
+        data: {
+          productionOrderId: productionOrder.id,
+          stage: 'CUTTING',
+          action: 'INITIAL_CUT',
+          notes: notesSummary,
+          timestamp: cutDate,
+          userId: userId || null,
+          userName: resolvedUserName,
+          quantity: initialPiecesQty,
+        },
+      });
+
+      return this.getByIdWithLogs(productionOrder.id, tx);
     });
   }
 
@@ -389,7 +530,7 @@ export class ProductionService {
    * 4. Increments target product / variant stock.
    * 5. Saves the ProductionOrder & ProductionMaterialUsage lines.
    */
-  async createProduction(payload: CreateProductionPayload, userId?: number) {
+  async createProduction(payload: CreateProductionPayload, userId?: number, userRole?: string, userName?: string) {
     const productId = Number(payload.productId);
     if (!productId || isNaN(productId)) {
       throw new HttpException(400, 'Valid product ID is required');
@@ -423,8 +564,11 @@ export class ProductionService {
 
     // Validate raw materials if provided
     const sanitizedMaterials = materialsList.map((m) => {
-      const rmId = Number(m.rawMaterialId);
-      const issued = Math.max(0, Number(m.issuedQty) || 0);
+      const rmId = Number(m.rawMaterialId || m.materialId);
+      const issued = Math.max(0, Number(m.issuedQty !== undefined ? m.issuedQty : m.cuttingQty) || 0);
+      const pieces = m.piecesCount !== undefined && m.piecesCount !== null
+        ? Math.max(1, Number(m.piecesCount) || 1)
+        : (m.pieces !== undefined && m.pieces !== null ? Math.max(1, Number(m.pieces) || 1) : 1);
       const returned = Math.max(0, Number(m.returnedQty) || 0);
       const net = Math.max(0, issued - returned);
 
@@ -441,10 +585,12 @@ export class ProductionService {
       return {
         rawMaterialId: rmId,
         issuedQty: issued,
+        piecesCount: pieces,
         returnedQty: returned,
         netConsumedQty: net,
         unitCost: m.unitCost !== undefined ? Number(m.unitCost) : undefined,
         returnReason: m.returnReason?.trim() || null,
+        targetProducts: Array.isArray(m.targetProducts) ? m.targetProducts : [],
       };
     });
 
@@ -525,18 +671,21 @@ export class ProductionService {
           variantId: targetVariantId,
           targetQuantity,
           completedQty,
-          status: payload.status || 'COMPLETED',
+          status: payload.status || 'CUTTING',
           reason: payload.reason?.trim() || 'Regular Bulk',
           notes: payload.notes?.trim() || null,
           productionDate: prodDate,
+          targetProducts: (Array.isArray(payload.targetProducts) && payload.targetProducts.length > 0) ? (payload.targetProducts as any) : null,
           materialUsages: {
             create: sanitizedMaterials.map((m) => ({
               rawMaterialId: m.rawMaterialId,
+              piecesCount: m.piecesCount,
               issuedQty: m.issuedQty,
               returnedQty: m.returnedQty,
               netConsumedQty: m.netConsumedQty,
               unitCost: m.unitCost || 0,
               returnReason: m.returnReason,
+              targetProducts: m.targetProducts.length > 0 ? (m.targetProducts as any) : null,
             })),
           },
         },
@@ -557,7 +706,44 @@ export class ProductionService {
         },
       });
 
-      return productionOrder;
+      // Immediately record the initial Cutting stage activity log
+      let resolvedUserName = userName;
+      if (!resolvedUserName && userId) {
+        const creator = await tx.user.findUnique({ where: { id: userId }, select: { name: true } });
+        if (creator?.name) resolvedUserName = creator.name;
+      }
+      if (!resolvedUserName) resolvedUserName = userRole || 'Cutting Master';
+
+      const initialPiecesQty = (Array.isArray(payload.targetProducts) && payload.targetProducts.length > 0)
+        ? payload.targetProducts.reduce((sum: number, p: any) => sum + (Number(p.plannedQty) || 0), 0)
+        : targetQuantity;
+
+      await tx.batchActivityLog.create({
+        data: {
+          productionOrderId: productionOrder.id,
+          stage: 'CUTTING',
+          action: 'INITIAL_CUT',
+          notes: payload.notes?.trim() || 'Initial raw fabric cutting batch initiated',
+          timestamp: prodDate,
+          userId: userId || null,
+          userName: resolvedUserName,
+          quantity: initialPiecesQty,
+        },
+      });
+
+      if (sanitizedMaterials.length > 0) {
+        await tx.materialCutLog.createMany({
+          data: sanitizedMaterials.map((m) => ({
+            productionOrderId: productionOrder.id,
+            rawMaterialId: m.rawMaterialId,
+            quantityCut: m.issuedQty,
+            cutDate: prodDate,
+            loggedByRole: resolvedUserName,
+          })),
+        });
+      }
+
+      return this.getByIdWithLogs(productionOrder.id, tx);
     });
   }
 
@@ -568,49 +754,95 @@ export class ProductionService {
    * 3. Applies new stock adjustments and logs movements.
    * 4. Updates ProductionOrder & material usages.
    */
-  async updateProduction(id: number, payload: CreateProductionPayload, userId?: number) {
+  async updateProduction(id: number, payload: CreateProductionPayload, userId?: number, userRole?: string, userName?: string) {
     const orderId = Number(id);
     if (!orderId || isNaN(orderId)) {
       throw new HttpException(400, 'Valid production order ID is required');
     }
 
-    const productId = Number(payload.productId);
-    if (!productId || isNaN(productId)) {
-      throw new HttpException(400, 'Valid product ID is required');
+    const materialsList = Array.isArray(payload.materials) ? payload.materials : [];
+
+    // Decoupled payload: Extract target products directly from payload.targetProducts first
+    const rawTargetProducts: TargetProductMapping[] = [];
+    if (Array.isArray(payload.targetProducts) && payload.targetProducts.length > 0) {
+      payload.targetProducts.forEach((tp) => {
+        const prodId = Number(tp.productId || (tp as any).id);
+        const pQty = Number(tp.plannedQty);
+        if (prodId > 0 && pQty > 0) {
+          rawTargetProducts.push({
+            productId: prodId,
+            variantId: tp.variantId ? Number(tp.variantId) : null,
+            productName: tp.productName,
+            sku: tp.sku,
+            barcode: tp.barcode,
+            plannedQty: pQty,
+          });
+        }
+      });
     }
 
-    const completedQty = Math.max(0, Number(payload.completedQty) || 0);
-    const targetQuantity = Math.max(completedQty, Number(payload.targetQuantity) || completedQty);
+    // Backward compatibility: If empty, extract mapped products across material rows
+    if (rawTargetProducts.length === 0) {
+      materialsList.forEach((m) => {
+        if (Array.isArray(m.targetProducts)) {
+          m.targetProducts.forEach((tp) => {
+            const prodId = Number(tp.productId || (tp as any).id);
+            const pQty = Number(tp.plannedQty);
+            if (prodId > 0 && pQty > 0) {
+              rawTargetProducts.push({
+                productId: prodId,
+                variantId: tp.variantId ? Number(tp.variantId) : null,
+                productName: tp.productName,
+                sku: tp.sku,
+                barcode: tp.barcode,
+                plannedQty: pQty,
+              });
+            }
+          });
+        }
+      });
+    }
 
-    // Verify product
-    const product = await prisma.product.findUnique({
-      where: { id: productId },
-      include: { variants: true },
+    // Enrich target products from DB
+    const targetProductIds = Array.from(new Set(rawTargetProducts.map((p) => p.productId)));
+    const enrichedProducts = targetProductIds.length > 0
+      ? await prisma.product.findMany({
+          where: { id: { in: targetProductIds } },
+          include: { variants: true },
+        })
+      : [];
+    const prodMap = new Map(enrichedProducts.map((p) => [p.id, p]));
+
+    const allMappedProducts: TargetProductMapping[] = rawTargetProducts.map((tp) => {
+      const prod = prodMap.get(tp.productId);
+      const matchedVariant = tp.variantId
+        ? prod?.variants.find((v) => v.id === tp.variantId)
+        : prod?.variants?.[0];
+      return {
+        productId: tp.productId,
+        variantId: matchedVariant?.id || tp.variantId || null,
+        productName: prod?.name || tp.productName || `Product #${tp.productId}`,
+        sku: matchedVariant?.sku || tp.sku || '',
+        barcode: matchedVariant?.barcode || tp.barcode || '',
+        plannedQty: tp.plannedQty,
+      };
     });
 
-    if (!product) {
-      throw new HttpException(404, 'Product not found');
-    }
-
-    // Resolve variant
-    let targetVariantId: number | null = payload.variantId ? Number(payload.variantId) : null;
-    if (targetVariantId) {
-      const found = product.variants.find((v) => v.id === targetVariantId);
-      if (!found) {
-        throw new HttpException(400, 'Selected variant does not belong to this product');
-      }
-    } else if (product.variants.length > 0) {
-      targetVariantId = product.variants[0].id;
-    }
-
-    const materialsList = Array.isArray(payload.materials) ? payload.materials : [];
+    const completedQty = Math.max(0, Number(payload.completedQty) || 0);
+    const mappedTotalQty = allMappedProducts.reduce((sum, p) => sum + (Number(p.plannedQty) || 0), 0);
+    const targetQuantity = payload.targetQuantity && Number(payload.targetQuantity) > 0
+      ? Number(payload.targetQuantity)
+      : (mappedTotalQty > 0 ? mappedTotalQty : (completedQty > 0 ? completedQty : 1));
 
     // Filter valid material rows and sanitize
     const sanitizedMaterials = materialsList
-      .filter((m) => m && m.rawMaterialId)
+      .filter((m) => m && (m.rawMaterialId || m.materialId))
       .map((m) => {
-        const rmId = Number(m.rawMaterialId);
-        const issued = Math.max(0, Number(m.issuedQty) || 0);
+        const rmId = Number(m.rawMaterialId || m.materialId);
+        const issued = Math.max(0, Number(m.issuedQty !== undefined ? m.issuedQty : m.cuttingQty) || 0);
+        const pieces = m.piecesCount !== undefined && m.piecesCount !== null
+          ? Math.max(1, Number(m.piecesCount) || 1)
+          : (m.pieces !== undefined && m.pieces !== null ? Math.max(1, Number(m.pieces) || 1) : 1);
         const returned = Math.max(0, Number(m.returnedQty) || 0);
         const net = Math.max(0, issued - returned);
 
@@ -627,10 +859,12 @@ export class ProductionService {
         return {
           rawMaterialId: rmId,
           issuedQty: issued,
+          piecesCount: pieces,
           returnedQty: returned,
           netConsumedQty: net,
           unitCost: m.unitCost !== undefined ? Number(m.unitCost) : undefined,
           returnReason: m.returnReason?.trim() || null,
+          targetProducts: Array.isArray(m.targetProducts) ? m.targetProducts : [],
         };
       });
 
@@ -642,6 +876,31 @@ export class ProductionService {
 
       if (!existingOrder) {
         throw new HttpException(404, 'Production order not found');
+      }
+
+      // Resolve product ID: explicit, or from mapped products, or existing
+      const resolvedProductId = payload.productId && Number(payload.productId) > 0
+        ? Number(payload.productId)
+        : (allMappedProducts.length > 0 ? allMappedProducts[0].productId : existingOrder.productId);
+
+      const product = await tx.product.findUnique({
+        where: { id: resolvedProductId },
+        include: { variants: true },
+      });
+
+      if (!product) {
+        throw new HttpException(404, 'Product not found');
+      }
+
+      // Resolve variant
+      let targetVariantId: number | null = payload.variantId !== undefined ? (payload.variantId ? Number(payload.variantId) : null) : existingOrder.variantId;
+      if (targetVariantId) {
+        const found = product.variants.find((v) => v.id === targetVariantId);
+        if (!found) {
+          targetVariantId = null;
+        }
+      } else if (product.variants.length > 0 && !targetVariantId) {
+        targetVariantId = product.variants[0].id;
       }
 
       // 1. Rollback old finished goods stock on old variant ONLY if stock was already synced to inventory
@@ -677,7 +936,11 @@ export class ProductionService {
       });
       const rmMap = new Map(rawMaterials.map((r) => [r.id, r]));
 
-      const prodDate = payload.productionDate ? new Date(payload.productionDate) : new Date();
+      const prodDate = payload.cuttingDate
+        ? new Date(payload.cuttingDate)
+        : (payload.cutDate
+          ? new Date(payload.cutDate)
+          : (payload.productionDate ? new Date(payload.productionDate) : existingOrder.productionDate));
 
       for (const mat of sanitizedMaterials) {
         const item = rmMap.get(mat.rawMaterialId);
@@ -698,15 +961,18 @@ export class ProductionService {
           data: { currentStock: newStock },
         });
 
+        // Update in-memory stock for subsequent rows with same material
+        item.currentStock = newStock;
+
         if (mat.netConsumedQty > 0) {
           await tx.rawMaterialMovement.create({
             data: {
               rawMaterialItemId: item.id,
               movementType: MaterialMovementType.PRODUCTION_USE,
               quantity: mat.netConsumedQty,
-              previousStock: item.currentStock,
+              previousStock: item.currentStock + mat.netConsumedQty,
               newStock: newStock,
-              reference: `Updated Production batch #${existingOrder.productionNo} for ${product.name} (Issued: ${mat.issuedQty}, Returned: ${mat.returnedQty})`,
+              reference: `Updated Production batch #${existingOrder.productionNo} for ${product.name} (Issued: ${mat.issuedQty}, Returned: ${mat.returnedQty}, ${mat.piecesCount} Rolls/Pcs)`,
               recordedBy: userId || null,
               createdAt: prodDate,
             },
@@ -723,26 +989,46 @@ export class ProductionService {
         where: { productionOrderId: orderId },
       });
 
+      // Synchronize material cut logs to match the updated materials and cut date
+      await tx.materialCutLog.deleteMany({
+        where: { productionOrderId: orderId },
+      });
+
+      if (sanitizedMaterials.length > 0) {
+        await tx.materialCutLog.createMany({
+          data: sanitizedMaterials.map((m) => ({
+            productionOrderId: orderId,
+            rawMaterialId: m.rawMaterialId,
+            quantityCut: m.issuedQty,
+            cutDate: prodDate,
+            loggedByRole: userRole || 'Cutting Master',
+          })),
+        });
+      }
+
       // 6. Update production order
       const updatedOrder = await tx.productionOrder.update({
         where: { id: orderId },
         data: {
-          productId,
+          productId: resolvedProductId,
           variantId: targetVariantId,
           targetQuantity,
           completedQty: payload.completedQty !== undefined ? Math.max(0, Number(payload.completedQty)) : existingOrder.completedQty,
           status: payload.status || existingOrder.status || 'CUTTING',
-          reason: payload.reason?.trim() || existingOrder.reason || 'Regular Bulk',
+          reason: payload.reason?.trim() || existingOrder.reason || 'Multi-Product Batch',
           notes: payload.notes !== undefined ? payload.notes?.trim() || null : existingOrder.notes,
           productionDate: prodDate,
+          targetProducts: allMappedProducts.length > 0 ? (allMappedProducts as any) : (payload.targetProducts as any || existingOrder.targetProducts),
           materialUsages: {
             create: sanitizedMaterials.map((m) => ({
               rawMaterialId: m.rawMaterialId,
+              piecesCount: m.piecesCount,
               issuedQty: m.issuedQty,
               returnedQty: m.returnedQty,
               netConsumedQty: m.netConsumedQty,
               unitCost: m.unitCost || 0,
               returnReason: m.returnReason,
+              targetProducts: m.targetProducts.length > 0 ? (m.targetProducts as any) : null,
             })),
           },
         },
@@ -757,7 +1043,50 @@ export class ProductionService {
         },
       });
 
-      return updatedOrder;
+      // Synchronize timeline activity log
+      const initialCutLog = await tx.batchActivityLog.findFirst({
+        where: { productionOrderId: orderId, stage: 'CUTTING', action: 'INITIAL_CUT' },
+      });
+
+      const matSummary = sanitizedMaterials
+        .map((m) => {
+          const item = rmMap.get(m.rawMaterialId);
+          return `${m.issuedQty} ${item?.unit || 'units'} of ${item?.name || 'Material'} (${m.piecesCount} Roll${m.piecesCount > 1 ? 's' : ''})`;
+        })
+        .join(', ');
+
+      const prodSummary = allMappedProducts.length > 0
+        ? allMappedProducts.map((p) => `${p.plannedQty} Pcs ${p.productName}`).join(', ')
+        : `${targetQuantity} Pcs ${product.name}`;
+
+      const notesSummary = `Cut ${matSummary} for target output: ${prodSummary}${payload.notes?.trim() ? ` — Notes: ${payload.notes.trim()}` : ''}`;
+
+      if (initialCutLog) {
+        await tx.batchActivityLog.update({
+          where: { id: initialCutLog.id },
+          data: {
+            timestamp: prodDate,
+            quantity: targetQuantity,
+            notes: notesSummary,
+          },
+        });
+      }
+
+      // Automatically insert a new BatchActivityLog for CUTTING using the specified Date & Time
+      await tx.batchActivityLog.create({
+        data: {
+          productionOrderId: orderId,
+          stage: 'CUTTING',
+          action: 'CUTTING',
+          notes: notesSummary,
+          timestamp: prodDate,
+          userId: userId || null,
+          userName: userName || userRole || 'Cutting Master',
+          quantity: targetQuantity,
+        },
+      });
+
+      return this.getByIdWithLogs(updatedOrder.id, tx);
     });
   }
 
@@ -868,6 +1197,20 @@ export class ProductionService {
               recordedBy: userId || null,
             },
           });
+
+          // Record RETURNED activity log in batch timeline
+          await tx.batchActivityLog.create({
+            data: {
+              productionOrderId: orderId,
+              stage: 'SCRAP_RETURN',
+              action: 'RETURNED',
+              notes: ret.returnReason?.trim() || `Returned ${diffToRestore} ${usage.rawMaterial.unit} of ${usage.rawMaterial.name} to warehouse inventory`,
+              timestamp: new Date(),
+              userId: userId || null,
+              userName: userRole || 'Warehouse',
+              quantity: diffToRestore,
+            },
+          });
         }
       }
 
@@ -970,6 +1313,9 @@ export class ProductionService {
           },
           finishLogs: {
             orderBy: { finishDate: 'desc' },
+          },
+          activityLogs: {
+            orderBy: { timestamp: 'desc' },
           },
         },
       }),
@@ -1132,6 +1478,9 @@ export class ProductionService {
           },
           finishLogs: {
             orderBy: { finishDate: 'desc' },
+          },
+          activityLogs: {
+            orderBy: { timestamp: 'desc' },
           },
         },
       }),
@@ -1336,6 +1685,9 @@ export class ProductionService {
         },
         finishLogs: {
           orderBy: { finishDate: 'desc' },
+        },
+        activityLogs: {
+          orderBy: { timestamp: 'desc' },
         },
       },
     });
@@ -1556,6 +1908,177 @@ export class ProductionService {
       }
 
       return this.getByIdWithLogs(orderId, tx);
+    });
+  }
+
+  /**
+   * Update an existing MaterialCutLog entry (e.g. adjust Date, Time, and Quantity Cut).
+   * Atomically recalculates inventory adjustments:
+   * - If cut quantity increased, deducts difference from RawMaterialItem stock & increments usage.
+   * - If cut quantity decreased, refunds difference back to RawMaterialItem stock & decrements usage.
+   * - Records MaterialMovement and BatchActivityLog (action: 'EDIT_CUT').
+   */
+  async updateMaterialCutLog(
+    orderId: number,
+    cutLogId: number,
+    payload: {
+      quantityCut?: number;
+      cutDate?: string | Date;
+      loggedByRole?: string;
+    },
+    userId?: number,
+    userRole?: string
+  ) {
+    const pOrderId = Number(orderId);
+    const pCutLogId = Number(cutLogId);
+    if (!pOrderId || isNaN(pOrderId) || !pCutLogId || isNaN(pCutLogId)) {
+      throw new HttpException(400, 'Valid production order ID and cut log ID are required');
+    }
+
+    return prisma.$transaction(async (tx) => {
+      const existingCutLog = await tx.materialCutLog.findUnique({
+        where: { id: pCutLogId },
+        include: { rawMaterial: true },
+      });
+
+      if (!existingCutLog || existingCutLog.productionOrderId !== pOrderId) {
+        throw new HttpException(404, 'Material cut log not found for this production batch');
+      }
+
+      const order = await tx.productionOrder.findUnique({
+        where: { id: pOrderId },
+        include: {
+          materialUsages: { include: { rawMaterial: true } },
+          cutLogs: true,
+        },
+      });
+
+      if (!order) {
+        throw new HttpException(404, 'Production batch not found');
+      }
+
+      if (order.status === 'CANCELLED') {
+        throw new HttpException(400, 'Cannot edit cut log on a cancelled production batch');
+      }
+
+      const oldQty = Number(existingCutLog.quantityCut);
+      const newQty = payload.quantityCut !== undefined ? Number(payload.quantityCut) : oldQty;
+      if (isNaN(newQty) || newQty <= 0) {
+        throw new HttpException(400, 'Quantity cut must be greater than zero');
+      }
+
+      const rawItem = await tx.rawMaterialItem.findUnique({
+        where: { id: existingCutLog.rawMaterialId },
+      });
+
+      if (!rawItem) {
+        throw new HttpException(404, 'Associated raw material not found');
+      }
+
+      const diff = Number((newQty - oldQty).toFixed(2));
+      const usage = order.materialUsages.find((u) => u.rawMaterialId === existingCutLog.rawMaterialId);
+
+      const targetCutDate = payload.cutDate ? new Date(payload.cutDate) : existingCutLog.cutDate;
+      const targetRole = payload.loggedByRole?.trim() || userRole || existingCutLog.loggedByRole || 'Cutting Master';
+
+      if (diff > 0) {
+        // Cut quantity increased by diff -> deduct additional fabric from stock
+        if (rawItem.currentStock < diff) {
+          throw new HttpException(
+            400,
+            `Insufficient raw material stock for "${rawItem.name}". Available: ${rawItem.currentStock} ${rawItem.unit}, Additional needed: ${diff} ${rawItem.unit}`
+          );
+        }
+
+        const newStock = Math.max(0, rawItem.currentStock - diff);
+        await tx.rawMaterialItem.update({
+          where: { id: rawItem.id },
+          data: { currentStock: newStock },
+        });
+
+        await tx.rawMaterialMovement.create({
+          data: {
+            rawMaterialItemId: rawItem.id,
+            movementType: MaterialMovementType.PRODUCTION_USE,
+            quantity: diff,
+            previousStock: rawItem.currentStock,
+            newStock,
+            reference: `Cut adjustment (+${diff} ${rawItem.unit}) for Batch #${order.productionNo}`,
+            recordedBy: userId || null,
+            createdAt: targetCutDate,
+          },
+        });
+
+        if (usage) {
+          await tx.productionMaterialUsage.update({
+            where: { id: usage.id },
+            data: {
+              issuedQty: { increment: diff },
+              netConsumedQty: { increment: diff },
+            },
+          });
+        }
+      } else if (diff < 0) {
+        // Cut quantity decreased by Math.abs(diff) -> refund fabric back to warehouse stock
+        const refundQty = Math.abs(diff);
+        const newStock = rawItem.currentStock + refundQty;
+
+        await tx.rawMaterialItem.update({
+          where: { id: rawItem.id },
+          data: { currentStock: newStock },
+        });
+
+        await tx.rawMaterialMovement.create({
+          data: {
+            rawMaterialItemId: rawItem.id,
+            movementType: MaterialMovementType.SCRAP_RETURN,
+            quantity: refundQty,
+            previousStock: rawItem.currentStock,
+            newStock,
+            reference: `Cut adjustment rollback (-${refundQty} ${rawItem.unit}) for Batch #${order.productionNo}`,
+            recordedBy: userId || null,
+            createdAt: targetCutDate,
+          },
+        });
+
+        if (usage) {
+          const newIssued = Math.max(0, usage.issuedQty - refundQty);
+          const newNet = Math.max(0, usage.netConsumedQty - refundQty);
+          await tx.productionMaterialUsage.update({
+            where: { id: usage.id },
+            data: {
+              issuedQty: newIssued,
+              netConsumedQty: newNet,
+            },
+          });
+        }
+      }
+
+      // Update the cut log
+      await tx.materialCutLog.update({
+        where: { id: pCutLogId },
+        data: {
+          quantityCut: newQty,
+          cutDate: targetCutDate,
+          loggedByRole: targetRole,
+        },
+      });
+
+      // Record activity log
+      await tx.batchActivityLog.create({
+        data: {
+          productionOrderId: pOrderId,
+          stage: 'CUTTING',
+          action: 'EDIT_CUT',
+          notes: `Updated cutting log #${pCutLogId}: ${oldQty} -> ${newQty} ${rawItem.unit} on ${targetCutDate.toLocaleDateString()}`,
+          timestamp: new Date(),
+          userId: userId || null,
+          userName: targetRole,
+          quantity: newQty,
+        },
+      });
+
+      return this.getByIdWithLogs(pOrderId, tx);
     });
   }
 
@@ -1790,6 +2313,135 @@ export class ProductionService {
   }
 
   /**
+   * Finalize Finished Products (POST /api/production/:id/finalize)
+   * Allows the user to input the actual final finished pieces (which may differ from initially planned quantity)
+   * before pushing them to sellable Product / ProductVariant stock, marking status COMPLETED and recording
+   * a 'FINALIZED' activity log in the timeline.
+   */
+  async finalizeBatch(
+    id: number,
+    payload: {
+      finalQuantity?: number;
+      notes?: string;
+    },
+    userId?: number,
+    userRole?: string
+  ) {
+    const orderId = Number(id);
+    if (!orderId || isNaN(orderId)) {
+      throw new HttpException(400, 'Valid production order ID is required');
+    }
+
+    return prisma.$transaction(async (tx) => {
+      const order = await tx.productionOrder.findUnique({
+        where: { id: orderId },
+        include: {
+          product: true,
+          variant: true,
+          finishLogs: true,
+        },
+      });
+
+      if (!order) {
+        throw new HttpException(404, 'Production batch not found');
+      }
+
+      if (order.status === 'CANCELLED') {
+        throw new HttpException(400, 'Cannot finalize a cancelled production batch');
+      }
+
+      // Determine actual finished pieces
+      const actualQty = payload.finalQuantity !== undefined && Number(payload.finalQuantity) > 0
+        ? Math.floor(Number(payload.finalQuantity))
+        : (order.completedQty > 0 ? order.completedQty : (order.targetQuantity > 0 ? order.targetQuantity : 1));
+
+      // Calculate quantity to push to sellable inventory
+      let qtyToPush = actualQty;
+      if (order.isStockSynced) {
+        qtyToPush = Math.max(0, actualQty - order.completedQty);
+      }
+
+      if (qtyToPush > 0) {
+        let targetVariantId = order.variantId;
+        if (!targetVariantId) {
+          const firstVariant = await tx.productVariant.findFirst({
+            where: { productId: order.productId },
+          });
+          if (firstVariant) targetVariantId = firstVariant.id;
+        }
+
+        if (targetVariantId) {
+          await tx.productVariant.update({
+            where: { id: targetVariantId },
+            data: {
+              stock: { increment: qtyToPush },
+            },
+          });
+        }
+      }
+
+      const syncTimestamp = new Date();
+      const syncedRole = userRole || 'Inventory Admin';
+
+      // Update finish logs to synced
+      await tx.garmentFinishLog.updateMany({
+        where: { productionOrderId: orderId },
+        data: {
+          isSyncedToStock: true,
+          syncedAt: syncTimestamp,
+        },
+      });
+
+      // If no finish logs existed, create one
+      if (order.finishLogs.length === 0) {
+        await tx.garmentFinishLog.create({
+          data: {
+            productionOrderId: orderId,
+            quantityFinished: actualQty,
+            isSyncedToStock: true,
+            syncedAt: syncTimestamp,
+            loggedByRole: syncedRole,
+            finishDate: syncTimestamp,
+          },
+        });
+      }
+
+      const finalNotes = payload.notes?.trim()
+        ? (order.notes ? `${order.notes} | Finalized: ${payload.notes.trim()}` : `Finalized: ${payload.notes.trim()}`)
+        : order.notes;
+
+      // Update production order to COMPLETED & isStockSynced: true
+      await tx.productionOrder.update({
+        where: { id: orderId },
+        data: {
+          completedQty: actualQty,
+          isStockSynced: true,
+          stockSyncedAt: syncTimestamp,
+          stockSyncedByRole: syncedRole,
+          status: 'COMPLETED',
+          notes: finalNotes,
+        },
+      });
+
+      // Record FINALIZED activity log in batch timeline
+      await tx.batchActivityLog.create({
+        data: {
+          productionOrderId: orderId,
+          stage: 'COMPLETED',
+          action: 'FINALIZED',
+          notes: payload.notes?.trim() || `Finalized ${actualQty} finished products pushed to active sellable stock`,
+          timestamp: syncTimestamp,
+          userId: userId || null,
+          userName: syncedRole,
+          quantity: actualQty,
+        },
+      });
+
+      return this.getByIdWithLogs(orderId, tx);
+    });
+  }
+
+  /**
    * Atomic Cancellation of a Production Order at Any Stage:
    * 1. Reverses consumed raw materials back into warehouse RawMaterialItem stock.
    * 2. Decrements finished goods from ProductVariant stock ONLY IF already synced to inventory.
@@ -1887,6 +2539,20 @@ export class ProductionService {
           status: 'CANCELLED',
           isStockSynced: false,
           notes: newNotes,
+        },
+      });
+
+      // Record cancellation activity log in batch timeline
+      await tx.batchActivityLog.create({
+        data: {
+          productionOrderId: orderId,
+          stage: 'CANCELLED',
+          action: 'BATCH_CANCELLED',
+          notes: cancellationNote,
+          timestamp: cancellationDate,
+          userId: userId || null,
+          userName: userRole || 'Admin',
+          quantity: 0,
         },
       });
 
