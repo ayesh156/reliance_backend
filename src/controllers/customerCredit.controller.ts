@@ -25,9 +25,13 @@ export const downloadCustomerStatementPdf = async (req: Request, res: Response, 
       return res.status(404).json({ error: 'Customer not found' });
     }
 
-    // Retrieve active due bills list
+    // Retrieve active due bills list & pending in-hand cheques
     const dueBillsData = await CustomerCreditService.getCustomerDueBills(customerId);
-    const doc = CustomerStatementPdfService.generate(customer, dueBillsData.bills || []);
+    const doc = CustomerStatementPdfService.generate(
+      customer,
+      dueBillsData.bills || [],
+      dueBillsData.pendingCheques || []
+    );
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="Statement-${customer.name.replace(/[^a-zA-Z0-9]/g, '_')}.pdf"`);

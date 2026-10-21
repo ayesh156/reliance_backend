@@ -55,7 +55,8 @@ export const getCustomerById = async (req: Request, res: Response, next: NextFun
 };
 
 /**
- * Handle creation of a new customer account with payload sanitization and financial field protection
+ * Handle creation of a new customer account with payload sanitization and opening balance support.
+ * Allows Sales Representatives (REP) to register wholesale accounts with legacy/opening ledger balances.
  */
 export const createCustomer = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -64,14 +65,20 @@ export const createCustomer = async (req: Request, res: Response, next: NextFunc
     }
 
     const userRole = String((req as any).user?.role || '').toUpperCase();
+    const userId = (req as any).user?.id ? Number((req as any).user?.id) : undefined;
     const { id: _forbiddenId, ...safePayload } = req.body;
-    if (req.body.outstandingBalance !== undefined) {
+
+    // Explicitly parse and preserve opening / old due balance for both Admins and Sales Representatives
+    if (req.body.outstandingBalance !== undefined && req.body.outstandingBalance !== '') {
       safePayload.outstandingBalance = Number(req.body.outstandingBalance) || 0;
     }
 
-    // Sales Representatives can only create wholesale customers
+    // Sales Representatives strictly manage wholesale shop partners and auto-link repId
     if (userRole === 'REP') {
       safePayload.type = CustomerType.WHOLESALE;
+      if (userId && !safePayload.repId) {
+        safePayload.repId = userId;
+      }
     }
 
     const customer = await customerService.createCustomer(safePayload);

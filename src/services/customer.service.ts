@@ -56,19 +56,23 @@ export class CustomerService {
       take: 200,
     });
 
-    // Reconcile and calculate live dynamic debt for each customer
+    // Reconcile and calculate live dynamic debt for each customer,
+    // preserving any opening / initial ledger balance recorded on customer profile.
     return customers.map((c) => {
       const liveDebt = c.orders.reduce(
         (sum, o) => sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0)),
         0
       );
       const reconciledDebt = Math.round(liveDebt * 100) / 100;
+      const storedBal = Math.round((Number(c.outstandingBalance) || 0) * 100) / 100;
+      // Stored balance accounts for opening due balance; effective debt preserves this ledger without wiping.
+      const effectiveDue = Math.max(storedBal, reconciledDebt);
       const { orders: _orders, ...rest } = c;
 
       return {
         ...rest,
-        outstandingBalance: reconciledDebt,
-        totalOutstandingDue: reconciledDebt,
+        outstandingBalance: effectiveDue,
+        totalOutstandingDue: effectiveDue,
       };
     });
   }
@@ -118,19 +122,23 @@ export class CustomerService {
       0
     );
     const reconciledDebt = Math.round(liveDebt * 100) / 100;
+    const storedBal = Math.round((Number(customer.outstandingBalance) || 0) * 100) / 100;
 
-    // Atomically fix stored balance if mismatched
-    if (Math.abs((Number(customer.outstandingBalance) || 0) - reconciledDebt) > 0.01) {
+    // Only update stored balance if open active invoices exceed stored balance,
+    // strictly safeguarding opening / legacy ledger balances from being wiped.
+    if (storedBal < reconciledDebt) {
       await prisma.customer.update({
         where: { id: Number(id) },
         data: { outstandingBalance: reconciledDebt },
       });
     }
 
+    const effectiveDue = Math.max(storedBal, reconciledDebt);
+
     return {
       ...customer,
-      outstandingBalance: reconciledDebt,
-      totalOutstandingDue: reconciledDebt,
+      outstandingBalance: effectiveDue,
+      totalOutstandingDue: effectiveDue,
     };
   }
 
@@ -338,7 +346,9 @@ export class CustomerService {
       const roundedDebt = Math.round(liveDebt * 100) / 100;
       const storedDebt = Number(c.outstandingBalance) || 0;
 
-      if (Math.abs(storedDebt - roundedDebt) > 0.01) {
+      // Only synchronize upwards if invoice debt exceeds stored debt,
+      // strictly safeguarding customer opening / old due balances.
+      if (storedDebt < roundedDebt) {
         await prisma.customer.update({
           where: { id: c.id },
           data: { outstandingBalance: roundedDebt },

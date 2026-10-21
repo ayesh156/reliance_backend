@@ -100,8 +100,10 @@ export class CustomerCreditService {
     const computedBillsDue = bills.reduce((acc, b) => acc + b.dueAmount, 0);
     const effectiveTotalDue = Math.round(computedBillsDue * 100) / 100;
 
-    // Atomically synchronize customer.outstandingBalance with verified invoice debts
-    if (Math.abs((Number(customer.outstandingBalance) || 0) - effectiveTotalDue) > 0.01) {
+    const storedBal = Math.round((Number(customer.outstandingBalance) || 0) * 100) / 100;
+    // Atomically synchronize customer.outstandingBalance with verified invoice debts if open bills exceed stored balance,
+    // preserving any legacy / opening customer credit balance.
+    if (storedBal < effectiveTotalDue) {
       await prisma.customer.update({
         where: { id: customerId },
         data: { outstandingBalance: effectiveTotalDue },
@@ -109,14 +111,141 @@ export class CustomerCreditService {
       customer.outstandingBalance = effectiveTotalDue;
     }
 
+    const finalTotalDue = Math.max(storedBal, effectiveTotalDue);
+
+    // ---------------------------------------------------------------------------------
+    // Pending Cheques Ledger Inspection Logic:
+    // Identifies all pending, unrealized, or uncleared cheques in hand associated with this
+    // customer across both payment audit records (OrderPayment) and structured order notes.
+    // Preserves visibility of in-hand tender even when outstanding balance is 0 or cleared.
+    // ---------------------------------------------------------------------------------
+    const rawChequePayments = await prisma.orderPayment.findMany({
+      where: {
+        method: 'CHEQUE',
+        order: {
+          customerId,
+          status: { not: 'CANCELLED' },
+        },
+      },
+      include: {
+        order: {
+          select: {
+            id: true,
+            invoiceNumber: true,
+            createdAt: true,
+          },
+        },
+      },
+      orderBy: {
+        chequeDate: 'asc',
+      },
+    });
+
+    const pendingCheques: Array<{
+      id?: number;
+      orderId?: number;
+      invoiceNumber?: string;
+      chequeNumber: string;
+      bankName: string;
+      chequeDate: string;
+      amount: number;
+      status: string;
+    }> = [];
+
+    // 1. Extract from persistent OrderPayment records
+    for (const cp of rawChequePayments) {
+      const rawStatus = String(cp.chequeStatus || 'PENDING').toUpperCase();
+      // Only include uncleared / unrealized in-hand cheques (exclude CLEARED and BOUNCED)
+      if (rawStatus !== 'CLEARED' && rawStatus !== 'BOUNCED') {
+        let chqNo = '-';
+        let bName = '-';
+        if (cp.reference) {
+          const chqMatch = /Cheque\s*#?([^\s(]+)/i.exec(cp.reference);
+          if (chqMatch) {
+            chqNo = chqMatch[1];
+          } else {
+            chqNo = cp.reference.replace(/\s*\[Edit:.*?\]$/, '').slice(0, 30);
+          }
+          const bankMatch = /\(([^)]+)\)/.exec(cp.reference);
+          if (bankMatch) {
+            bName = bankMatch[1];
+          }
+        }
+
+        const dateSource = cp.chequeDate || cp.createdAt || cp.order?.createdAt;
+        const formattedDate = dateSource
+          ? new Date(dateSource).toISOString().split('T')[0]
+          : new Date().toISOString().split('T')[0];
+
+        pendingCheques.push({
+          id: cp.id,
+          orderId: cp.orderId,
+          invoiceNumber: cp.order?.invoiceNumber || `INV${cp.orderId}`,
+          chequeNumber: chqNo.replace(/^#/, '').trim() || '-',
+          bankName: bName.trim() || '-',
+          chequeDate: formattedDate,
+          amount: Number(cp.amount) || 0,
+          status: rawStatus,
+        });
+      }
+    }
+
+    // 2. Extract from structured Order.notes JSON for multi-cheque transactions
+    for (const o of orders) {
+      if (o.notes) {
+        try {
+          let current: any = o.notes;
+          while (typeof current === 'string' && current.trim().startsWith('{')) {
+            current = JSON.parse(current);
+          }
+          if (current && typeof current === 'object') {
+            const chqs = Array.isArray(current.cheques) ? current.cheques : [];
+            const splits = Array.isArray(current.splitPayments)
+              ? current.splitPayments.filter((s: any) => String(s.method).toUpperCase() === 'CHEQUE')
+              : [];
+            const combined = [...chqs, ...splits];
+
+            for (const c of combined) {
+              const cStatus = String(c.status || c.chequeStatus || 'PENDING').toUpperCase();
+              if (cStatus !== 'CLEARED' && cStatus !== 'REALIZED' && cStatus !== 'BOUNCED') {
+                const cNo = String(c.chequeNumber || c.reference || '').replace(/^#/, '').trim() || '-';
+                const cAmt = Number(c.amount) || 0;
+                // Avoid duplicating cheques already captured via OrderPayment
+                const isDuplicate = pendingCheques.some(
+                  (x) => x.orderId === o.id && (x.chequeNumber === cNo || Math.abs(x.amount - cAmt) < 0.01)
+                );
+                if (!isDuplicate && cAmt > 0) {
+                  const rawChqDate = c.chequeDate || c.date || o.createdAt;
+                  pendingCheques.push({
+                    orderId: o.id,
+                    invoiceNumber: o.invoiceNumber || `ORD-#${o.id}`,
+                    chequeNumber: cNo,
+                    bankName: (c.bankName || c.bank || '-').trim(),
+                    chequeDate: rawChqDate
+                      ? new Date(rawChqDate).toISOString().split('T')[0]
+                      : new Date(o.createdAt).toISOString().split('T')[0],
+                    amount: cAmt,
+                    status: cStatus,
+                  });
+                }
+              }
+            }
+          }
+        } catch {
+          // Ignore invalid JSON notes without disrupting billing output
+        }
+      }
+    }
+
     return {
       customer: {
         ...customer,
-        outstandingBalance: effectiveTotalDue,
-        computedTotalDue: effectiveTotalDue,
-        totalOutstandingDue: effectiveTotalDue,
+        outstandingBalance: finalTotalDue,
+        computedTotalDue: finalTotalDue,
+        totalOutstandingDue: finalTotalDue,
       },
       bills,
+      pendingCheques,
     };
   }
 

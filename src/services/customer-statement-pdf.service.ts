@@ -4,9 +4,14 @@ import fs from 'fs';
 
 export class CustomerStatementPdfService {
   /**
-   * Generates an official A4 Customer Due Statement PDF with matching Reliance typography and header/footer
+   * Generates an official A4 Customer Due Statement PDF with matching Reliance typography and header/footer.
+   *
+   * Pending Cheque Integration:
+   * Inspects customer's uncleared/unrealized cheques in hand. When present, renders a clean
+   * secondary ledger table below the balance summary displaying Cheque No, Bank, Realization Date, and Amount.
+   * If both outstanding balance is 0 and no pending cheques exist, retains a clean "No Outstanding Dues" statement.
    */
-  static generate(customer: any, dueBills: any[]): InstanceType<typeof PDFDocument> {
+  static generate(customer: any, dueBills: any[], pendingCheques: any[] = []): InstanceType<typeof PDFDocument> {
     const doc = new PDFDocument({
       size: 'A4',
       margin: 0,
@@ -15,6 +20,55 @@ export class CustomerStatementPdfService {
 
     const currentDate = new Date().toISOString().split('T')[0];
     const totalDue = Number(customer.outstandingBalance || 0);
+
+    // ---------------------------------------------------------------------------------
+    // Pending Cheque Ledger Inspection Logic:
+    // Identifies all pending, unrealized, or uncleared cheques in hand associated with
+    // this customer. Normalizes cheque numbers, bank affiliations, and realization dates.
+    // Preserves in-hand cheque visibility even when outstanding balance is 0 or cleared.
+    // ---------------------------------------------------------------------------------
+    const rawCheques: any[] = (pendingCheques && pendingCheques.length > 0)
+      ? pendingCheques
+      : (customer.pendingCheques || (dueBills as any)?.pendingCheques || []);
+
+    const cheques: any[] = rawCheques.map((c: any) => {
+      let chqNo = c.chequeNumber || c.number || '';
+      let bank = c.bankName || c.bank || '';
+      const ref = c.reference || '';
+
+      if (!chqNo && ref) {
+        const chqMatch = /Cheque\s*#?([^\s(]+)/i.exec(ref);
+        if (chqMatch) {
+          chqNo = chqMatch[1];
+        } else {
+          chqNo = ref.replace(/\s*\[Edit:.*?\]$/, '').slice(0, 25);
+        }
+      }
+      if ((!bank || bank === '-') && ref) {
+        const bankMatch = /\(([^)]+)\)/.exec(ref);
+        if (bankMatch) {
+          bank = bankMatch[1];
+        }
+      }
+
+      const rawDate = c.realizeDate || c.chequeDate || c.date || c.createdAt;
+      let dateStr = '-';
+      if (rawDate) {
+        try {
+          dateStr = new Date(rawDate).toISOString().split('T')[0];
+        } catch {
+          dateStr = String(rawDate);
+        }
+      }
+
+      const amt = Number(c.amount || 0);
+      return {
+        chequeNumber: String(chqNo || '-').replace(/^#/, '').trim(),
+        bankName: String(bank || '-').trim(),
+        realizeDate: dateStr,
+        amount: isNaN(amt) ? 0 : amt,
+      };
+    }).filter((c: any) => c.amount > 0 || (c.chequeNumber && c.chequeNumber !== '-'));
 
     // Margins: Top/Bottom 51pt (18mm), Left/Right 42.5pt (15mm)
     const startX = 42.5;
@@ -77,7 +131,7 @@ export class CustomerStatementPdfService {
     const summaryBoxX = rightMargin - 160;
     doc.rect(summaryBoxX, customerTop + 8, 160, 42).lineWidth(1).strokeColor('#000000').stroke();
     doc.fontSize(7.5).font('Helvetica-Bold').fillColor('#555555').text('TOTAL OUTSTANDING BALANCE', summaryBoxX + 6, customerTop + 14, { width: 148, align: 'center' });
-    doc.fontSize(13).font('Helvetica-Bold').fillColor('#b91c1c').text(`Rs. ${totalDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, summaryBoxX + 6, customerTop + 28, { width: 148, align: 'center' });
+    doc.fontSize(13).font('Helvetica-Bold').fillColor(totalDue > 0 ? '#b91c1c' : '#15803d').text(`Rs. ${totalDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, summaryBoxX + 6, customerTop + 28, { width: 148, align: 'center' });
 
     // ── 3. INVOICES TABLE ──
     const tableTop = customerTop + 62;
@@ -109,7 +163,13 @@ export class CustomerStatementPdfService {
     let curY = tableTop + 24;
 
     if (dueBills.length === 0) {
-      doc.fontSize(9).font('Helvetica').fillColor('#555555').text('No pending invoices found for this customer.', startX, curY + 10, { width: pageWidth, align: 'center' });
+      if (totalDue <= 0 && cheques.length === 0) {
+        doc.fontSize(9.5).font('Helvetica-Bold').fillColor('#15803d').text('No Outstanding Dues: All prior accounts, invoices, and ledger credits are fully settled.', startX, curY + 10, { width: pageWidth, align: 'center' });
+      } else if (totalDue <= 0 && cheques.length > 0) {
+        doc.fontSize(9).font('Helvetica').fillColor('#444444').text('All prior invoices are fully settled. In-hand pending cheques are detailed below.', startX, curY + 10, { width: pageWidth, align: 'center' });
+      } else {
+        doc.fontSize(9).font('Helvetica').fillColor('#555555').text('No pending invoices found for this customer.', startX, curY + 10, { width: pageWidth, align: 'center' });
+      }
       curY += 35;
     } else {
       dueBills.forEach((bill: any, idx: number) => {
@@ -134,7 +194,7 @@ export class CustomerStatementPdfService {
       });
     }
 
-    // Total Summary Row
+    // Total Due Summary Row
     curY += 10;
     const sumWidth = 260;
     const sumX = rightMargin - sumWidth;
@@ -145,16 +205,83 @@ export class CustomerStatementPdfService {
     doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
     curY += 5;
     doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#000000').text('Total Due Balance', sumX, curY, { width: labelWidth, align: 'left' });
-    doc.fontSize(11.5).font('Helvetica-Bold').fillColor('#b91c1c').text(`Rs. ${totalDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, valX, curY, { width: valWidth, align: 'right' });
+    doc.fontSize(11.5).font('Helvetica-Bold').fillColor(totalDue > 0 ? '#b91c1c' : '#15803d').text(`Rs. ${totalDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, valX, curY, { width: valWidth, align: 'right' });
     curY += 16;
     doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.8).strokeColor('#000000').stroke();
     curY += 15;
 
-    // ── 4. SIGNATURES & FOOTER (Pinned Exactly to A4 Bottom Margin) ──
+    // ── 4. PENDING / UNREALIZED CHEQUES IN HAND TABLE (When Present) ──
+    if (cheques.length > 0) {
+      // Check if starting the secondary cheques table requires wrapping to a new page
+      if (curY > 580) {
+        doc.addPage();
+        curY = 51;
+      }
+
+      curY += 10;
+      doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#000000').text('Pending / Uncleared Cheques in Hand', startX, curY, { characterSpacing: 0.5 });
+      curY += 16;
+
+      const chqColWidths = { num: 25.5, chq: 120, bank: 155, date: 105, amount: 104.78 };
+      const chqColX = {
+        num: startX,
+        chq: startX + chqColWidths.num,
+        bank: startX + chqColWidths.num + chqColWidths.chq,
+        date: startX + chqColWidths.num + chqColWidths.chq + chqColWidths.bank,
+        amount: startX + chqColWidths.num + chqColWidths.chq + chqColWidths.bank + chqColWidths.date,
+      };
+
+      doc.moveTo(startX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
+      const chqThY = curY + 6;
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#000000');
+      doc.text('#', chqColX.num, chqThY, { width: chqColWidths.num, align: 'center', lineBreak: false });
+      doc.text('CHEQUE NO', chqColX.chq + 2, chqThY, { width: chqColWidths.chq - 2, align: 'left', lineBreak: false });
+      doc.text('BANK', chqColX.bank + 2, chqThY, { width: chqColWidths.bank - 2, align: 'left', lineBreak: false });
+      doc.text('REALIZATION DATE', chqColX.date + 2, chqThY, { width: chqColWidths.date - 2, align: 'left', lineBreak: false });
+      doc.text('AMOUNT', chqColX.amount, chqThY, { width: chqColWidths.amount - 3, align: 'right', lineBreak: false });
+
+      curY += 18;
+      doc.moveTo(startX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
+      curY += 6;
+
+      cheques.forEach((chq: any, idx: number) => {
+        if (curY > 680) {
+          doc.addPage();
+          curY = 51;
+        }
+
+        const chqNum = chq.chequeNumber || '-';
+        const bank = chq.bankName || '-';
+        const rDate = chq.realizeDate || '-';
+        const amt = Number(chq.amount || 0);
+
+        doc.fontSize(8.6).font('Helvetica-Bold').fillColor('#444444').text(String(idx + 1), chqColX.num, curY, { width: chqColWidths.num, align: 'center', lineBreak: false });
+        doc.font('Helvetica-Bold').fillColor('#000000').text(chqNum, chqColX.chq + 2, curY, { width: chqColWidths.chq - 2, lineBreak: false });
+        doc.font('Helvetica').text(bank, chqColX.bank + 2, curY, { width: chqColWidths.bank - 2, lineBreak: false });
+        doc.text(rDate, chqColX.date + 2, curY, { width: chqColWidths.date - 2, lineBreak: false });
+        doc.font('Helvetica-Bold').text(`Rs. ${amt.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, chqColX.amount, curY, { width: chqColWidths.amount - 3, align: 'right', lineBreak: false });
+
+        curY += 20;
+        doc.moveTo(startX, curY - 4).lineTo(rightMargin, curY - 4).lineWidth(0.75).strokeColor('#bbbbbb').dash(2, { space: 2 }).stroke().undash();
+      });
+
+      // Total In-Hand Cheques Summary Row
+      curY += 6;
+      const totalChequesAmt = cheques.reduce((acc: number, c: any) => acc + Number(c.amount || 0), 0);
+      doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
+      curY += 5;
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#000000').text('Total In-Hand Cheques', sumX, curY, { width: labelWidth, align: 'left' });
+      doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#0369a1').text(`Rs. ${totalChequesAmt.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, valX, curY, { width: valWidth, align: 'right' });
+      curY += 15;
+      doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.5).strokeColor('#000000').stroke();
+      curY += 15;
+    }
+
+    // ── 5. SIGNATURES & FOOTER (Pinned Exactly to A4 Bottom Margin) ──
     const pinnedSigY = 735;
     let sigY = pinnedSigY;
 
-    // If due bills table extends near or over the footer area, wrap safely to the next page
+    // If content extends near or over the footer area, wrap safely to the next page
     if (curY > 690) {
       doc.addPage();
       sigY = pinnedSigY;
