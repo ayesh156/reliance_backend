@@ -349,6 +349,55 @@ export class ProductionController {
   }
 
   /**
+   * GET /api/production/next-batch-number
+   * Returns next available sequential batch code
+   */
+  async getNextBatchNumber(req: Request, res: Response, next: NextFunction) {
+    try {
+      const nextNo = await productionService.getNextBatchNumber();
+      return sendSuccess(res, { productionNo: nextNo });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * POST /api/production/:id/send-to-line
+   * Transition batch to 'LINE' status recording sewing line intake
+   */
+  async sendToLine(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: 'Valid integer ID is required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const order = await productionService.sendToLine(id, req.body, userId, userRole);
+      return sendSuccess(res, order);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * POST /api/production/line-batch
+   * Create a new production batch starting directly in status 'LINE'
+   */
+  async createLineBatch(req: Request, res: Response, next: NextFunction) {
+    try {
+      const user = (req as any).user;
+      const userId = user?.userId || user?.id;
+      const userRole = user?.role;
+      const userName = user?.name;
+      const order = await productionService.createLineBatch(req.body, userId, userRole, userName);
+      return sendSuccess(res, order, 201);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
    * POST /api/production/:id/send-to-wash
    * Transition batch to 'WASHING' status recording sewn garments output
    */

@@ -9,6 +9,8 @@ export interface TargetProductMapping {
   sku?: string;
   barcode?: string;
   plannedQty: number;
+  lineSentQty?: number;
+  sentToLineQty?: number;
   completedQty?: number;
   sentToWashQty?: number;
   washedQty?: number;
@@ -100,6 +102,13 @@ export interface CreateCutBatchPayload {
 }
 
 export class ProductionService {
+  /**
+   * Public helper to get next available sequential batch code
+   */
+  async getNextBatchNumber(): Promise<string> {
+    return this.generateProductionNo();
+  }
+
   /**
    * Helper to generate a unique Production Order Number (e.g. PRD-261005001)
    */
@@ -215,9 +224,9 @@ export class ProductionService {
 
     // Compute targetQuantity: sum of planned output across mapped products or explicit targetQuantity
     const mappedTotalQty = allMappedProducts.reduce((sum, p) => sum + (Number(p.plannedQty) || 0), 0);
-    const targetQuantity = payload.targetQuantity && Number(payload.targetQuantity) > 0
+    const targetQuantity = payload.targetQuantity !== undefined && Number(payload.targetQuantity) >= 0
       ? Number(payload.targetQuantity)
-      : Math.max(1, mappedTotalQty);
+      : mappedTotalQty;
 
     // Verify product
     const product = await prisma.product.findUnique({
@@ -426,14 +435,14 @@ export class ProductionService {
         : '0 raw materials (Finishing-First run; fabrics can be cut and allocated later)';
 
       const prodSummary = allMappedProducts.length > 0
-        ? allMappedProducts.map((p) => `${p.plannedQty} Pcs ${p.productName}`).join(', ')
-        : `${targetQuantity} Pcs ${product.name}`;
+        ? allMappedProducts.map((p) => p.productName).join(', ')
+        : product.name;
 
       const notesSummary = isDirectWash
-        ? `Finishing-First Direct Wash: Handed over ${initialSentToWashQty} garment(s) (${prodSummary}) directly to wash plant.${payload.notes?.trim() ? ` — Notes: ${payload.notes.trim()}` : ''}`
+        ? `Direct Wash: Handed over ${initialSentToWashQty} garment(s) (${prodSummary}) directly to wash plant.${payload.notes?.trim() ? ` — Notes: ${payload.notes.trim()}` : ''}`
         : (isFinishingFirst
-            ? `Recorded ${completedQty} finished garments (${prodSummary}) via Finishing-First workflow. Raw materials to be cut & allocated retroactively.${payload.notes?.trim() ? ` — Notes: ${payload.notes.trim()}` : ''}`
-            : `Cut ${matSummary} for target output: ${prodSummary}${payload.notes?.trim() ? ` — Notes: ${payload.notes.trim()}` : ''}`);
+            ? `Recorded ${completedQty} finished garments (${prodSummary}) via Finishing-First workflow.${payload.notes?.trim() ? ` — Notes: ${payload.notes.trim()}` : ''}`
+            : `Cut ${matSummary} for target products: ${prodSummary}${payload.notes?.trim() ? ` — Notes: ${payload.notes.trim()}` : ''}`);
 
       await tx.batchActivityLog.create({
         data: {
@@ -871,9 +880,9 @@ export class ProductionService {
 
     const completedQty = Math.max(0, Number(payload.completedQty) || 0);
     const mappedTotalQty = allMappedProducts.reduce((sum, p) => sum + (Number(p.plannedQty) || 0), 0);
-    const targetQuantity = payload.targetQuantity && Number(payload.targetQuantity) > 0
+    const targetQuantity = payload.targetQuantity !== undefined && Number(payload.targetQuantity) >= 0
       ? Number(payload.targetQuantity)
-      : (mappedTotalQty > 0 ? mappedTotalQty : (completedQty > 0 ? completedQty : 1));
+      : (mappedTotalQty > 0 ? mappedTotalQty : (completedQty > 0 ? completedQty : 0));
 
     // Filter valid material rows and sanitize
     const sanitizedMaterials = materialsList
@@ -1047,6 +1056,31 @@ export class ProductionService {
         });
       }
 
+      // Preserve existing dispatch metrics on targetProducts
+      let existingTargetProducts: any[] = [];
+      if (existingOrder.targetProducts) {
+        try {
+          existingTargetProducts = typeof existingOrder.targetProducts === 'string'
+            ? JSON.parse(existingOrder.targetProducts)
+            : (existingOrder.targetProducts as any);
+        } catch {
+          existingTargetProducts = [];
+        }
+      }
+      if (Array.isArray(existingTargetProducts)) {
+        for (const tp of allMappedProducts) {
+          const old = existingTargetProducts.find(
+            (o) => Number(o.productId || o.id) === Number(tp.productId) && (!tp.variantId || !o.variantId || Number(o.variantId) === Number(tp.variantId))
+          );
+          if (old) {
+            tp.sentToLineQty = old.sentToLineQty ?? old.lineSentQty ?? 0;
+            tp.lineSentQty = tp.sentToLineQty;
+            tp.sentToWashQty = old.sentToWashQty ?? 0;
+            tp.washedQty = old.washedQty ?? 0;
+          }
+        }
+      }
+
       // 6. Update production order
       const updatedOrder = await tx.productionOrder.update({
         where: { id: orderId },
@@ -1097,10 +1131,10 @@ export class ProductionService {
         .join(', ');
 
       const prodSummary = allMappedProducts.length > 0
-        ? allMappedProducts.map((p) => `${p.plannedQty} Pcs ${p.productName}`).join(', ')
-        : `${targetQuantity} Pcs ${product.name}`;
+        ? allMappedProducts.map((p) => p.productName).join(', ')
+        : product.name;
 
-      const notesSummary = `Cut ${matSummary} for target output: ${prodSummary}${payload.notes?.trim() ? ` — Notes: ${payload.notes.trim()}` : ''}`;
+      const notesSummary = `Cut ${matSummary} for target products: ${prodSummary}${payload.notes?.trim() ? ` — Notes: ${payload.notes.trim()}` : ''}`;
 
       if (initialCutLog) {
         await tx.batchActivityLog.update({
@@ -1441,7 +1475,11 @@ export class ProductionService {
     }
 
     if (filters.status && filters.status !== 'ALL') {
-      where.status = filters.status;
+      if (typeof filters.status === 'string' && filters.status.includes(',')) {
+        where.status = { in: filters.status.split(',').map((s) => s.trim()) };
+      } else {
+        where.status = filters.status;
+      }
     }
 
     if (filters.search) {
@@ -2907,6 +2945,369 @@ export class ProductionService {
   }
 
   /**
+   * Factory Workflow: Send batch to decoupled "LINE" (Sewing Line) stage.
+   * Records cut pieces dispatched to the sewing floor and transitions batch status to 'LINE'.
+   */
+  async sendToLine(
+    id: number,
+    payload: {
+      lineQuantity?: number;
+      quantity?: number;
+      notes?: string;
+      date?: string | Date;
+      items?: Array<{
+        productId: number;
+        variantId?: number | null;
+        qty?: number;
+        sentQty?: number;
+      }>;
+    },
+    userId?: number,
+    userRole?: string
+  ) {
+    const orderId = Number(id);
+    if (!orderId || isNaN(orderId)) {
+      throw new HttpException(400, 'Valid production order ID is required');
+    }
+
+    return prisma.$transaction(async (tx) => {
+      const order = await tx.productionOrder.findUnique({
+        where: { id: orderId },
+        include: { product: true, variant: true, materialUsages: true },
+      });
+
+      if (!order) {
+        throw new HttpException(404, 'Production batch not found');
+      }
+
+      if (order.status === 'CANCELLED') {
+        throw new HttpException(400, 'Cannot send a cancelled batch to sewing line');
+      }
+
+      // Parse target products from order
+      let currentTargetProducts: TargetProductMapping[] = [];
+      if (order.targetProducts) {
+        try {
+          currentTargetProducts = typeof order.targetProducts === 'string'
+            ? JSON.parse(order.targetProducts)
+            : (order.targetProducts as any);
+        } catch {
+          currentTargetProducts = [];
+        }
+      }
+      if (!Array.isArray(currentTargetProducts)) currentTargetProducts = [];
+
+      // If order.targetProducts was empty, restore target products mapped across material usages
+      if (currentTargetProducts.length === 0 && Array.isArray(order.materialUsages)) {
+        order.materialUsages.forEach((u: any) => {
+          let uProds = u.targetProducts;
+          if (typeof uProds === 'string') {
+            try {
+              uProds = JSON.parse(uProds);
+            } catch {
+              uProds = null;
+            }
+          }
+          if (Array.isArray(uProds)) {
+            uProds.forEach((tp: any) => {
+              if (tp && (tp.productId || tp.id)) {
+                const pId = Number(tp.productId || tp.id);
+                const vId = tp.variantId ? Number(tp.variantId) : null;
+                const existing = currentTargetProducts.find(
+                  (cur) => Number(cur.productId) === pId && (!vId || !cur.variantId || Number(cur.variantId) === vId)
+                );
+                if (!existing) {
+                  currentTargetProducts.push({
+                    productId: pId,
+                    variantId: vId,
+                    productName: tp.productName,
+                    sku: tp.sku,
+                    barcode: tp.barcode,
+                    plannedQty: 0,
+                    sentToLineQty: 0,
+                    lineSentQty: 0,
+                    sentToWashQty: 0,
+                    washedQty: 0,
+                  });
+                }
+              }
+            });
+          }
+        });
+      }
+
+      // If still empty and order has product, fallback to primary order product
+      if (currentTargetProducts.length === 0 && order.productId) {
+        currentTargetProducts.push({
+          productId: order.productId,
+          variantId: order.variantId || null,
+          productName: order.product?.name,
+          sku: order.variant?.sku || undefined,
+          barcode: order.variant?.barcode || undefined,
+          plannedQty: 0,
+          sentToLineQty: 0,
+          lineSentQty: 0,
+          sentToWashQty: 0,
+          washedQty: 0,
+        });
+      }
+
+      // Standardize each target product so its numbers are explicitly initialized
+      for (const tp of currentTargetProducts) {
+        tp.sentToLineQty = Number(tp.sentToLineQty ?? tp.lineSentQty ?? 0);
+        tp.lineSentQty = tp.sentToLineQty;
+        tp.sentToWashQty = Number(tp.sentToWashQty ?? 0);
+        tp.washedQty = Number(tp.washedQty ?? 0);
+      }
+
+      let totalSentQty = 0;
+
+      // When items array is supplied: ONLY increment the specific product matched by productId and variantId
+      if (Array.isArray(payload.items) && payload.items.length > 0) {
+        for (const item of payload.items) {
+          const sQty = Math.floor(Number((item as any).qty ?? item.sentQty));
+          if (isNaN(sQty) || sQty <= 0) continue;
+          totalSentQty += sQty;
+
+          const pId = Number(item.productId);
+          const vId = item.variantId ? Number(item.variantId) : null;
+
+          const existingIndex = currentTargetProducts.findIndex((tp) => {
+            const tpPId = Number(tp.productId);
+            const tpVId = tp.variantId ? Number(tp.variantId) : null;
+            if (tpPId !== pId) return false;
+            if (vId !== null && tpVId !== null) {
+              return vId === tpVId;
+            }
+            return true;
+          });
+
+          if (existingIndex >= 0) {
+            const currentSent = Number(currentTargetProducts[existingIndex].sentToLineQty || 0);
+            const newSent = currentSent + sQty;
+            currentTargetProducts[existingIndex].sentToLineQty = newSent;
+            currentTargetProducts[existingIndex].lineSentQty = newSent;
+          } else {
+            currentTargetProducts.push({
+              productId: pId,
+              variantId: vId,
+              plannedQty: 0,
+              sentToLineQty: sQty,
+              lineSentQty: sQty,
+              sentToWashQty: 0,
+              washedQty: 0,
+            });
+          }
+        }
+      }
+
+      // If items was not provided or produced 0, fallback to lineQuantity or quantity
+      if (totalSentQty === 0) {
+        const inputQty = Math.floor(Number(payload.lineQuantity || payload.quantity));
+        if (isNaN(inputQty) || inputQty <= 0) {
+          throw new HttpException(400, 'Sewing line dispatch quantity must be greater than zero');
+        }
+        totalSentQty = inputQty;
+
+        if (currentTargetProducts.length > 0) {
+          const currentSent = Number(currentTargetProducts[0].sentToLineQty || 0);
+          const newSent = currentSent + totalSentQty;
+          currentTargetProducts[0].sentToLineQty = newSent;
+          currentTargetProducts[0].lineSentQty = newSent;
+        } else if (order.productId) {
+          currentTargetProducts.push({
+            productId: order.productId,
+            variantId: order.variantId || null,
+            plannedQty: 0,
+            sentToLineQty: totalSentQty,
+            lineSentQty: totalSentQty,
+            sentToWashQty: 0,
+            washedQty: 0,
+          });
+        }
+      }
+
+      // Ensure all target products have synchronized per-product sentToLineQty and lineSentQty
+      for (const tp of currentTargetProducts) {
+        tp.sentToLineQty = Number(tp.sentToLineQty ?? tp.lineSentQty ?? 0);
+        tp.lineSentQty = tp.sentToLineQty;
+      }
+
+      const updatedLineSentQty = ((order as any).lineSentQty || 0) + totalSentQty;
+      const lineNotes = payload.notes?.trim()
+        ? (order.notes ? `${order.notes} | Sent to Line: ${payload.notes.trim()}` : `Sent to Line: ${payload.notes.trim()}`)
+        : order.notes;
+
+      // Collect dispatched item breakdown
+      const dispatchedDetails: string[] = [];
+      if (Array.isArray(payload.items) && payload.items.length > 0) {
+        for (const item of payload.items) {
+          const sQty = Math.floor(Number((item as any).qty ?? item.sentQty));
+          if (sQty > 0) {
+            const foundTp = currentTargetProducts.find(
+              (tp) => Number(tp.productId) === Number(item.productId) && (!item.variantId || !tp.variantId || Number(tp.variantId) === Number(item.variantId))
+            );
+            const pName = foundTp?.productName || `Product #${item.productId}`;
+            dispatchedDetails.push(`${sQty} Pcs of ${pName}`);
+          }
+        }
+      }
+      const breakdown = dispatchedDetails.length > 0
+        ? dispatchedDetails.join(', ')
+        : `${totalSentQty} Pcs of ${order.product?.name || 'Garments'}`;
+
+      const lineLogNotes = payload.notes?.trim()
+        ? `Dispatched to Sewing Line: ${breakdown} — Notes: ${payload.notes.trim()}`
+        : `Dispatched to Sewing Line: ${breakdown}`;
+
+      // Log activity in audit log
+      await tx.batchActivityLog.create({
+        data: {
+          productionOrderId: order.id,
+          stage: 'LINE',
+          action: 'SEND_TO_LINE',
+          quantity: totalSentQty,
+          notes: lineLogNotes,
+          userId: userId || null,
+          userName: userRole || 'Operator',
+          timestamp: payload.date ? new Date(payload.date) : new Date(),
+        },
+      });
+
+      const updated = await tx.productionOrder.update({
+        where: { id: orderId },
+        data: {
+          status: 'LINE',
+          lineSentQty: updatedLineSentQty,
+          targetProducts: currentTargetProducts as any,
+          notes: lineNotes,
+        } as any,
+      });
+
+      return this.getByIdWithLogs(updated.id, tx);
+    });
+  }
+
+  /**
+   * Direct Line-First Workflow: Create a new Production Batch directly starting in status 'LINE'
+   * without requiring upfront raw material allocations.
+   * Records initial timeline history as SEND_TO_LINE.
+   */
+  async createLineBatch(
+    payload: {
+      productionNo?: string;
+      productionDate?: string | Date;
+      notes?: string;
+      items: Array<{
+        productId: number;
+        variantId?: number | null;
+        sentQty: number;
+      }>;
+    },
+    userId?: number,
+    userRole?: string,
+    userName?: string
+  ) {
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    const validItems = items.filter((it) => Number(it.productId) > 0 && Number(it.sentQty) > 0);
+    if (validItems.length === 0) {
+      throw new HttpException(400, 'Please add at least one target product with a line dispatch quantity greater than 0');
+    }
+
+    const productIds = Array.from(new Set(validItems.map((it) => Number(it.productId))));
+    const products = await prisma.product.findMany({
+      where: { id: { in: productIds } },
+      include: { variants: true },
+    });
+    const prodMap = new Map(products.map((p) => [p.id, p]));
+
+    const targetProducts: TargetProductMapping[] = validItems.map((it) => {
+      const prod = prodMap.get(Number(it.productId));
+      const matchedVariant = it.variantId
+        ? prod?.variants.find((v) => v.id === Number(it.variantId))
+        : prod?.variants?.[0];
+      const qty = Math.floor(Number(it.sentQty));
+      return {
+        productId: Number(it.productId),
+        variantId: matchedVariant?.id || (it.variantId ? Number(it.variantId) : null),
+        productName: prod?.name || `Product #${it.productId}`,
+        sku: matchedVariant?.sku || '',
+        barcode: matchedVariant?.barcode || '',
+        plannedQty: 0,
+        sentToLineQty: qty,
+        lineSentQty: qty,
+        sentToWashQty: 0,
+        washedQty: 0,
+      };
+    });
+
+    const totalLineQty = targetProducts.reduce((sum, tp) => sum + (tp.sentToLineQty || 0), 0);
+    const productionNo = payload.productionNo?.trim() || (await this.generateProductionNo());
+    const prodDate = payload.productionDate ? new Date(payload.productionDate) : new Date();
+
+    const primaryProductId = targetProducts[0].productId;
+    const primaryVariantId = targetProducts[0].variantId;
+
+    return prisma.$transaction(async (tx) => {
+      const order = await tx.productionOrder.create({
+        data: {
+          productionNo,
+          productId: primaryProductId,
+          variantId: primaryVariantId,
+          targetQuantity: 0,
+          completedQty: 0,
+          lineSentQty: totalLineQty,
+          sentToWashQty: 0,
+          washedQty: 0,
+          status: 'LINE',
+          isStockSynced: false,
+          reason: 'Line-First Direct Dispatch',
+          notes: payload.notes?.trim() || null,
+          productionDate: prodDate,
+          targetProducts: targetProducts as any,
+        },
+        include: {
+          product: { select: { id: true, name: true, slug: true, images: true } },
+          variant: true,
+          materialUsages: true,
+          cutLogs: true,
+          finishLogs: true,
+        },
+      });
+
+      let resolvedUserName = userName;
+      if (!resolvedUserName && userId) {
+        const creator = await tx.user.findUnique({ where: { id: userId }, select: { name: true } });
+        if (creator?.name) resolvedUserName = creator.name;
+      }
+      if (!resolvedUserName) resolvedUserName = userRole || 'Sewing Supervisor';
+
+      const breakdown = targetProducts
+        .map((tp) => `${tp.sentToLineQty} Pcs of ${tp.productName}`)
+        .join(', ');
+
+      const notesSummary = payload.notes?.trim()
+        ? `Dispatched directly to Sewing Line: ${breakdown} — Notes: ${payload.notes.trim()}`
+        : `Dispatched directly to Sewing Line: ${breakdown}`;
+
+      await tx.batchActivityLog.create({
+        data: {
+          productionOrderId: order.id,
+          stage: 'LINE',
+          action: 'SEND_TO_LINE',
+          notes: notesSummary,
+          timestamp: prodDate,
+          userId: userId || null,
+          userName: resolvedUserName,
+          quantity: totalLineQty,
+        },
+      });
+
+      return this.getByIdWithLogs(order.id, tx);
+    });
+  }
+
+  /**
    * End-of-Day Workflow: Send batch to decoupled "WASHING" stage.
    * Records the actual number of sewn garments produced per product and transitions batch status to 'WASHING'.
    */
@@ -3018,6 +3419,28 @@ export class ProductionService {
         ? (order.notes ? `${order.notes} | Sent to wash: ${payload.notes.trim()}` : `Sent to wash: ${payload.notes.trim()}`)
         : order.notes;
 
+      // Collect item breakdown for activity log
+      const washDetails: string[] = [];
+      if (Array.isArray(payload.items) && payload.items.length > 0) {
+        for (const item of payload.items) {
+          const sQty = Math.floor(Number(item.sentQty));
+          if (sQty > 0) {
+            const foundTp = currentTargetProducts.find(
+              (tp) => Number(tp.productId) === Number(item.productId) && (!item.variantId || !tp.variantId || Number(tp.variantId) === Number(item.variantId))
+            );
+            const pName = foundTp?.productName || `Product #${item.productId}`;
+            washDetails.push(`${sQty} Pcs of ${pName}`);
+          }
+        }
+      }
+      const breakdown = washDetails.length > 0
+        ? washDetails.join(', ')
+        : `${totalSentQty} Pcs of ${order.product?.name || 'Garments'}`;
+
+      const washLogNotes = payload.notes?.trim()
+        ? `Sent to Washing: ${breakdown} — Notes: ${payload.notes.trim()}`
+        : `Sent to Washing: ${breakdown}`;
+
       // Log activity
       await tx.batchActivityLog.create({
         data: {
@@ -3025,7 +3448,7 @@ export class ProductionService {
           stage: 'WASHING',
           action: 'SEND_TO_WASH',
           quantity: totalSentQty,
-          notes: payload.notes?.trim() || `Sent ${totalSentQty} sewn garments to washing stage`,
+          notes: washLogNotes,
           userId: userId || null,
           userName: userRole || 'Operator',
           timestamp: payload.date ? new Date(payload.date) : new Date(),
@@ -3179,10 +3602,22 @@ export class ProductionService {
       const newWashedTotal = currentWashed + totalWashedThisReq;
 
       // Determine if fully completed:
-      let isFullyCompleted = newWashedTotal >= totalSent;
-      if (!isFullyCompleted && currentTargetProducts.length > 0) {
+      // Must have forwarded all line intake to wash, and washed all sent items
+      const totalLineIntake = Number((order as any).lineSentQty || order.targetQuantity || order.completedQty || 0);
+      const allIntakeSentToWash = totalSent >= totalLineIntake && (
+        currentTargetProducts.length === 0 ||
+        currentTargetProducts.every((tp) => {
+          const lQty = Number(tp.sentToLineQty ?? tp.lineSentQty ?? 0);
+          return lQty <= 0 || (Number(tp.sentToWashQty) || 0) >= lQty;
+        })
+      );
+
+      let isFullyCompleted = allIntakeSentToWash && newWashedTotal >= totalSent;
+      if (!isFullyCompleted && currentTargetProducts.length > 0 && allIntakeSentToWash) {
         const allDone = currentTargetProducts.every((tp) => {
-          const targetForTp = Number(tp.sentToWashQty) > 0 ? Number(tp.sentToWashQty) : (Number(tp.plannedQty) || 0);
+          const lineQty = Number(tp.sentToLineQty ?? tp.lineSentQty ?? 0);
+          const washQty = Number(tp.sentToWashQty) || 0;
+          const targetForTp = lineQty > 0 ? lineQty : (washQty > 0 ? washQty : (Number(tp.plannedQty) || 0));
           return (Number(tp.washedQty) || 0) >= targetForTp;
         });
         if (allDone) isFullyCompleted = true;
@@ -3191,14 +3626,31 @@ export class ProductionService {
       const syncDate = payload.washDate ? new Date(payload.washDate) : new Date();
       const newStatus = isFullyCompleted ? 'COMPLETED' : 'WASHING';
 
+      // Collect item breakdown for activity log
+      const washedDetails: string[] = [];
+      for (const item of itemsToProcess) {
+        const foundTp = currentTargetProducts.find(
+          (tp) => Number(tp.productId) === Number(item.productId) && (!item.variantId || !tp.variantId || Number(tp.variantId) === Number(item.variantId))
+        );
+        const pName = foundTp?.productName || `Product #${item.productId}`;
+        washedDetails.push(`+${item.washedQty} Pcs of ${pName}`);
+      }
+      const breakdown = washedDetails.length > 0
+        ? washedDetails.join(', ')
+        : `+${totalWashedThisReq} Pcs of ${order.product?.name || 'Garments'}`;
+      const actionName = isFullyCompleted ? 'WASH_COMPLETED' : 'STOCK_SYNC';
+      const washSyncNotes = payload.notes?.trim()
+        ? `Washed & Synced to Sellable Stock: ${breakdown} (Status: ${newStatus}) — Notes: ${payload.notes.trim()}`
+        : `Washed & Synced to Sellable Stock: ${breakdown} (Status: ${newStatus})`;
+
       // Log BatchActivityLog
       await tx.batchActivityLog.create({
         data: {
           productionOrderId: order.id,
           stage: 'WASHING',
-          action: 'LOG_WASHED',
+          action: actionName,
           quantity: totalWashedThisReq,
-          notes: payload.notes?.trim() || `Logged +${totalWashedThisReq} washed items to sellable stock (Status: ${newStatus})`,
+          notes: washSyncNotes,
           userId: userId || null,
           userName: userRole || 'Wash Supervisor',
           timestamp: syncDate,

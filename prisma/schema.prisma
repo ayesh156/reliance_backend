@@ -588,6 +588,7 @@ model ProductionOrder {
   notes             String?                   @db.Text
   productionDate    DateTime                  @default(now()) @map("production_date")
   targetProducts    Json?                     @map("target_products")
+  lineSentQty       Int?                      @default(0) @map("line_sent_qty")
   sentToWashQty     Int                       @default(0) @map("sent_to_wash_qty")
   washedQty         Int                       @default(0) @map("washed_qty")
   

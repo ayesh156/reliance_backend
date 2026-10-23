@@ -151,8 +151,34 @@ function getModuleColumns(module: ReportModule): ColumnDef[] {
         { header: 'INV #', width: 55, key: 'invoiceNumber' },
         { header: 'CUSTOMER', width: 95, key: 'customerName' },
         { header: 'AMOUNT', width: 75, align: 'right', key: 'amount', format: (v) => formatCurrency(v).replace('Rs. ', '') },
-        { header: 'STATUS', width: 50, align: 'center', key: 'statusLabel' },
-        { header: 'ALERT', width: 40.28, align: 'center', key: 'maturityAlert' },
+        {
+          header: 'STATUS',
+          width: 50,
+          align: 'center',
+          key: 'statusLabel',
+          format: (v, row) => {
+            const raw = String(v || row?.status || '').toUpperCase();
+            if (raw === 'REALIZED' || raw === 'CLEARED' || raw === 'COMPLETE') {
+              return 'COMPLETE';
+            }
+            return raw || '-';
+          },
+        },
+        {
+          header: 'ALERT',
+          width: 40.28,
+          align: 'center',
+          key: 'maturityAlert',
+          format: (v, row) => {
+            const rawStatus = String(row?.statusLabel || row?.status || '').toUpperCase();
+            const isRealized = rawStatus === 'REALIZED' || rawStatus === 'CLEARED' || rawStatus === 'COMPLETE';
+            const alertStr = String(v ?? row?.alert ?? '').trim();
+            if (isRealized || alertStr === 'N/A' || !alertStr) {
+              return '';
+            }
+            return alertStr;
+          },
+        },
       ];
   }
 }
@@ -549,7 +575,21 @@ export class ReportPdfService {
     const columns = getModuleColumns(module);
     curY = this.drawTableHeader(doc, columns, curY);
 
-    const rows = reportData.tableItems || [];
+    let rows = reportData.tableItems || [];
+    if (module === 'cheques') {
+      rows = rows.map((r: any) => {
+        const rawStatus = String(r.statusLabel || r.status || '').toUpperCase();
+        const isRealized = rawStatus === 'REALIZED' || rawStatus === 'CLEARED' || rawStatus === 'COMPLETE';
+        const rawAlert = String(r.maturityAlert ?? r.alert ?? '').trim();
+        return {
+          ...r,
+          status: isRealized ? 'COMPLETE' : (r.status || '-'),
+          statusLabel: isRealized ? 'COMPLETE' : (r.statusLabel || r.status || '-'),
+          maturityAlert: isRealized || rawAlert === 'N/A' ? '' : rawAlert,
+          alert: isRealized || rawAlert === 'N/A' ? '' : rawAlert,
+        };
+      });
+    }
     curY = this.drawTableRows(doc, columns, rows, curY, () => renderHeader());
 
     // ── Sign-Off Block ──

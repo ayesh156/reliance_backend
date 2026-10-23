@@ -11,6 +11,10 @@ const router = Router();
 // Summary metrics & analytics
 router.get('/summary', verifyToken, productionController.getSummary);
 
+// Next available sequential batch code
+router.get('/next-batch-number', verifyToken, productionController.getNextBatchNumber);
+router.get('/batches/next-number', verifyToken, productionController.getNextBatchNumber);
+
 // Wash batches endpoint
 router.get('/wash/batches', verifyToken, productionController.getWashBatches);
 
@@ -28,6 +32,20 @@ router.post(
   verifyToken,
   requireRole('ADMIN', 'STAFF'),
   productionController.createCutBatch
+);
+
+// Direct Line-First Workflow: Create new production batch directly starting in LINE status
+router.post(
+  '/line-batch',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.createLineBatch
+);
+router.post(
+  '/batches/line-batch',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.createLineBatch
 );
 
 // Finishing-First Workflow: Create new production batch directly from finished garments
@@ -71,6 +89,20 @@ router.post(
   verifyToken,
   requireRole('ADMIN', 'STAFF'),
   productionController.appendFabric
+);
+
+// Factory Workflow: Send batch to decoupled SEWING LINE stage
+router.post(
+  '/:id/send-to-line',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.sendToLine
+);
+router.post(
+  '/batches/:id/send-to-line',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.sendToLine
 );
 
 // End-of-Day Workflow: Send batch to decoupled WASHING stage
