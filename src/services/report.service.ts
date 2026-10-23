@@ -4,7 +4,7 @@ import { parseOrderStructuredNotes } from './order.service.ts';
 import { PaymentService } from './payment.service.ts';
 import { OrderStatus } from '@prisma/client';
 
-export type ReportPreset = 'daily' | 'monthly' | 'yearly' | 'custom';
+export type ReportPreset = 'daily' | 'weekly' | 'monthly' | 'yearly' | 'next_year' | 'custom';
 export type ReportModule =
   | 'sales'
   | 'returns'
@@ -83,6 +83,21 @@ export function resolveDateFilter(params: {
     };
   }
 
+  if (rawPreset === 'weekly') {
+    const day = now.getDay();
+    const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+    const start = new Date(now.getFullYear(), now.getMonth(), diff, 0, 0, 0, 0);
+    const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6, 23, 59, 59, 999);
+    const startStr = start.toISOString().split('T')[0];
+    const endStr = end.toISOString().split('T')[0];
+    return {
+      startDate: start,
+      endDate: end,
+      preset: 'weekly',
+      presetLabel: `This Week (${startStr} to ${endStr})`,
+    };
+  }
+
   if (rawPreset === 'yearly') {
     const start = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0);
     const end = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999);
@@ -93,6 +108,20 @@ export function resolveDateFilter(params: {
       endDate: end,
       preset: 'yearly',
       presetLabel: `Year ${now.getFullYear()} (${startStr} to ${endStr})`,
+    };
+  }
+
+  if (rawPreset === 'next_year') {
+    const nextYear = now.getFullYear() + 1;
+    const start = new Date(nextYear, 0, 1, 0, 0, 0, 0);
+    const end = new Date(nextYear, 11, 31, 23, 59, 59, 999);
+    const startStr = start.toISOString().split('T')[0];
+    const endStr = end.toISOString().split('T')[0];
+    return {
+      startDate: start,
+      endDate: end,
+      preset: 'next_year',
+      presetLabel: `Next Year ${nextYear} (${startStr} to ${endStr})`,
     };
   }
 
@@ -764,7 +793,7 @@ export class ReportService {
           orderBy: { finishDate: 'desc' },
         },
       },
-      orderBy: { productionDate: 'desc' },
+      orderBy: { createdAt: 'desc' },
     });
 
     let totalBatches = productionOrders.length;

@@ -148,11 +148,19 @@ export class ProductionService {
 
     // Decoupled payload: Extract target products directly from payload.targetProducts first
     const rawTargetProducts: TargetProductMapping[] = [];
-    if (Array.isArray(payload.targetProducts) && payload.targetProducts.length > 0) {
-      payload.targetProducts.forEach((tp) => {
-        const prodId = Number(tp.productId || (tp as any).id);
-        const pQty = Number(tp.plannedQty);
-        if (prodId > 0 && pQty > 0) {
+    const targetProductsInput = Array.isArray(payload.targetProducts) && payload.targetProducts.length > 0
+      ? payload.targetProducts
+      : (Array.isArray((payload as any).products) && (payload as any).products.length > 0
+        ? (payload as any).products
+        : (Array.isArray((payload as any).items) && (payload as any).items.length > 0 ? (payload as any).items : []));
+
+    if (targetProductsInput.length > 0) {
+      targetProductsInput.forEach((tp: any) => {
+        const prodId = Number(tp.productId || tp.id);
+        const pQty = tp.plannedQty !== undefined && tp.plannedQty !== null && !isNaN(Number(tp.plannedQty))
+          ? Math.max(0, Number(tp.plannedQty))
+          : 0;
+        if (prodId > 0) {
           rawTargetProducts.push({
             productId: prodId,
             variantId: tp.variantId ? Number(tp.variantId) : null,
@@ -169,10 +177,12 @@ export class ProductionService {
     if (rawTargetProducts.length === 0 && Array.isArray(payload.materials)) {
       payload.materials.forEach((m) => {
         if (Array.isArray(m.targetProducts)) {
-          m.targetProducts.forEach((tp) => {
-            const prodId = Number(tp.productId || (tp as any).id);
-            const pQty = Number(tp.plannedQty);
-            if (prodId > 0 && pQty > 0) {
+          m.targetProducts.forEach((tp: any) => {
+            const prodId = Number(tp.productId || tp.id);
+            const pQty = tp.plannedQty !== undefined && tp.plannedQty !== null && !isNaN(Number(tp.plannedQty))
+              ? Math.max(0, Number(tp.plannedQty))
+              : 0;
+            if (prodId > 0) {
               rawTargetProducts.push({
                 productId: prodId,
                 variantId: tp.variantId ? Number(tp.variantId) : null,
@@ -363,7 +373,7 @@ export class ProductionService {
           reason: payload.reason?.trim() || (isDirectWash ? 'Finishing-First: Sent to Wash' : (completedQty > 0 ? 'Finishing-First Run' : 'Multi-Product Batch')),
           notes: payload.notes?.trim() || null,
           productionDate: cutDate,
-          targetProducts: allMappedProducts.length > 0 ? (allMappedProducts as any) : null,
+          targetProducts: allMappedProducts.length > 0 ? (allMappedProducts as any) : (targetProductsInput.length > 0 ? (targetProductsInput as any) : null),
           materialUsages: {
             create: sanitizedMaterials.map((m) => ({
               rawMaterialId: m.rawMaterialId,
@@ -725,7 +735,11 @@ export class ProductionService {
           reason: payload.reason?.trim() || 'Regular Bulk',
           notes: payload.notes?.trim() || null,
           productionDate: prodDate,
-          targetProducts: (Array.isArray(payload.targetProducts) && payload.targetProducts.length > 0) ? (payload.targetProducts as any) : null,
+          targetProducts: (Array.isArray(payload.targetProducts) && payload.targetProducts.length > 0)
+            ? (payload.targetProducts as any)
+            : ((Array.isArray((payload as any).products) && (payload as any).products.length > 0)
+              ? ((payload as any).products as any)
+              : ((Array.isArray((payload as any).items) && (payload as any).items.length > 0) ? ((payload as any).items as any) : null)),
           materialUsages: {
             create: sanitizedMaterials.map((m) => ({
               rawMaterialId: m.rawMaterialId,
@@ -814,11 +828,19 @@ export class ProductionService {
 
     // Decoupled payload: Extract target products directly from payload.targetProducts first
     const rawTargetProducts: TargetProductMapping[] = [];
-    if (Array.isArray(payload.targetProducts) && payload.targetProducts.length > 0) {
-      payload.targetProducts.forEach((tp) => {
-        const prodId = Number(tp.productId || (tp as any).id);
-        const pQty = Number(tp.plannedQty);
-        if (prodId > 0 && pQty > 0) {
+    const updateTargetProductsInput = Array.isArray(payload.targetProducts) && payload.targetProducts.length > 0
+      ? payload.targetProducts
+      : (Array.isArray((payload as any).products) && (payload as any).products.length > 0
+        ? (payload as any).products
+        : (Array.isArray((payload as any).items) && (payload as any).items.length > 0 ? (payload as any).items : []));
+
+    if (updateTargetProductsInput.length > 0) {
+      updateTargetProductsInput.forEach((tp: any) => {
+        const prodId = Number(tp.productId || tp.id);
+        const pQty = tp.plannedQty !== undefined && tp.plannedQty !== null && !isNaN(Number(tp.plannedQty))
+          ? Math.max(0, Number(tp.plannedQty))
+          : 0;
+        if (prodId > 0) {
           rawTargetProducts.push({
             productId: prodId,
             variantId: tp.variantId ? Number(tp.variantId) : null,
@@ -835,10 +857,12 @@ export class ProductionService {
     if (rawTargetProducts.length === 0) {
       materialsList.forEach((m) => {
         if (Array.isArray(m.targetProducts)) {
-          m.targetProducts.forEach((tp) => {
-            const prodId = Number(tp.productId || (tp as any).id);
-            const pQty = Number(tp.plannedQty);
-            if (prodId > 0 && pQty > 0) {
+          m.targetProducts.forEach((tp: any) => {
+            const prodId = Number(tp.productId || tp.id);
+            const pQty = tp.plannedQty !== undefined && tp.plannedQty !== null && !isNaN(Number(tp.plannedQty))
+              ? Math.max(0, Number(tp.plannedQty))
+              : 0;
+            if (prodId > 0) {
               rawTargetProducts.push({
                 productId: prodId,
                 variantId: tp.variantId ? Number(tp.variantId) : null,
@@ -1529,7 +1553,7 @@ export class ProductionService {
         where,
         skip,
         take: limit,
-        orderBy: { productionDate: 'desc' },
+        orderBy: { createdAt: 'desc' },
         include: {
           product: {
             select: { id: true, name: true, slug: true, images: { take: 1 } },
@@ -1689,7 +1713,7 @@ export class ProductionService {
       // Filtered records
       prisma.productionOrder.findMany({
         where: filteredWhere,
-        orderBy: { productionDate: 'desc' },
+        orderBy: { createdAt: 'desc' },
         include: {
           product: {
             select: {

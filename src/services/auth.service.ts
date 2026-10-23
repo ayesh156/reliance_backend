@@ -11,9 +11,47 @@ const userSelect = {
   name: true,
   email: true,
   role: true,
+  permissions: true,
   active: true,
   createdAt: true,
 } as const;
+
+/** Default permissions strictly granted to Staff if unconfigured or empty */
+export const DEFAULT_STAFF_PERMISSIONS: string[] = ['production', 'line', 'wash', 'materials'];
+
+/** Full system module permissions for Administrators */
+export const ALL_ADMIN_PERMISSIONS: string[] = [
+  'pos',
+  'invoices',
+  'orders',
+  'products',
+  'customers',
+  'materials',
+  'production',
+  'line',
+  'wash',
+  'reports',
+  'settings',
+];
+
+/**
+ * Resolves permissions dynamically based on role and stored permissions.
+ * - Administrators have full access (all permissions).
+ * - If role is STAFF and permissions is null/empty/not set, inject default: ['production', 'line', 'wash', 'materials'].
+ */
+export function resolveUserPermissions(role: string, permissions: unknown): string[] {
+  const normRole = String(role).toUpperCase();
+  if (normRole === 'ADMIN') {
+    return ALL_ADMIN_PERMISSIONS;
+  }
+  if (normRole === 'STAFF') {
+    if (!permissions || !Array.isArray(permissions) || permissions.length === 0) {
+      return [...DEFAULT_STAFF_PERMISSIONS];
+    }
+    return permissions.map(String);
+  }
+  return Array.isArray(permissions) ? permissions.map(String) : [];
+}
 
 /** Password policy regex: min 8 chars, at least 1 letter and 1 number */
 const PASSWORD_REGEX = /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d@$!%*#?&]{8,}$/;
@@ -46,8 +84,10 @@ export class AuthService {
       throw new HttpException(401, 'Invalid email or password');
     }
 
+    const resolvedPermissions = resolveUserPermissions(user.role, user.permissions);
+
     const token = jwt.sign(
-      { userId: user.id, role: user.role, name: user.name },
+      { userId: user.id, role: user.role, name: user.name, permissions: resolvedPermissions },
       env.jwtSecret,
       { expiresIn: env.accessTokenExpiry as jwt.SignOptions['expiresIn'], algorithm: 'HS256' }
     );
@@ -59,6 +99,7 @@ export class AuthService {
         name: user.name,
         email: user.email,
         role: user.role,
+        permissions: resolvedPermissions,
       },
     };
   }
@@ -77,24 +118,31 @@ export class AuthService {
     if (!user.active) {
       throw new HttpException(403, 'Account has been deactivated. Access revoked.');
     }
-    return user;
+    return {
+      ...user,
+      permissions: resolveUserPermissions(user.role, user.permissions),
+    };
   }
 
-/**
-   * List staff users with pagination safeguard
+  /**
+   * List staff users with pagination safeguard and dynamic resolved permissions
    */
   async listUsers() {
-    return prisma.user.findMany({
+    const users = await prisma.user.findMany({
       orderBy: { createdAt: 'desc' },
       select: userSelect,
       take: 100,
     });
+    return users.map((u) => ({
+      ...u,
+      permissions: resolveUserPermissions(u.role, u.permissions),
+    }));
   }
 
   /**
    * Create a new staff user (admin only).
    */
-  async createUser(data: { name: string; email: string; password: string; role: string }) {
+  async createUser(data: { name: string; email: string; password: string; role: string; permissions?: string[] }) {
     const name = data.name?.trim();
     const email = data.email?.trim().toLowerCase();
     const password = data.password?.trim();
@@ -128,23 +176,29 @@ export class AuthService {
 
     const hashedPassword = await bcrypt.hash(password, 12);
 
-    return prisma.user.create({
+    const created = await prisma.user.create({
       data: {
         name,
         email,
         password: hashedPassword,
         role: role as never,
+        permissions: Array.isArray(data.permissions) ? (data.permissions as any) : undefined,
       },
       select: userSelect,
     });
+
+    return {
+      ...created,
+      permissions: resolveUserPermissions(created.role, created.permissions),
+    };
   }
 
   /**
-   * Update role / active / password of a staff user with self-lockout guards and target verification
+   * Update role / active / password / permissions of a staff user with self-lockout guards and target verification
    */
   async updateUser(
     id: number,
-    data: { role?: string; active?: boolean; password?: string; name?: string },
+    data: { role?: string; active?: boolean; password?: string; name?: string; permissions?: string[] },
     currentAdminId?: number
   ) {
     const existing = await prisma.user.findUnique({ where: { id } });
@@ -180,6 +234,10 @@ export class AuthService {
       updateData.name = data.name.trim();
     }
 
+    if (data.permissions !== undefined) {
+      updateData.permissions = Array.isArray(data.permissions) ? (data.permissions as any) : null;
+    }
+
     if (data.password !== undefined && data.password.trim().length > 0) {
       const password = data.password.trim();
       if (!PASSWORD_REGEX.test(password)) {
@@ -191,11 +249,16 @@ export class AuthService {
       updateData.password = await bcrypt.hash(password, 12);
     }
 
-    return prisma.user.update({
+    const updated = await prisma.user.update({
       where: { id },
       data: updateData,
       select: userSelect,
     });
+
+    return {
+      ...updated,
+      permissions: resolveUserPermissions(updated.role, updated.permissions),
+    };
   }
 }
 

@@ -64,4 +64,32 @@ export const requireRole = (...roles: (string | string[])[]) => {
   };
 };
 
+/**
+ * Require a specific module permission.
+ * Administrators automatically bypass all permission checks (have full access).
+ */
+export const requirePermission = (permission: string) => {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (!req.user || !req.user.role) {
+      res.status(401).json({ error: 'Not authenticated or user context missing.' });
+      return;
+    }
+
+    // Administrators automatically bypass all permission checks
+    if (String(req.user.role).toUpperCase() === 'ADMIN') {
+      return next();
+    }
+
+    const permissions: string[] = Array.isArray(req.user.permissions)
+      ? req.user.permissions
+      : [];
+
+    if (!permissions.includes(permission)) {
+      res.status(403).json({ error: `Access denied. Missing required permission: ${permission}` });
+      return;
+    }
+    next();
+  };
+};
+
 export const getJwtSecret = (): string => env.jwtSecret;

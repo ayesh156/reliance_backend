@@ -9,6 +9,7 @@ export interface AuthPayload {
   userId: number;
   role: string;
   name: string;
+  permissions?: string[];
 }
 
 /** Minimal authenticated request body helpers. */

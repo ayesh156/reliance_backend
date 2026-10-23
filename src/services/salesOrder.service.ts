@@ -141,9 +141,10 @@ export class SalesOrderService {
             }
           }
 
+          const isReturn = Boolean((item as any).isReturn || item.quantity < 0);
           const lineDiscount = Math.max(0, Number(item.discount) || 0);
           const lineTotal = Math.max(0, Math.round((qty * unitPrice - lineDiscount) * 100) / 100);
-          calculatedSubtotal += lineTotal;
+          calculatedSubtotal += isReturn ? -lineTotal : lineTotal;
 
           return {
             variantId: item.variantId ? Number(item.variantId) : null,
@@ -154,15 +155,18 @@ export class SalesOrderService {
             quantity: qty,
             unitPrice,
             discount: lineDiscount,
-            totalPrice: lineTotal,
+            totalPrice: isReturn ? -lineTotal : lineTotal,
+            isReturn,
             notes: item.notes || null,
           };
         })
       );
 
+      const hasReturns = data.items.some((i: any) => Boolean(i.isReturn || i.quantity < 0));
+      const isReturnOrder = Boolean((data as any).isReturnOrder || hasReturns);
       const subtotal = data.subtotal !== undefined ? Number(data.subtotal) : calculatedSubtotal;
       const orderDiscount = Math.max(0, Number(data.discount) || 0);
-      const totalAmount = data.totalAmount !== undefined ? Number(data.totalAmount) : Math.max(0, subtotal - orderDiscount);
+      const totalAmount = data.totalAmount !== undefined ? Number(data.totalAmount) : (subtotal - orderDiscount);
 
       // 4. Create SalesOrder in database
       const salesOrder = await tx.salesOrder.create({
@@ -177,6 +181,7 @@ export class SalesOrderService {
           subtotal,
           discount: orderDiscount,
           totalAmount,
+          isReturnOrder,
           notes: data.notes?.trim() || null,
           status: SalesOrderStatus.PENDING,
           items: {
@@ -451,9 +456,10 @@ export class SalesOrderService {
             }
           }
 
+          const isReturn = Boolean((item as any).isReturn || item.quantity < 0);
           const lineDiscount = Math.max(0, Number(item.discount) || 0);
           const lineTotal = Math.max(0, Math.round((qty * unitPrice - lineDiscount) * 100) / 100);
-          calculatedSubtotal += lineTotal;
+          calculatedSubtotal += isReturn ? -lineTotal : lineTotal;
 
           return {
             variantId: item.variantId ? Number(item.variantId) : null,
@@ -464,7 +470,8 @@ export class SalesOrderService {
             quantity: qty,
             unitPrice,
             discount: lineDiscount,
-            totalPrice: lineTotal,
+            totalPrice: isReturn ? -lineTotal : lineTotal,
+            isReturn,
             notes: item.notes || null,
           };
         })

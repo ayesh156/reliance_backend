@@ -65,6 +65,7 @@ model User {
   phone             String?
   password          String     @default("")
   role              Role       @default(STAFF)
+  permissions       Json?
   active            Boolean    @default(true)
   
   assignedCustomers Customer[] @relation("RepCustomers")
@@ -277,6 +278,11 @@ model Order {
   isDispatched      Boolean       @default(false)
   dispatchedByRole  String?
   
+  // Return Bill & Customer Return Credit Auto-Deduction & Cash Refunds
+  isReturnBill        Boolean       @default(false)
+  returnCreditApplied Float         @default(0)
+  refundedCashAmount  Float         @default(0)
+
   items             OrderItem[]
   payments          OrderPayment[]
   salesOrder        SalesOrder?   @relation("SalesOrderInvoice")
@@ -287,6 +293,7 @@ model Order {
   @@index([status])
   @@index([invoiceNumber])
   @@index([isDispatched])
+  @@index([isReturnBill])
   @@map("orders")
 }
 
@@ -300,6 +307,7 @@ model OrderItem {
   unitPrice Float          @default(0)
   discount  Float          @default(0)
   price     Float
+  isReturn  Boolean        @default(false)
   @@map("order_items")
 }
 
@@ -341,6 +349,9 @@ model SalesOrder {
   status          SalesOrderStatus @default(PENDING)
   notes           String?          @db.Text
   
+  // Return Mode support
+  isReturnOrder   Boolean          @default(false)
+
   // Future "Convert to Invoice" linkage
   invoiceId       Int?             @unique
   invoice         Order?           @relation("SalesOrderInvoice", fields: [invoiceId], references: [id])
@@ -375,6 +386,7 @@ model SalesOrderItem {
   unitPrice    Float           @default(0)
   discount     Float           @default(0)
   totalPrice   Float           @default(0)
+  isReturn     Boolean         @default(false)
   
   notes        String?
   

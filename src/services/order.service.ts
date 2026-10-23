@@ -116,6 +116,7 @@ export class OrderService {
       unitPrice: number;
       discount?: number;
       price: number;
+      isReturn?: boolean;
     }[];
     subtotal: number;
     discount?: number;
@@ -125,6 +126,9 @@ export class OrderService {
     excessMode?: string;
     paymentMethod: string; // CASH, CARD, CREDIT, CHEQUE, BANK_TRANSFER
     notes?: string;
+    isReturnBill?: boolean;
+    returnCreditApplied?: number;
+    refundedCashAmount?: number;
     splitPayments?: Array<{
       id?: string;
       method: string;
@@ -146,10 +150,11 @@ export class OrderService {
     }
 
     const createdOrder = await prisma.$transaction(async (tx) => {
-      // 1. Verify and reduce variant inventory stock with strict input sanitization
+      // 1. Verify and adjust variant inventory stock with strict input sanitization
       for (const item of data.items) {
-        const qty = parseInt(String(item.quantity), 10);
-        const unitPrice = Math.max(0, Number(item.unitPrice) || 0);
+        const rawQty = parseInt(String(item.quantity), 10);
+        const qty = Math.abs(rawQty);
+        const isReturnItem = Boolean(item.isReturn || rawQty < 0);
 
         if (!qty || isNaN(qty) || qty <= 0) {
           throw new HttpException(400, `Invalid line quantity specified for variant #${item.variantId}`);
@@ -164,65 +169,95 @@ export class OrderService {
           throw new HttpException(404, `Product variant #${item.variantId} not found`);
         }
 
-        if (variant.stock < qty) {
-          throw new HttpException(
-            400,
-            `Insufficient stock for "${variant.product.name}" (${variant.size || 'N/A'}/${variant.color || 'N/A'}). Available: ${variant.stock}`
-          );
-        }
+        if (isReturnItem) {
+          // ⭐ Return item: Increment product/variant sellable stock back into warehouse
+          await tx.productVariant.update({
+            where: { id: item.variantId },
+            data: { stock: { increment: qty } },
+          });
+        } else {
+          // Normal sale item: Check availability and decrement inventory
+          if (variant.stock < qty) {
+            throw new HttpException(
+              400,
+              `Insufficient stock for "${variant.product.name}" (${variant.size || 'N/A'}/${variant.color || 'N/A'}). Available: ${variant.stock}`
+            );
+          }
 
-        // Deduct inventory stock atomically
-        await tx.productVariant.update({
-          where: { id: item.variantId },
-          data: { stock: { decrement: qty } },
-        });
+          // Deduct inventory stock atomically
+          await tx.productVariant.update({
+            where: { id: item.variantId },
+            data: { stock: { decrement: qty } },
+          });
+        }
       }
 
-      // Hardened Financial Calculations (Prevents negative payments and price manipulation)
+      // 2. Financial Calculations & Return Analysis
+      const returnItems = data.items.filter((i) => Boolean(i.isReturn || Number(i.quantity) < 0));
+      const saleItems = data.items.filter((i) => !i.isReturn && Number(i.quantity) > 0);
+      const isReturnOnlyBill = returnItems.length > 0 && saleItems.length === 0;
+
+      const totalReturnValue = returnItems.reduce((sum, i) => {
+        const lineNet = Math.abs(Number(i.unitPrice)) * Math.abs(Number(i.quantity)) - (Number(i.discount) || 0);
+        return sum + Math.max(0, lineNet);
+      }, 0);
+
+      const totalSaleValue = saleItems.reduce((sum, i) => {
+        const lineNet = Math.abs(Number(i.unitPrice)) * Math.abs(Number(i.quantity)) - (Number(i.discount) || 0);
+        return sum + Math.max(0, lineNet);
+      }, 0);
+
       const sanitizedDiscount = Math.max(0, Number(data.discount) || 0);
-      const total = Math.max(0, Number(data.totalAmount) || 0);
-      const paid = Math.min(total, Math.max(0, Number(data.paidAmount) || 0));
+      const computedNet = totalSaleValue - totalReturnValue - sanitizedDiscount;
+      const isReturnBill = Boolean(data.isReturnBill || isReturnOnlyBill || data.totalAmount < 0 || computedNet < 0);
+
+      // Financials
+      const rawTotal = Number(data.totalAmount);
+      const total = isReturnBill ? (rawTotal < 0 ? rawTotal : -Math.abs(rawTotal || totalReturnValue)) : Math.max(0, rawTotal || computedNet);
+      const paid = isReturnBill ? 0 : Math.min(Math.max(0, total), Math.max(0, Number(data.paidAmount) || 0));
       const sanitizedSettledDue = Math.max(0, Number(data.settledDueAmount) || 0);
-      const isFullPaid = paid >= total;
+      const isFullPaid = isReturnBill ? true : (paid >= total);
 
       // Prepare Multi-Split, Multi-Cheque or standard payments
       let paymentCreateEntries: any[] = [];
-      if (data.splitPayments && Array.isArray(data.splitPayments) && data.splitPayments.length > 0) {
-        paymentCreateEntries = data.splitPayments
-          .filter((s) => Number(s.amount) > 0)
-          .map((s) => {
-            let ref = s.reference || '';
-            if (s.method === 'CHEQUE') {
-              ref = `Cheque #${s.chequeNumber || ''}${s.bankName ? ` (${s.bankName})` : ''}`.trim() || ref || 'Cheque Payment';
-            } else if (s.method === 'BANK_TRANSFER' && s.bankName) {
-              ref = `Bank Transfer (${s.bankName})${ref ? `: ${ref}` : ''}`;
-            }
-            return {
-              amount: Number(s.amount),
-              method: s.method || 'CASH',
-              reference: ref || `${s.method} Payment`,
-              chequeDate: (s.method === 'CHEQUE' && s.date) ? new Date(s.date) : (s.date ? new Date(s.date) : undefined),
-            };
-          });
-      } else if (data.cheques && Array.isArray(data.cheques) && data.cheques.length > 0) {
-        paymentCreateEntries = data.cheques
-          .filter((c) => Number(c.amount) > 0)
-          .map((c) => ({
-            amount: Number(c.amount),
-            method: 'CHEQUE',
-            reference: `Cheque #${c.chequeNumber || ''}${c.bankName ? ` (${c.bankName})` : ''}`.trim() || 'Cheque Payment',
-            chequeDate: c.chequeDate ? new Date(c.chequeDate) : undefined,
-          }));
-      } else if (paid > 0) {
-        paymentCreateEntries = [
-          {
-            amount: paid,
-            method: data.paymentMethod || 'CASH',
-          },
-        ];
+      if (!isReturnBill) {
+        if (data.splitPayments && Array.isArray(data.splitPayments) && data.splitPayments.length > 0) {
+          paymentCreateEntries = data.splitPayments
+            .filter((s) => Number(s.amount) > 0)
+            .map((s) => {
+              let ref = s.reference || '';
+              if (s.method === 'CHEQUE') {
+                ref = `Cheque #${s.chequeNumber || ''}${s.bankName ? ` (${s.bankName})` : ''}`.trim() || ref || 'Cheque Payment';
+              } else if (s.method === 'BANK_TRANSFER' && s.bankName) {
+                ref = `Bank Transfer (${s.bankName})${ref ? `: ${ref}` : ''}`;
+              }
+              return {
+                amount: Number(s.amount),
+                method: s.method || 'CASH',
+                reference: ref || `${s.method} Payment`,
+                chequeDate: (s.method === 'CHEQUE' && s.date) ? new Date(s.date) : (s.date ? new Date(s.date) : undefined),
+              };
+            });
+        } else if (data.cheques && Array.isArray(data.cheques) && data.cheques.length > 0) {
+          paymentCreateEntries = data.cheques
+            .filter((c) => Number(c.amount) > 0)
+            .map((c) => ({
+              amount: Number(c.amount),
+              method: 'CHEQUE',
+              reference: `Cheque #${c.chequeNumber || ''}${c.bankName ? ` (${c.bankName})` : ''}`.trim() || 'Cheque Payment',
+              chequeDate: c.chequeDate ? new Date(c.chequeDate) : undefined,
+            }));
+        } else if (paid > 0) {
+          paymentCreateEntries = [
+            {
+              amount: paid,
+              method: data.paymentMethod || 'CASH',
+            },
+          ];
+        }
       }
 
-      // Structure notes if split payments or multi-cheques are included
+      // Structure notes if split payments, multi-cheques, or discounts are included
       let cleanUserNote = data.notes || '';
       while (typeof cleanUserNote === 'string' && cleanUserNote.trim().startsWith('{')) {
         try {
@@ -255,7 +290,8 @@ export class OrderService {
         (data.cheques && data.cheques.length > 0) ||
         hasItemVariants ||
         hasItemDiscounts ||
-        hasOrderDiscount
+        hasOrderDiscount ||
+        isReturnBill
       ) {
         try {
           finalOrderNotes = JSON.stringify({
@@ -267,13 +303,15 @@ export class OrderService {
             discountInput: (data as any).discountInput,
             discountRate: (data as any).discountRate,
             itemDiscounts: hasItemDiscounts ? itemDiscounts : undefined,
+            isReturnBill,
+            totalReturnValue: totalReturnValue > 0 ? totalReturnValue : undefined,
           });
         } catch {
           finalOrderNotes = cleanUserNote || null;
         }
       }
 
-      // 2. Create parent order entry
+      // 3. Create parent order entry
       const order = await tx.order.create({
         data: {
           source: data.source || OrderSource.POS_RETAIL,
@@ -282,21 +320,32 @@ export class OrderService {
           customerName: data.customerName || 'Walk-in Customer',
           customerPhone: data.customerPhone || null,
           subtotal: Number(data.subtotal) || total,
-          discount: Number(data.discount) || 0,
+          discount: sanitizedDiscount,
           totalAmount: total,
-          paidAmount: paid,
+          paidAmount: isReturnBill ? 0 : paid,
           settledDueAmount: sanitizedSettledDue,
-          status: isFullPaid ? OrderStatus.PAID : OrderStatus.PROCESSING,
-          paymentMethod: data.paymentMethod || 'CASH',
+          status: isReturnBill ? OrderStatus.PAID : (isFullPaid ? OrderStatus.PAID : OrderStatus.PROCESSING),
+          paymentMethod: isReturnBill ? 'RETURN_CREDIT' : (data.paymentMethod || 'CASH'),
           notes: finalOrderNotes,
+          isReturnBill: isReturnBill,
+          returnCreditApplied: 0,
+          refundedCashAmount: Math.max(0, Number(data.refundedCashAmount) || 0),
           items: {
-            create: data.items.map((i) => ({
-              variantId: i.variantId,
-              quantity: i.quantity,
-              unitPrice: i.unitPrice,
-              discount: i.discount || 0,
-              price: i.price,
-            })),
+            create: data.items.map((i) => {
+              const isRet = Boolean(i.isReturn || Number(i.quantity) < 0 || Number(i.price) < 0);
+              const absQty = Math.abs(Number(i.quantity));
+              const absPrice = i.price !== undefined && !isNaN(Number(i.price))
+                ? Math.abs(Number(i.price))
+                : Math.max(0, absQty * (Number(i.unitPrice) || 0) - (Number(i.discount) || 0));
+              return {
+                variantId: i.variantId,
+                quantity: absQty,
+                unitPrice: Number(i.unitPrice) || 0,
+                discount: Number(i.discount) || 0,
+                price: isRet ? -absPrice : absPrice,
+                isReturn: isRet,
+              };
+            }),
           },
           payments: paymentCreateEntries.length > 0 ? { create: paymentCreateEntries } : undefined,
         },
@@ -315,12 +364,9 @@ export class OrderService {
         },
       });
 
-      // 3. Secure Customer Credit Verification & Atomic Outstanding Debt Propagation
-      // Automatically triggers for ANY remaining unpaid invoice debt, regardless of whether
-      // the payment method was CREDIT, CHEQUE, CASH, or SPLIT payments.
+      // 4. Return Credit Auto-Deduction & Customer Outstanding Debt Synchronization
       if (data.customerId) {
         const custId = Number(data.customerId);
-        const unpaidBalance = Math.max(0, Math.round((total - paid) * 100) / 100);
         const targetCustomer = await tx.customer.findUnique({
           where: { id: custId },
         });
@@ -329,69 +375,145 @@ export class OrderService {
           throw new HttpException(404, `Linked customer #${data.customerId} not found`);
         }
 
-        // Check if customer exceeds allowable credit limit
-        if (unpaidBalance > 0 && targetCustomer.creditLimit > 0 && (targetCustomer.outstandingBalance + unpaidBalance) > targetCustomer.creditLimit) {
-          throw new HttpException(
-            400,
-            `Transaction exceeds allowed credit limit of Rs. ${targetCustomer.creditLimit}. Current outstanding: Rs. ${targetCustomer.outstandingBalance}`
-          );
-        }
+        // ⭐ DEDICATED RETURN BILL & CUSTOMER CREDIT AUTO-DEDUCTION
+        // When submitting a Return Bill (or net invoice total is negative/return):
+        // Automatically apply the return credit against existing unpaid/partially-paid invoices (oldest first - FIFO)
+        if (isReturnBill || totalReturnValue > 0) {
+          const rawReturnCredit = isReturnBill ? (rawTotal < 0 ? Math.abs(rawTotal) : totalReturnValue) : (computedNet < 0 ? Math.abs(computedNet) : 0);
 
-        // 1. Directly decrement customer outstanding if settledDueAmount > 0
-        if (sanitizedSettledDue > 0) {
-          await tx.customer.update({
-            where: { id: custId },
-            data: { outstandingBalance: { decrement: sanitizedSettledDue } },
-          });
+          if (rawReturnCredit > 0) {
+            let remainingCredit = rawReturnCredit;
+            let appliedCreditTotal = 0;
 
-          // 2. FIFO Settlement on previous unpaid/partially paid credit invoices
-          let remainingToSettle = sanitizedSettledDue;
-          const unpaidOrders = await tx.order.findMany({
-            where: {
-              customerId: custId,
-              id: { not: order.id },
-              status: { not: OrderStatus.CANCELLED },
-            },
-            orderBy: { createdAt: 'asc' },
-          });
+            // Fetch previous unpaid or partially paid credit invoices for this customer (oldest first)
+            const unpaidOrders = await tx.order.findMany({
+              where: {
+                customerId: custId,
+                id: { not: order.id },
+                status: { not: OrderStatus.CANCELLED },
+              },
+              orderBy: { createdAt: 'asc' },
+            });
 
-          for (const prevOrder of unpaidOrders) {
-            if (remainingToSettle <= 0) break;
-            const unpaidAmount = Math.max(0, prevOrder.totalAmount - prevOrder.paidAmount);
-            if (unpaidAmount > 0 && remainingToSettle > 0) {
-              const settleForThis = Math.min(unpaidAmount, remainingToSettle);
-              const newPrevPaid = prevOrder.paidAmount + settleForThis;
-              const isPrevPaid = newPrevPaid >= prevOrder.totalAmount;
+            for (const prevOrder of unpaidOrders) {
+              if (remainingCredit <= 0) break;
+              const prevDue = Math.max(0, Math.round((Number(prevOrder.totalAmount) - Number(prevOrder.paidAmount)) * 100) / 100);
+              if (prevDue <= 0) continue;
+
+              const creditForThisOrder = Math.min(prevDue, remainingCredit);
+              const newPrevPaid = Math.round((Number(prevOrder.paidAmount) + creditForThisOrder) * 100) / 100;
+              const isPrevFullyPaid = newPrevPaid >= Number(prevOrder.totalAmount);
 
               await tx.order.update({
                 where: { id: prevOrder.id },
                 data: {
-                  paidAmount: { increment: settleForThis },
-                  status: isPrevPaid ? OrderStatus.PAID : prevOrder.status,
+                  paidAmount: newPrevPaid,
+                  status: isPrevFullyPaid ? OrderStatus.PAID : prevOrder.status,
+                  updatedAt: new Date(),
                 },
               });
 
               await tx.orderPayment.create({
                 data: {
                   orderId: prevOrder.id,
-                  amount: settleForThis,
-                  method: data.paymentMethod || 'CASH',
-                  reference: `Settled from POS Invoice #${order.id}`,
+                  amount: creditForThisOrder,
+                  method: 'RETURN_CREDIT',
+                  reference: `Return credit applied from Invoice #${order.invoiceNumber || order.id}`,
+                  createdAt: new Date(),
                 },
               });
 
-              remainingToSettle -= settleForThis;
+              remainingCredit = Math.round((remainingCredit - creditForThisOrder) * 100) / 100;
+              appliedCreditTotal = Math.round((appliedCreditTotal + creditForThisOrder) * 100) / 100;
             }
+
+            // Decrement customer's overall credit/due balance accurately
+            await tx.customer.update({
+              where: { id: custId },
+              data: {
+                outstandingBalance: { decrement: rawReturnCredit },
+              },
+            });
+
+            // Update returnCreditApplied on this order
+            await tx.order.update({
+              where: { id: order.id },
+              data: {
+                returnCreditApplied: appliedCreditTotal,
+              },
+            });
+            order.returnCreditApplied = appliedCreditTotal;
           }
         }
 
-        // 2. Atomic Customer Debt Synchronization:
-        // Increments Customer.outstandingBalance whenever unpaid balance remains on ANY payment method
-        if (unpaidBalance > 0) {
-          await tx.customer.update({
-            where: { id: custId },
-            data: { outstandingBalance: { increment: unpaidBalance } },
-          });
+        // Standard Sale Debt Settlement & Outstanding Balance Propagation (for non-return purchases)
+        if (!isReturnBill && computedNet > 0) {
+          const unpaidBalance = Math.max(0, Math.round((total - paid) * 100) / 100);
+
+          // Check if customer exceeds allowable credit limit
+          if (unpaidBalance > 0 && targetCustomer.creditLimit > 0 && (targetCustomer.outstandingBalance + unpaidBalance) > targetCustomer.creditLimit) {
+            throw new HttpException(
+              400,
+              `Transaction exceeds allowed credit limit of Rs. ${targetCustomer.creditLimit}. Current outstanding: Rs. ${targetCustomer.outstandingBalance}`
+            );
+          }
+
+          // Directly decrement customer outstanding if settledDueAmount > 0
+          if (sanitizedSettledDue > 0) {
+            await tx.customer.update({
+              where: { id: custId },
+              data: { outstandingBalance: { decrement: sanitizedSettledDue } },
+            });
+
+            // FIFO Settlement on previous unpaid/partially paid credit invoices
+            let remainingToSettle = sanitizedSettledDue;
+            const unpaidOrders = await tx.order.findMany({
+              where: {
+                customerId: custId,
+                id: { not: order.id },
+                status: { not: OrderStatus.CANCELLED },
+              },
+              orderBy: { createdAt: 'asc' },
+            });
+
+            for (const prevOrder of unpaidOrders) {
+              if (remainingToSettle <= 0) break;
+              const unpaidAmount = Math.max(0, prevOrder.totalAmount - prevOrder.paidAmount);
+              if (unpaidAmount > 0 && remainingToSettle > 0) {
+                const settleForThis = Math.min(unpaidAmount, remainingToSettle);
+                const newPrevPaid = prevOrder.paidAmount + settleForThis;
+                const isPrevPaid = newPrevPaid >= prevOrder.totalAmount;
+
+                await tx.order.update({
+                  where: { id: prevOrder.id },
+                  data: {
+                    paidAmount: { increment: settleForThis },
+                    status: isPrevPaid ? OrderStatus.PAID : prevOrder.status,
+                  },
+                });
+
+                await tx.orderPayment.create({
+                  data: {
+                    orderId: prevOrder.id,
+                    amount: settleForThis,
+                    method: data.paymentMethod || 'CASH',
+                    reference: `Settled from POS Invoice #${order.id}`,
+                  },
+                });
+
+                remainingToSettle -= settleForThis;
+              }
+            }
+          }
+
+          // Atomic Customer Debt Synchronization:
+          // Increments Customer.outstandingBalance whenever unpaid balance remains on ANY payment method
+          if (unpaidBalance > 0) {
+            await tx.customer.update({
+              where: { id: custId },
+              data: { outstandingBalance: { increment: unpaidBalance } },
+            });
+          }
         }
 
         const freshCustomer = await tx.customer.findUnique({
@@ -709,6 +831,9 @@ export class OrderService {
     ]);
 
     const mappedOrders = orders.map((order) => {
+      (order.items || []).forEach((it: any) => {
+        it.isReturn = Boolean(it.isReturn || (typeof it.price === 'number' && it.price < 0));
+      });
       const parsed = parseOrderStructuredNotes(order.notes);
       const originalTotalAmount = parsed.originalTotalAmount ?? (
         parsed.returns.length > 0
@@ -801,16 +926,15 @@ export class OrderService {
 
     // Parse structured notes and return history if present
     const parsed = parseOrderStructuredNotes(order.notes);
-    if (parsed.itemVariants.length > 0) {
-      (order.items || []).forEach((it: any, idx: number) => {
-        if (parsed.itemVariants[idx]) {
-          it.size = parsed.itemVariants[idx].size;
-          it.color = parsed.itemVariants[idx].color;
-          it.selectedSize = parsed.itemVariants[idx].size;
-          it.selectedColor = parsed.itemVariants[idx].color;
-        }
-      });
-    }
+    (order.items || []).forEach((it: any, idx: number) => {
+      it.isReturn = Boolean(it.isReturn || (typeof it.price === 'number' && it.price < 0));
+      if (parsed.itemVariants.length > 0 && parsed.itemVariants[idx]) {
+        it.size = parsed.itemVariants[idx].size;
+        it.color = parsed.itemVariants[idx].color;
+        it.selectedSize = parsed.itemVariants[idx].size;
+        it.selectedColor = parsed.itemVariants[idx].color;
+      }
+    });
 
     const originalTotalAmount = parsed.originalTotalAmount ?? (
       parsed.returns.length > 0
@@ -917,16 +1041,25 @@ export class OrderService {
         }
       }
 
-      // 1. Revert previous stock
+      // 1. Revert previous stock (decrement returns, increment standard items)
       for (const oldItem of existing.items) {
-        await tx.productVariant.update({
-          where: { id: oldItem.variantId },
-          data: { stock: { increment: oldItem.quantity } },
-        });
+        if (oldItem.isReturn) {
+          await tx.productVariant.update({
+            where: { id: oldItem.variantId },
+            data: { stock: { decrement: oldItem.quantity } },
+          });
+        } else {
+          await tx.productVariant.update({
+            where: { id: oldItem.variantId },
+            data: { stock: { increment: oldItem.quantity } },
+          });
+        }
       }
 
-      // 2. Validate and deduct new stock
+      // 2. Validate and adjust new stock (increment returns, decrement standard items)
       for (const newItem of data.items) {
+        const isRet = Boolean((newItem as any).isReturn || newItem.quantity < 0);
+        const absQty = Math.abs(newItem.quantity);
         const variant = await tx.productVariant.findUnique({
           where: { id: newItem.variantId },
           include: { product: { select: { name: true } } },
@@ -936,17 +1069,24 @@ export class OrderService {
           throw new HttpException(404, `Product variant #${newItem.variantId} not found`);
         }
 
-        if (variant.stock < newItem.quantity) {
-          throw new HttpException(
-            400,
-            `Insufficient stock for "${variant.product.name}" (${variant.size}/${variant.color}). Available: ${variant.stock}`
-          );
-        }
+        if (isRet) {
+          await tx.productVariant.update({
+            where: { id: newItem.variantId },
+            data: { stock: { increment: absQty } },
+          });
+        } else {
+          if (variant.stock < absQty) {
+            throw new HttpException(
+              400,
+              `Insufficient stock for "${variant.product.name}" (${variant.size}/${variant.color}). Available: ${variant.stock}`
+            );
+          }
 
-        await tx.productVariant.update({
-          where: { id: newItem.variantId },
-          data: { stock: { decrement: newItem.quantity } },
-        });
+          await tx.productVariant.update({
+            where: { id: newItem.variantId },
+            data: { stock: { decrement: absQty } },
+          });
+        }
       }
 
       // 3. Bulletproof Financial and Customer Credit Delta Sync
@@ -1161,15 +1301,24 @@ export class OrderService {
           settledDueAmount: newSettledDue,
           paymentMethod: newCreditDue > 0 ? 'CREDIT' : data.paymentMethod || 'CASH',
           notes: finalOrderNotes,
+          refundedCashAmount: (data as any).refundedCashAmount !== undefined ? Math.max(0, Number((data as any).refundedCashAmount) || 0) : Number(existing.refundedCashAmount || 0),
           status: newPaid >= newTotal ? OrderStatus.PAID : OrderStatus.PROCESSING,
           items: {
-            create: data.items.map((i) => ({
-              variantId: i.variantId,
-              quantity: i.quantity,
-              unitPrice: i.unitPrice,
-              discount: i.discount || 0,
-              price: i.price,
-            })),
+            create: data.items.map((i) => {
+              const isRet = Boolean((i as any).isReturn || Number(i.quantity) < 0 || Number(i.price) < 0);
+              const absQty = Math.abs(Number(i.quantity));
+              const absPrice = i.price !== undefined && !isNaN(Number(i.price))
+                ? Math.abs(Number(i.price))
+                : Math.max(0, absQty * (Number(i.unitPrice) || 0) - (Number(i.discount) || 0));
+              return {
+                variantId: i.variantId,
+                quantity: absQty,
+                unitPrice: Number(i.unitPrice) || 0,
+                discount: Number(i.discount) || 0,
+                price: isRet ? -absPrice : absPrice,
+                isReturn: isRet,
+              };
+            }),
           },
           payments: paymentCreateEntries.length > 0 ? { create: paymentCreateEntries } : undefined,
         },

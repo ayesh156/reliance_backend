@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { prisma } from '../lib/prisma.ts';
 import { sendError, sendErrorFrom } from '../utils/response.ts';
 import { ROLES, type UserRole } from '../config/constants.ts';
+import { resolveUserPermissions } from '../services/auth.service.ts';
 
 export class UserController {
   /**
@@ -29,7 +30,7 @@ export class UserController {
         return;
       }
 
-      const { name, email, role, password, active } = req.body;
+      const { name, email, role, password, active, permissions } = req.body;
       const currentAdminId = req.user?.userId;
 
       // 1. Verify existence of target user
@@ -123,7 +124,12 @@ export class UserController {
         updateData.active = Boolean(active);
       }
 
-      // 7. Password override with bcrypt (salt rounds: 10)
+      // 7. Dynamic Permissions update
+      if (permissions !== undefined) {
+        updateData.permissions = Array.isArray(permissions) ? (permissions as any) : null;
+      }
+
+      // 8. Password override with bcrypt (salt rounds: 10)
       if (password !== undefined && String(password).trim().length > 0) {
         const cleanPassword = String(password).trim();
         if (cleanPassword.length < 6) {
@@ -135,7 +141,7 @@ export class UserController {
         updateData.password = hashedPassword;
       }
 
-      // 8. Commit updates to database
+      // 9. Commit updates to database
       const updatedUser = await prisma.user.update({
         where: { id: targetUserId },
         data: updateData,
@@ -144,6 +150,7 @@ export class UserController {
           name: true,
           email: true,
           role: true,
+          permissions: true,
           active: true,
           createdAt: true,
           updatedAt: true,
@@ -155,10 +162,15 @@ export class UserController {
         `[AUDIT] Admin #${currentAdminId || 'UNKNOWN'} directly overridden credentials for User #${targetUserId} (${updatedUser.email}). Modified fields: ${Object.keys(updateData).join(', ')}`
       );
 
+      const resolvedUser = {
+        ...updatedUser,
+        permissions: resolveUserPermissions(updatedUser.role, updatedUser.permissions),
+      };
+
       res.status(200).json({
         success: true,
         message: `Credentials updated successfully for ${updatedUser.name}`,
-        user: updatedUser,
+        user: resolvedUser,
       });
     } catch (error) {
       console.error('[UserController] adminOverride error:', error);

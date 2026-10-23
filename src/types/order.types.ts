@@ -8,6 +8,8 @@ export interface OrderItemInput {
   quantity: number;
   unitPrice: number;
   discount?: number;
+  price?: number;
+  isReturn?: boolean;
 }
 
 /** Body for POST /api/orders. */
