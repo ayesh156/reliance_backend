@@ -37,6 +37,21 @@ export class ProductController {
         res.status(403).json({ error: 'Forbidden: Representatives cannot create products.' });
         return;
       }
+      // Ensure variant stock defaults to 0 if omitted or blank (Production-driven inventory)
+      if (req.body.variants) {
+        try {
+          const raw = typeof req.body.variants === 'string' ? JSON.parse(req.body.variants) : req.body.variants;
+          if (Array.isArray(raw)) {
+            const normalized = raw.map((v: any) => ({
+              ...v,
+              stock: v.stock !== undefined && v.stock !== null && String(v.stock).trim() !== ''
+                ? Math.max(0, parseInt(String(v.stock), 10) || 0)
+                : 0,
+            }));
+            req.body.variants = typeof req.body.variants === 'string' ? JSON.stringify(normalized) : normalized;
+          }
+        } catch { /* proceed to service parser */ }
+      }
       const product = await productService.createProduct(req);
       res.status(201).json(product);
     } catch (error) {
@@ -57,6 +72,21 @@ export class ProductController {
       if (!id || isNaN(id) || id <= 0) {
         res.status(400).json({ error: 'Valid positive integer product ID is required' });
         return;
+      }
+      // Ensure variant stock defaults to 0 if omitted or blank, allowing stock of 0
+      if (req.body.variants) {
+        try {
+          const raw = typeof req.body.variants === 'string' ? JSON.parse(req.body.variants) : req.body.variants;
+          if (Array.isArray(raw)) {
+            const normalized = raw.map((v: any) => ({
+              ...v,
+              stock: v.stock !== undefined && v.stock !== null && String(v.stock).trim() !== ''
+                ? Math.max(0, parseInt(String(v.stock), 10) || 0)
+                : 0,
+            }));
+            req.body.variants = typeof req.body.variants === 'string' ? JSON.stringify(normalized) : normalized;
+          }
+        } catch { /* proceed to service parser */ }
       }
       const product = await productService.updateProduct(id, req);
       res.json(product);

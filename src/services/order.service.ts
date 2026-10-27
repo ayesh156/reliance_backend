@@ -1,10 +1,9 @@
 import { prisma } from '../lib/prisma.ts';
 import { HttpException } from '../middleware/error.middleware.ts';
 import { OrderSource, OrderStatus } from '@prisma/client';
-import PDFDocument from 'pdfkit';
 import { InvoicePdfService } from './invoice-pdf.service.ts';
 import { PaymentService } from './payment.service.ts';
-import { broadcastLiveEvent, sseGateway } from '../gateways/sse.gateway.ts';
+import { broadcastLiveEvent } from '../gateways/sse.gateway.ts';
 
 export interface ReturnedItemRecord {
   variantId: number;
@@ -308,14 +307,48 @@ export class OrderService {
         }
       }
 
+      // Automatic customer lookup & address backfill if customerId is missing or shippingAddress is empty
+      let targetCustomerId = data.customerId ? Number(data.customerId) : null;
+      let targetCustomer: any = null;
+
+      if (targetCustomerId) {
+        targetCustomer = await tx.customer.findUnique({
+          where: { id: targetCustomerId },
+          select: { id: true, name: true, phone: true, address: true, city: true, type: true, outstandingBalance: true, creditLimit: true },
+        });
+      } else if (data.customerPhone || data.customerName) {
+        const cleanPhone = data.customerPhone ? String(data.customerPhone).replace(/[^0-9]/g, '').slice(-9) : '';
+        const rawName = data.customerName ? String(data.customerName).trim() : '';
+
+        targetCustomer = await tx.customer.findFirst({
+          where: {
+            OR: [
+              ...(data.customerPhone ? [{ phone: data.customerPhone }] : []),
+              ...(cleanPhone ? [{ phone: { contains: cleanPhone } }] : []),
+              ...(rawName && rawName.toLowerCase() !== 'walk-in customer' ? [{ name: rawName }] : []),
+            ],
+          },
+          select: { id: true, name: true, phone: true, address: true, city: true, type: true, outstandingBalance: true, creditLimit: true },
+        });
+
+        if (targetCustomer) {
+          targetCustomerId = targetCustomer.id;
+        }
+      }
+
+      const resolvedShippingAddress = (data as any).shippingAddress || (data as any).customerAddress || targetCustomer?.address || null;
+      const resolvedCity = (data as any).city || (data as any).customerCity || targetCustomer?.city || null;
+
       // 3. Create parent order entry
       const order = await tx.order.create({
         data: {
           source: data.source || OrderSource.POS_RETAIL,
           userId: data.userId,
-          customerId: data.customerId ? Number(data.customerId) : null,
-          customerName: data.customerName || 'Walk-in Customer',
-          customerPhone: data.customerPhone || null,
+          customerId: targetCustomerId,
+          customerName: data.customerName || targetCustomer?.name || 'Walk-in Customer',
+          customerPhone: data.customerPhone || targetCustomer?.phone || null,
+          shippingAddress: resolvedShippingAddress,
+          city: resolvedCity,
           subtotal: Number(data.subtotal) || total,
           discount: sanitizedDiscount,
           discountType: (data as any).discountType === 'PERCENT' ? 'PERCENT' : 'AMOUNT',
@@ -386,14 +419,14 @@ export class OrderService {
       }
 
       // 4. Return Credit Auto-Deduction & Customer Outstanding Debt Synchronization
-      if (data.customerId) {
-        const custId = Number(data.customerId);
-        const targetCustomer = await tx.customer.findUnique({
+      if (targetCustomerId) {
+        const custId = Number(targetCustomerId);
+        const customerRecord = targetCustomer || (await tx.customer.findUnique({
           where: { id: custId },
-        });
+        }));
 
-        if (!targetCustomer) {
-          throw new HttpException(404, `Linked customer #${data.customerId} not found`);
+        if (!customerRecord) {
+          throw new HttpException(404, `Linked customer #${targetCustomerId} not found`);
         }
 
         // ⭐ DEDICATED RETURN BILL & CUSTOMER CREDIT AUTO-DEDUCTION
@@ -470,12 +503,14 @@ export class OrderService {
         // Standard Sale Debt Settlement & Outstanding Balance Propagation (for non-return purchases)
         if (!isReturnBill && computedNet > 0) {
           const unpaidBalance = Math.max(0, Math.round((total - paid) * 100) / 100);
+          const custCreditLimit = Number(targetCustomer?.creditLimit || 0);
+          const currentOutstanding = Number(targetCustomer?.outstandingBalance || 0);
 
           // Check if customer exceeds allowable credit limit
-          if (unpaidBalance > 0 && targetCustomer.creditLimit > 0 && (targetCustomer.outstandingBalance + unpaidBalance) > targetCustomer.creditLimit) {
+          if (unpaidBalance > 0 && custCreditLimit > 0 && (currentOutstanding + unpaidBalance) > custCreditLimit) {
             throw new HttpException(
               400,
-              `Transaction exceeds allowed credit limit of Rs. ${targetCustomer.creditLimit}. Current outstanding: Rs. ${targetCustomer.outstandingBalance}`
+              `Transaction exceeds allowed credit limit of Rs. ${custCreditLimit}. Current outstanding: Rs. ${currentOutstanding}`
             );
           }
 
@@ -833,7 +868,7 @@ export class OrderService {
         take: limit,
         orderBy,
         include: {
-          customer: { select: { id: true, name: true, phone: true, outstandingBalance: true } },
+          customer: { select: { id: true, name: true, phone: true, address: true, city: true, type: true, outstandingBalance: true } },
           items: {
             include: {
               variant: {
@@ -851,6 +886,46 @@ export class OrderService {
       }),
     ]);
 
+    // Backfill customer relation or missing shippingAddress/city by looking up matching customers
+    const ordersNeedingCustomer = orders.filter(
+      (o) => (!o.customer || !o.shippingAddress) && (o.customerPhone || o.customerName)
+    );
+
+    const customerLookupMap = new Map<string, any>();
+    if (ordersNeedingCustomer.length > 0) {
+      const phones = Array.from(
+        new Set(
+          ordersNeedingCustomer
+            .map((o) => o.customerPhone?.trim())
+            .filter((p): p is string => Boolean(p))
+        )
+      );
+      const names = Array.from(
+        new Set(
+          ordersNeedingCustomer
+            .map((o) => o.customerName?.trim())
+            .filter((n): n is string => Boolean(n && n.toLowerCase() !== 'walk-in customer'))
+        )
+      );
+
+      if (phones.length > 0 || names.length > 0) {
+        const foundCustomers = await prisma.customer.findMany({
+          where: {
+            OR: [
+              ...(phones.length > 0 ? [{ phone: { in: phones } }] : []),
+              ...(names.length > 0 ? [{ name: { in: names } }] : []),
+            ],
+          },
+          select: { id: true, name: true, phone: true, address: true, city: true, type: true, outstandingBalance: true },
+        });
+
+        for (const c of foundCustomers) {
+          if (c.phone) customerLookupMap.set(`phone:${c.phone}`, c);
+          if (c.name) customerLookupMap.set(`name:${c.name.toLowerCase()}`, c);
+        }
+      }
+    }
+
     const mappedOrders = orders.map((order) => {
       (order.items || []).forEach((it: any) => {
         it.isReturn = Boolean(it.isReturn || (typeof it.price === 'number' && it.price < 0));
@@ -861,8 +936,25 @@ export class OrderService {
           ? order.totalAmount + parsed.returns.reduce((sum, r) => sum + (Number(r.totalReturnRefund) || 0), 0)
           : order.totalAmount
       );
+
+      let resolvedCustomer = order.customer;
+      if (!resolvedCustomer) {
+        if (order.customerPhone && customerLookupMap.has(`phone:${order.customerPhone.trim()}`)) {
+          resolvedCustomer = customerLookupMap.get(`phone:${order.customerPhone.trim()}`);
+        } else if (order.customerName && customerLookupMap.has(`name:${order.customerName.trim().toLowerCase()}`)) {
+          resolvedCustomer = customerLookupMap.get(`name:${order.customerName.trim().toLowerCase()}`);
+        }
+      }
+
+      const resolvedShippingAddress =
+        order.shippingAddress || resolvedCustomer?.address || null;
+      const resolvedCity = order.city || resolvedCustomer?.city || null;
+
       return {
         ...order,
+        customer: resolvedCustomer,
+        shippingAddress: resolvedShippingAddress,
+        city: resolvedCity,
         returns: parsed.returns,
         originalTotalAmount,
         splitPayments: parsed.splitPayments.length > 0 ? parsed.splitPayments : undefined,
@@ -910,6 +1002,7 @@ export class OrderService {
             phone: true,
             address: true,
             city: true,
+            type: true,
             outstandingBalance: true,
             repId: true,
             rep: { select: { id: true, name: true } },
@@ -942,9 +1035,44 @@ export class OrderService {
       throw new HttpException(404, `Invoice #${id} not found`);
     }
 
+    // If order has no linked customer, automatically look up customer by phone or name
+    if (!order.customer && (order.customerPhone || order.customerName)) {
+      const cleanPhone = order.customerPhone ? String(order.customerPhone).replace(/[^0-9]/g, '').slice(-9) : '';
+      const rawName = order.customerName ? String(order.customerName).trim() : '';
+
+      const matchedCustomer = await prisma.customer.findFirst({
+        where: {
+          OR: [
+            ...(order.customerPhone ? [{ phone: order.customerPhone }] : []),
+            ...(cleanPhone ? [{ phone: { contains: cleanPhone } }] : []),
+            ...(rawName && rawName.toLowerCase() !== 'walk-in customer' ? [{ name: rawName }] : []),
+          ],
+        },
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          address: true,
+          city: true,
+          type: true,
+          outstandingBalance: true,
+          repId: true,
+          rep: { select: { id: true, name: true } },
+        },
+      });
+
+      if (matchedCustomer) {
+        (order as any).customer = matchedCustomer;
+        if (!order.customerId) (order as any).customerId = matchedCustomer.id;
+      }
+    }
+
     // Attach resolved customer address into shippingAddress fallback for frontend print parities
     if (order.customer?.address && !order.shippingAddress) {
       (order as any).shippingAddress = order.customer.address;
+    }
+    if (order.customer?.city && !order.city) {
+      (order as any).city = order.customer.city;
     }
 
     // Parse structured notes and return history if present
@@ -1125,14 +1253,48 @@ export class OrderService {
       const newCreditDue = Math.max(0, newTotal - newPaid);
       const newSettledDue = data.settledDueAmount !== undefined ? Math.max(0, Number(data.settledDueAmount) || 0) : oldSettledDue;
 
-      const targetCustomerId = data.customerId ? Number(data.customerId) : existing.customerId;
+      let targetCustomerId = data.customerId ? Number(data.customerId) : existing.customerId;
+      let targetCustomer: any = null;
+
+      if (targetCustomerId) {
+        targetCustomer = await tx.customer.findUnique({
+          where: { id: targetCustomerId },
+          select: { id: true, name: true, phone: true, address: true, city: true, type: true, outstandingBalance: true, creditLimit: true },
+        });
+      } else if (data.customerPhone || data.customerName) {
+        const cleanPhone = data.customerPhone ? String(data.customerPhone).replace(/[^0-9]/g, '').slice(-9) : '';
+        const rawName = data.customerName ? String(data.customerName).trim() : '';
+
+        targetCustomer = await tx.customer.findFirst({
+          where: {
+            OR: [
+              ...(data.customerPhone ? [{ phone: data.customerPhone }] : []),
+              ...(cleanPhone ? [{ phone: { contains: cleanPhone } }] : []),
+              ...(rawName && rawName.toLowerCase() !== 'walk-in customer' ? [{ name: rawName }] : []),
+            ],
+          },
+          select: { id: true, name: true, phone: true, address: true, city: true, type: true, outstandingBalance: true, creditLimit: true },
+        });
+
+        if (targetCustomer) {
+          targetCustomerId = targetCustomer.id;
+        }
+      }
+
+      const resolvedShippingAddress = (data as any).shippingAddress || (data as any).customerAddress || targetCustomer?.address || existing.shippingAddress || null;
+      const resolvedCity = (data as any).city || (data as any).customerCity || targetCustomer?.city || existing.city || null;
 
       if (targetCustomerId) {
         const custId = Number(targetCustomerId);
+        const isCustomerChanged = Boolean(existing.customerId && existing.customerId !== targetCustomerId);
 
-        // 1. If settledDueAmount > 0, apply FIFO Settlement on previous unpaid/partially paid credit invoices
-        if (newSettledDue > 0) {
-          let remainingToSettle = newSettledDue;
+        // 1. If settledDueAmount increased (or customer changed), apply incremental FIFO Settlement on previous unpaid invoices
+        const settledDueToApply = isCustomerChanged
+          ? newSettledDue
+          : Math.max(0, Math.round((newSettledDue - oldSettledDue) * 100) / 100);
+
+        if (settledDueToApply > 0) {
+          let remainingToSettle = settledDueToApply;
           const unpaidOrders = await tx.order.findMany({
             where: {
               customerId: custId,
@@ -1144,17 +1306,18 @@ export class OrderService {
 
           for (const prevOrder of unpaidOrders) {
             if (remainingToSettle <= 0) break;
-            const unpaidAmount = Math.max(0, prevOrder.totalAmount - prevOrder.paidAmount);
-            if (unpaidAmount > 0 && remainingToSettle > 0) {
+            const unpaidAmount = Math.max(0, Math.round((Number(prevOrder.totalAmount) - Number(prevOrder.paidAmount)) * 100) / 100);
+            if (unpaidAmount > 0) {
               const settleForThis = Math.min(unpaidAmount, remainingToSettle);
-              const newPrevPaid = prevOrder.paidAmount + settleForThis;
-              const isPrevPaid = newPrevPaid >= prevOrder.totalAmount;
+              const newPrevPaid = Math.round((Number(prevOrder.paidAmount) + settleForThis) * 100) / 100;
+              const isPrevPaid = newPrevPaid >= Number(prevOrder.totalAmount);
 
               await tx.order.update({
                 where: { id: prevOrder.id },
                 data: {
-                  paidAmount: { increment: settleForThis },
+                  paidAmount: newPrevPaid,
                   status: isPrevPaid ? OrderStatus.PAID : prevOrder.status,
+                  updatedAt: new Date(),
                 },
               });
 
@@ -1164,16 +1327,17 @@ export class OrderService {
                   amount: settleForThis,
                   method: data.paymentMethod || 'CASH',
                   reference: `Settled from POS Invoice #${orderId}`,
+                  createdAt: new Date(),
                 },
               });
 
-              remainingToSettle -= settleForThis;
+              remainingToSettle = Math.round((remainingToSettle - settleForThis) * 100) / 100;
             }
           }
         }
 
         // 2. Rollback previous customer's debt if customer was changed
-        if (existing.customerId && existing.customerId !== targetCustomerId) {
+        if (isCustomerChanged && existing.customerId) {
           const oldCustOrders = await tx.order.findMany({
             where: {
               customerId: existing.customerId,
@@ -1189,31 +1353,20 @@ export class OrderService {
           });
         }
 
-        // 3. Increment or decrement customer outstandingBalance based on net credit & settlement delta
-        if (existing.customerId && existing.customerId !== targetCustomerId) {
-          // New customer selected: apply new credit due to new customer
-          if (newCreditDue > 0) {
-            await tx.customer.update({
-              where: { id: custId },
-              data: { outstandingBalance: { increment: newCreditDue } },
-            });
-          }
-        } else {
-          // Same customer: calculate true live outstanding balance from all active orders to prevent any desync
-          const allActiveCustomerOrders = await tx.order.findMany({
-            where: { customerId: custId, status: { not: OrderStatus.CANCELLED } },
-            select: { id: true, totalAmount: true, paidAmount: true },
-          });
-          const trueLiveDebt = allActiveCustomerOrders.reduce((sum, o) => {
-            const ordTotal = o.id === orderId ? newTotal : Number(o.totalAmount || 0);
-            const ordPaid = o.id === orderId ? newPaid : Number(o.paidAmount || 0);
-            return sum + Math.max(0, ordTotal - ordPaid);
-          }, 0);
-          await tx.customer.update({
-            where: { id: custId },
-            data: { outstandingBalance: Math.round(trueLiveDebt * 100) / 100 },
-          });
-        }
+        // 3. Atomically synchronize live outstanding balance for active customer from all active orders
+        const allActiveCustomerOrders = await tx.order.findMany({
+          where: { customerId: custId, status: { not: OrderStatus.CANCELLED } },
+          select: { id: true, totalAmount: true, paidAmount: true },
+        });
+        const trueLiveDebt = allActiveCustomerOrders.reduce((sum, o) => {
+          const ordTotal = o.id === orderId ? newTotal : Number(o.totalAmount || 0);
+          const ordPaid = o.id === orderId ? newPaid : Number(o.paidAmount || 0);
+          return sum + Math.max(0, ordTotal - ordPaid);
+        }, 0);
+        await tx.customer.update({
+          where: { id: custId },
+          data: { outstandingBalance: Math.round(trueLiveDebt * 100) / 100 },
+        });
       }
 
       // 4. Update order items and sync payments ledger
@@ -1317,8 +1470,10 @@ export class OrderService {
         data: {
           source: data.source || existing.source || OrderSource.POS_RETAIL, // Accurately updates Wholesale vs Retail mode
           customerId: targetCustomerId || null,
-          customerName: data.customerName || 'Walk-in Customer',
-          customerPhone: data.customerPhone || null,
+          customerName: data.customerName || targetCustomer?.name || existing.customerName || 'Walk-in Customer',
+          customerPhone: data.customerPhone || targetCustomer?.phone || existing.customerPhone || null,
+          shippingAddress: resolvedShippingAddress,
+          city: resolvedCity,
           subtotal: Number(data.subtotal),
           discount: Number(data.discount) || 0,
           discountType: (data as any).discountType === 'PERCENT' ? 'PERCENT' : 'AMOUNT',
@@ -1491,18 +1646,23 @@ export class OrderService {
         where: { orderId },
       });
 
-      // 2. Accurately update customer outstanding debt:
-      // Reverses remaining unpaid credit due (-creditDue), reverses settled due (+settledDue),
-      // and reverses return credit applied (+returnCredit)
-      const creditDue = Math.max(0, order.totalAmount - order.paidAmount);
-      const settledDue = Number((order as any).settledDueAmount || 0);
-      const returnCredit = Number(order.returnCreditApplied || 0) || (order.totalAmount < 0 ? Math.abs(order.totalAmount) : 0);
-      const adjustment = -creditDue + settledDue + returnCredit;
-
-      if (order.customerId && adjustment !== 0) {
+      // 2. Accurately synchronize customer outstanding balance from remaining active orders
+      if (order.customerId) {
+        const remainingCustomerOrders = await tx.order.findMany({
+          where: {
+            customerId: order.customerId,
+            id: { not: orderId },
+            status: { not: OrderStatus.CANCELLED },
+          },
+          select: { totalAmount: true, paidAmount: true },
+        });
+        const trueRemainingDue = remainingCustomerOrders.reduce(
+          (sum, o) => sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0)),
+          0
+        );
         await tx.customer.update({
           where: { id: order.customerId },
-          data: { outstandingBalance: { increment: adjustment } },
+          data: { outstandingBalance: Math.round(trueRemainingDue * 100) / 100 },
         });
       }
 
@@ -1615,8 +1775,30 @@ export class OrderService {
     }
 
     // Attach resolved customer address into shippingAddress fallback for identical receipt alignment
+    if (!order.customer && (order.customerPhone || order.customerName)) {
+      const cleanPhone = order.customerPhone ? String(order.customerPhone).replace(/[^0-9]/g, '').slice(-9) : '';
+      const rawName = order.customerName ? String(order.customerName).trim() : '';
+
+      const matchedCustomer = await prisma.customer.findFirst({
+        where: {
+          OR: [
+            ...(order.customerPhone ? [{ phone: order.customerPhone }] : []),
+            ...(cleanPhone ? [{ phone: { contains: cleanPhone } }] : []),
+            ...(rawName && rawName.toLowerCase() !== 'walk-in customer' ? [{ name: rawName }] : []),
+          ],
+        },
+      });
+
+      if (matchedCustomer) {
+        (order as any).customer = matchedCustomer;
+      }
+    }
+
     if (order.customer?.address && !order.shippingAddress) {
       (order as any).shippingAddress = order.customer.address;
+    }
+    if (order.customer?.city && !order.city) {
+      (order as any).city = order.customer.city;
     }
 
     // Hydrate item custom size and color from notes
@@ -1745,10 +1927,11 @@ export class OrderService {
       }
 
       // Deduct settled amount atomically from Customer outstanding balance
+      const newBal = Math.max(0, Math.round((customer.outstandingBalance - paymentToApply) * 100) / 100);
       const updatedCustomer = await tx.customer.update({
         where: { id: customerId },
         data: {
-          outstandingBalance: { decrement: paymentToApply },
+          outstandingBalance: newBal,
         },
       });
 
@@ -1771,8 +1954,7 @@ export class OrderService {
     const orders = await prisma.order.findMany({
       where: {
         customerId: Number(customerId),
-        status: { in: [OrderStatus.PROCESSING, OrderStatus.PENDING, OrderStatus.DELIVERED] },
-        paymentMethod: 'CREDIT',
+        status: { notIn: [OrderStatus.PAID, OrderStatus.CANCELLED] },
       },
       orderBy: { createdAt: 'desc' },
       select: {
@@ -1781,6 +1963,7 @@ export class OrderService {
         source: true,
         totalAmount: true,
         paidAmount: true,
+        paymentMethod: true,
         createdAt: true,
         payments: {
           orderBy: { createdAt: 'asc' },
@@ -1796,23 +1979,28 @@ export class OrderService {
       take: 100,
     });
 
-    return orders.map((o) => ({
-      id: o.id,
-      orderId: o.id,
-      invoiceNo: o.invoiceNumber || `INV${o.id}`,
-      invoiceNumber: o.invoiceNumber || `INV${o.id}`,
-      source: o.source,
-      totalAmount: o.totalAmount,
-      total: o.totalAmount,
-      paidAmount: o.paidAmount,
-      paid: o.paidAmount,
-      dueAmount: Math.max(0, o.totalAmount - o.paidAmount),
-      due: Math.max(0, o.totalAmount - o.paidAmount),
-      createdAt: o.createdAt,
-      date: new Date(o.createdAt).toISOString().split('T')[0],
-      payments: o.payments,
-      paymentHistory: o.payments,
-    }));
+    return orders
+      .filter((o) => (Number(o.totalAmount) - Number(o.paidAmount)) > 0.01)
+      .map((o) => {
+        const due = Math.max(0, Math.round((Number(o.totalAmount) - Number(o.paidAmount)) * 100) / 100);
+        return {
+          id: o.id,
+          orderId: o.id,
+          invoiceNo: o.invoiceNumber || `INV${o.id}`,
+          invoiceNumber: o.invoiceNumber || `INV${o.id}`,
+          source: o.source,
+          totalAmount: o.totalAmount,
+          total: o.totalAmount,
+          paidAmount: o.paidAmount,
+          paid: o.paidAmount,
+          dueAmount: due,
+          due,
+          createdAt: o.createdAt,
+          date: new Date(o.createdAt).toISOString().split('T')[0],
+          payments: o.payments,
+          paymentHistory: o.payments,
+        };
+      });
   }
 
   /**
@@ -1956,13 +2144,32 @@ export class OrderService {
       }
 
       totalReturnRefund = Math.round(totalReturnRefund * 100) / 100;
+      const returnTimestamp = new Date();
+      const returnId = `RET-${order.id}-${Date.now().toString(36).toUpperCase()}`;
+      const recordedBy = data.recordedBy || user?.name || (user?.userId ? `User #${user.userId}` : 'Cashier');
+      const returnReason = (data.reason || 'Customer Request').trim();
 
-      // 4. Atomic Inventory Restoration: increment ProductVariant.stock
+      // 4. Atomic Inventory Restoration: increment ProductVariant.stock and log in Return Inventory
       for (const item of activeReturnsToProcess) {
         await tx.productVariant.update({
           where: { id: item.variantId },
           data: {
             stock: { increment: item.returnQty },
+          },
+        });
+
+        const originalOrderItem = order.items.find((it) => it.variantId === item.variantId);
+        await tx.returnInventoryItem.create({
+          data: {
+            orderId: order.id,
+            orderItemId: originalOrderItem?.id || null,
+            productId: item.productId || originalOrderItem?.variant?.productId || null,
+            variantId: item.variantId,
+            quantity: item.returnQty,
+            restockedQty: item.returnQty,
+            reason: returnReason,
+            status: 'RESTOCKED',
+            notes: `In-store return processed (${returnId})`,
           },
         });
       }
@@ -2014,11 +2221,6 @@ export class OrderService {
       }
 
       // 6. Build Return Record & Update Order
-      const returnTimestamp = new Date();
-      const returnId = `RET-${order.id}-${Date.now().toString(36).toUpperCase()}`;
-      const recordedBy = data.recordedBy || user?.name || (user?.userId ? `User #${user.userId}` : 'Cashier');
-      const returnReason = (data.reason || 'Customer Request').trim();
-
       const returnRecord: ReturnRecord = {
         returnId,
         returnDate: returnTimestamp.toISOString(),

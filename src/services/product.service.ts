@@ -213,7 +213,7 @@ export class ProductService {
             const wholesalePrice = Math.max(0, Number(v.wholesalePrice) || 0);
             const costPrice = Math.max(0, Number(v.costPrice) || 0);
             const comparePrice = v.comparePrice ? Math.max(0, Number(v.comparePrice)) : null;
-            const stock = Math.max(0, parseInt(String(v.stock || 0), 10) || 0);
+            const stock = sanitizeSafeStock(v.stock);
 
             return {
               size: sanitizeMultiValue(v.size),

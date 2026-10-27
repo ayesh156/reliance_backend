@@ -263,7 +263,16 @@ export class InvoicePdfService {
 
     const custName = order.customerName || order.customer?.name || 'Walk-in Customer';
     const custPhone = order.customerPhone || order.customer?.phone || '-';
-    const custAddr = [order.customer?.address || order.shippingAddress, order.customer?.city].filter(Boolean).join(', ') || '-';
+    const rawAddr = (order.shippingAddress || order.customer?.address || '').trim();
+    const rawCity = (order.city || order.customer?.city || '').trim();
+    let custAddr = '-';
+    if (rawAddr && rawCity) {
+      custAddr = rawAddr.toLowerCase().includes(rawCity.toLowerCase()) ? rawAddr : `${rawAddr}, ${rawCity}`;
+    } else if (rawAddr) {
+      custAddr = rawAddr;
+    } else if (rawCity) {
+      custAddr = rawCity;
+    }
 
     // Clean 3-Column Compact Layout
     const col1X = startX;

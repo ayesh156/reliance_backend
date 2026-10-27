@@ -30,6 +30,7 @@ export const sanitizeSafePrice = (val: any): number => {
 };
 
 export const sanitizeSafeStock = (val: any): number => {
+  if (val === undefined || val === null || val === '') return 0;
   const num = parseInt(String(val), 10);
   return isNaN(num) || num < 0 ? 0 : num;
 };
