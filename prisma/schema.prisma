@@ -65,7 +65,7 @@ model User {
   phone             String?
   password          String     @default("")
   role              Role       @default(STAFF)
-  permissions       Json?
+  permissions       String?    @db.LongText
   active            Boolean    @default(true)
   
   assignedCustomers Customer[] @relation("RepCustomers")
@@ -155,6 +155,7 @@ model Product {
   reviews     Review[]
   images      ProductImage[]
   productionOrders ProductionOrder[]
+  returnInventoryItems ReturnInventoryItem[]
   isFeatured  Boolean          @default(false)
   // ⭐ Soft delete / Archive support: Retains sales order lines while hiding from POS & Catalog
   isActive    Boolean          @default(true)
@@ -185,6 +186,7 @@ model ProductVariant {
   orderItems     OrderItem[]
   salesOrderItems SalesOrderItem[]
   productionOrders ProductionOrder[]
+  returnInventoryItems ReturnInventoryItem[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
@@ -259,12 +261,12 @@ model Order {
   shippingAddress   String?       @db.Text
   city              String?
   province          String?
-  zipCode           String?
   shippingFee       Float         @default(0)
-
   totalAmount       Float
   subtotal          Float         @default(0)
   discount          Float         @default(0)
+  discountType      String        @default("AMOUNT")
+  discountValue     Float         @default(0)
   paidAmount        Float         @default(0)
   settledDueAmount  Float         @default(0)
   dueDate           DateTime?
@@ -286,6 +288,7 @@ model Order {
   items             OrderItem[]
   payments          OrderPayment[]
   salesOrder        SalesOrder?   @relation("SalesOrderInvoice")
+  returnInventoryItems ReturnInventoryItem[]
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 
@@ -298,16 +301,23 @@ model Order {
 }
 
 model OrderItem {
-  id        Int            @id @default(autoincrement())
-  orderId   Int
-  order     Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  variantId Int
-  variant   ProductVariant @relation(fields: [variantId], references: [id])
-  quantity  Int
-  unitPrice Float          @default(0)
-  discount  Float          @default(0)
-  price     Float
-  isReturn  Boolean        @default(false)
+  id              Int            @id @default(autoincrement())
+  orderId         Int
+  order           Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variantId       Int
+  variant         ProductVariant @relation(fields: [variantId], references: [id])
+  quantity        Int
+  unitPrice       Float          @default(0)
+  discount        Float          @default(0)
+  discountType    String         @default("AMOUNT")
+  discountValue   Float          @default(0)
+  price           Float
+  isReturn        Boolean        @default(false)
+  returnReason    String?        @default("UNSOLD")
+  restockedToMain Boolean        @default(false)
+
+  returnInventoryItems ReturnInventoryItem[]
+
   @@map("order_items")
 }
 
@@ -344,6 +354,8 @@ model SalesOrder {
   
   subtotal        Float            @default(0)
   discount        Float            @default(0)
+  discountType    String           @default("AMOUNT")
+  discountValue   Float            @default(0)
   totalAmount     Float            @default(0)
   
   status          SalesOrderStatus @default(PENDING)
@@ -351,7 +363,7 @@ model SalesOrder {
   
   // Return Mode support
   isReturnOrder   Boolean          @default(false)
-
+  
   // Future "Convert to Invoice" linkage
   invoiceId       Int?             @unique
   invoice         Order?           @relation("SalesOrderInvoice", fields: [invoiceId], references: [id])
@@ -370,32 +382,66 @@ model SalesOrder {
 }
 
 model SalesOrderItem {
-  id           Int             @id @default(autoincrement())
-  salesOrderId Int
-  salesOrder   SalesOrder      @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
+  id              Int             @id @default(autoincrement())
+  salesOrderId    Int
+  salesOrder      SalesOrder      @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
   
-  variantId    Int?
-  variant      ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  variantId       Int?
+  variant         ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
   
-  productName  String?
-  variantName  String?
-  sku          String?
-  imageUrl     String?         @db.LongText
+  productName     String?
+  variantName     String?
+  sku             String?
+  imageUrl        String?         @db.LongText
   
-  quantity     Int             @default(1)
-  unitPrice    Float           @default(0)
-  discount     Float           @default(0)
-  totalPrice   Float           @default(0)
-  isReturn     Boolean         @default(false)
+  quantity        Int             @default(1)
+  unitPrice       Float           @default(0)
+  discount        Float           @default(0)
+  discountType    String          @default("AMOUNT")
+  discountValue   Float           @default(0)
+  totalPrice      Float           @default(0)
+  isReturn        Boolean         @default(false)
+  returnReason    String?         @default("UNSOLD")
+  restockedToMain Boolean         @default(false)
   
-  notes        String?
+  notes           String?
   
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
 
   @@index([salesOrderId])
   @@index([variantId])
   @@map("sales_order_items")
+}
+
+// ----------------------------------------------------
+// RETURN INVENTORY MANAGEMENT (Physical Return Stock Ledger)
+// ----------------------------------------------------
+
+model ReturnInventoryItem {
+  id           Int             @id @default(autoincrement())
+  orderId      Int?            @map("order_id")
+  order        Order?          @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  orderItemId  Int?            @map("order_item_id")
+  orderItem    OrderItem?      @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+  productId    Int?            @map("product_id")
+  product      Product?        @relation(fields: [productId], references: [id], onDelete: SetNull)
+  variantId    Int?            @map("variant_id")
+  variant      ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  quantity     Int             @default(0)
+  restockedQty Int             @default(0) @map("restocked_qty")
+  reason       String          @default("UNSOLD") // "UNSOLD" or "DAMAGED"
+  status       String          @default("IN_RETURN_STOCK") // "IN_RETURN_STOCK", "RESTOCKED", "SCRAPPED"
+  notes        String?         @db.Text
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
+
+  @@index([orderId])
+  @@index([productId])
+  @@index([variantId])
+  @@index([status])
+  @@index([reason])
+  @@map("return_inventory")
 }
 
 model Subscriber {
@@ -470,6 +516,9 @@ model RawMaterialItem {
   movements       RawMaterialMovement[] // ⭐ Added relation to track usage, scrap return, and wastage
   productionUsages ProductionMaterialUsage[]
   cutLogs         MaterialCutLog[]
+  materialLogs    MaterialLog[]
+  cutAmount       Float                @default(0) @map("cut_amount")
+  remainingAmount Float                @default(0) @map("remaining_amount")
   // ⭐ Soft delete / Archive support: Retains stock movement ledger and GRN logs
   isActive        Boolean              @default(true)
   createdAt       DateTime             @default(now())
@@ -599,13 +648,16 @@ model ProductionOrder {
   reason            String?                   @db.Text
   notes             String?                   @db.Text
   productionDate    DateTime                  @default(now()) @map("production_date")
-  targetProducts    Json?                     @map("target_products")
+  targetProducts    String?                   @db.LongText @map("target_products")
   lineSentQty       Int?                      @default(0) @map("line_sent_qty")
+  cutQty            Int                       @default(0) @map("cut_qty")
+  sewnQty           Int                       @default(0) @map("sewn_qty")
   sentToWashQty     Int                       @default(0) @map("sent_to_wash_qty")
   washedQty         Int                       @default(0) @map("washed_qty")
   
   materialUsages  ProductionMaterialUsage[]
   cutLogs         MaterialCutLog[]
+  materialLogs    MaterialLog[]
   finishLogs      GarmentFinishLog[]
   activityLogs    BatchActivityLog[]
   
@@ -631,10 +683,13 @@ model ProductionMaterialUsage {
   returnedQty       Float           @default(0) @map("returned_qty")
   returnedScrap     Float?          @default(0) @map("returned_scrap")
   netConsumedQty    Float           @map("net_consumed_qty")
+  cutAmount         Float           @default(0) @map("cut_amount")
+  remainingAmount   Float           @default(0) @map("remaining_amount")
+  processDate       DateTime        @default(now()) @map("process_date")
   unitCost          Float           @default(0) @map("unit_cost")
   returnReason      String?         @map("return_reason") @db.Text
   piecesCount       Int?            @default(1) @map("pieces_count")
-  targetProducts    Json?           @map("target_products")
+  targetProducts    String?         @db.LongText @map("target_products")
   
   createdAt         DateTime        @default(now()) @map("created_at")
   updatedAt         DateTime        @updatedAt @map("updated_at")
@@ -704,4 +759,33 @@ model BatchActivityLog {
   @@index([stage])
   @@index([timestamp])
   @@map("batch_activity_logs")
+}
+
+// ----------------------------------------------------
+// MATERIAL LOGS (Production Fabric & Material Tracking)
+// ----------------------------------------------------
+
+model MaterialLog {
+  id                Int              @id @default(autoincrement())
+  productionOrderId Int?             @map("production_order_id")
+  productionOrder   ProductionOrder? @relation(fields: [productionOrderId], references: [id], onDelete: SetNull)
+  rawMaterialId     Int              @map("raw_material_id")
+  rawMaterial       RawMaterialItem  @relation(fields: [rawMaterialId], references: [id], onDelete: Cascade)
+  
+  cutAmount         Float            @default(0) @map("cut_amount")
+  remainingAmount   Float            @default(0) @map("remaining_amount")
+  wasteAmount       Float            @default(0) @map("waste_amount")
+  unitCost          Float            @default(0) @map("unit_cost")
+  processDate       DateTime         @default(now()) @map("process_date")
+  batchNumber       String           @default("") @map("batch_number")
+  notes             String?          @db.Text
+  loggedByRole      String           @default("STAFF") @map("logged_by_role")
+  
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+
+  @@index([productionOrderId])
+  @@index([rawMaterialId])
+  @@index([processDate])
+  @@map("material_logs")
 }

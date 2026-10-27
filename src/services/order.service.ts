@@ -170,11 +170,8 @@ export class OrderService {
         }
 
         if (isReturnItem) {
-          // ⭐ Return item: Increment product/variant sellable stock back into warehouse
-          await tx.productVariant.update({
-            where: { id: item.variantId },
-            data: { stock: { increment: qty } },
-          });
+          // ⭐ Return item: Staged into dedicated Return Inventory (ReturnInventoryItem)
+          // Do NOT immediately increment main sellable stock.
         } else {
           // Normal sale item: Check availability and decrement inventory
           if (variant.stock < qty) {
@@ -321,6 +318,8 @@ export class OrderService {
           customerPhone: data.customerPhone || null,
           subtotal: Number(data.subtotal) || total,
           discount: sanitizedDiscount,
+          discountType: (data as any).discountType === 'PERCENT' ? 'PERCENT' : 'AMOUNT',
+          discountValue: Number((data as any).discountValue ?? (data as any).discountInput) || 0,
           totalAmount: total,
           paidAmount: isReturnBill ? 0 : paid,
           settledDueAmount: sanitizedSettledDue,
@@ -342,8 +341,12 @@ export class OrderService {
                 quantity: absQty,
                 unitPrice: Number(i.unitPrice) || 0,
                 discount: Number(i.discount) || 0,
+                discountType: (i as any).discountType === 'PERCENT' ? 'PERCENT' : 'AMOUNT',
+                discountValue: Number((i as any).discountValue ?? (i as any).discountInput) || 0,
                 price: isRet ? -absPrice : absPrice,
                 isReturn: isRet,
+                returnReason: (i as any).returnReason || 'UNSOLD',
+                restockedToMain: false,
               };
             }),
           },
@@ -363,6 +366,24 @@ export class OrderService {
           user: { select: { id: true, name: true, role: true } },
         },
       });
+
+      // 3.5. Stage returned items into dedicated Return Inventory ledger
+      for (const createdItem of createdOrder.items) {
+        if (createdItem.isReturn) {
+          await tx.returnInventoryItem.create({
+            data: {
+              orderId: createdOrder.id,
+              orderItemId: createdItem.id,
+              productId: createdItem.variant.productId,
+              variantId: createdItem.variantId,
+              quantity: createdItem.quantity,
+              restockedQty: 0,
+              reason: createdItem.returnReason || 'UNSOLD',
+              status: 'IN_RETURN_STOCK',
+            },
+          });
+        }
+      }
 
       // 4. Return Credit Auto-Deduction & Customer Outstanding Debt Synchronization
       if (data.customerId) {
@@ -890,6 +911,8 @@ export class OrderService {
             address: true,
             city: true,
             outstandingBalance: true,
+            repId: true,
+            rep: { select: { id: true, name: true } },
           },
         },
         payments: {
@@ -1041,12 +1064,17 @@ export class OrderService {
         }
       }
 
-      // 1. Revert previous stock (decrement returns, increment standard items)
+      // 1. Revert previous stock (decrement returns if restocked, increment standard items)
       for (const oldItem of existing.items) {
         if (oldItem.isReturn) {
-          await tx.productVariant.update({
-            where: { id: oldItem.variantId },
-            data: { stock: { decrement: oldItem.quantity } },
+          if (oldItem.restockedToMain) {
+            await tx.productVariant.update({
+              where: { id: oldItem.variantId },
+              data: { stock: { decrement: oldItem.quantity } },
+            });
+          }
+          await tx.returnInventoryItem.deleteMany({
+            where: { orderItemId: oldItem.id },
           });
         } else {
           await tx.productVariant.update({
@@ -1056,7 +1084,7 @@ export class OrderService {
         }
       }
 
-      // 2. Validate and adjust new stock (increment returns, decrement standard items)
+      // 2. Validate and adjust new stock (deduct standard items, stage returns in return inventory)
       for (const newItem of data.items) {
         const isRet = Boolean((newItem as any).isReturn || newItem.quantity < 0);
         const absQty = Math.abs(newItem.quantity);
@@ -1070,10 +1098,7 @@ export class OrderService {
         }
 
         if (isRet) {
-          await tx.productVariant.update({
-            where: { id: newItem.variantId },
-            data: { stock: { increment: absQty } },
-          });
+          // Staged into Return Inventory; do not directly increment variant stock
         } else {
           if (variant.stock < absQty) {
             throw new HttpException(
@@ -1296,6 +1321,8 @@ export class OrderService {
           customerPhone: data.customerPhone || null,
           subtotal: Number(data.subtotal),
           discount: Number(data.discount) || 0,
+          discountType: (data as any).discountType === 'PERCENT' ? 'PERCENT' : 'AMOUNT',
+          discountValue: Number((data as any).discountValue ?? (data as any).discountInput) || 0,
           totalAmount: newTotal,
           paidAmount: newPaid,
           settledDueAmount: newSettledDue,
@@ -1315,8 +1342,12 @@ export class OrderService {
                 quantity: absQty,
                 unitPrice: Number(i.unitPrice) || 0,
                 discount: Number(i.discount) || 0,
+                discountType: (i as any).discountType === 'PERCENT' ? 'PERCENT' : 'AMOUNT',
+                discountValue: Number((i as any).discountValue ?? (i as any).discountInput) || 0,
                 price: isRet ? -absPrice : absPrice,
                 isReturn: isRet,
+                returnReason: (i as any).returnReason || 'UNSOLD',
+                restockedToMain: false,
               };
             }),
           },
@@ -1336,6 +1367,24 @@ export class OrderService {
           user: { select: { id: true, name: true, role: true } },
         },
       });
+
+      // Stage new returned items into dedicated Return Inventory ledger
+      for (const it of updatedOrder.items) {
+        if (it.isReturn) {
+          await tx.returnInventoryItem.create({
+            data: {
+              orderId: updatedOrder.id,
+              orderItemId: it.id,
+              productId: it.variant.productId,
+              variantId: it.variantId,
+              quantity: it.quantity,
+              restockedQty: 0,
+              reason: it.returnReason || 'UNSOLD',
+              status: 'IN_RETURN_STOCK',
+            },
+          });
+        }
+      }
 
       return updatedOrder;
     });
@@ -1388,30 +1437,16 @@ export class OrderService {
         throw new HttpException(404, `Invoice #${orderId} not found`);
       }
 
-      // Role & Ownership Validation
+      // Role & Ownership Validation: REPs are strictly not permitted to delete invoices
       if (currentUser) {
         const userRole = String(currentUser.role || '').toUpperCase();
-        const requestingUserId = currentUser.id ?? currentUser.userId;
-        const isOwner =
-          Number(order.userId) === Number(requestingUserId) ||
-          String(order.userId) === String(requestingUserId) ||
-          (order as any).creatorId === requestingUserId;
-
-        const isWholesale =
-          order.source === OrderSource.POS_WHOLESALE ||
-          order.source === ('POS_WHOLESALE' as any) ||
-          (order as any).orderType === 'WHOLESALE';
-
-        if (userRole === 'ADMIN') {
-          // ADMIN has unrestricted global deletion privileges
-        } else if (userRole === 'REP') {
-          if (!isOwner || !isWholesale) {
-            throw new HttpException(
-              403,
-              'Unauthorized: Representatives can only delete their own wholesale invoices'
-            );
-          }
-        } else {
+        if (userRole === 'REP') {
+          throw new HttpException(
+            403,
+            'Sales Representatives are not permitted to delete invoices'
+          );
+        }
+        if (userRole !== 'ADMIN') {
           throw new HttpException(
             403,
             'Unauthorized: Insufficient permissions to delete invoices'
@@ -1419,18 +1454,51 @@ export class OrderService {
         }
       }
 
-      // 1. Rollback stock
+      // 1. Rollback stock & clean up return items
+      const returnInventoryItems = await tx.returnInventoryItem.findMany({
+        where: { orderId },
+      });
+
       for (const item of order.items) {
-        await tx.productVariant.update({
-          where: { id: item.variantId },
-          data: { stock: { increment: item.quantity } },
-        });
+        if (!item.isReturn) {
+          // Standard sold item: increment stock back into inventory
+          await tx.productVariant.update({
+            where: { id: item.variantId },
+            data: { stock: { increment: item.quantity } },
+          });
+        } else {
+          // Return item: decrement stock if it had been restocked into warehouse inventory
+          const linkedReturn = returnInventoryItems.find(
+            (r) => r.orderItemId === item.id || (r.variantId === item.variantId && r.orderId === orderId)
+          );
+          const restockedQty =
+            linkedReturn?.restockedQty ||
+            (linkedReturn?.status === 'RESTOCKED' || (linkedReturn as any)?.restockDecision === 'RESTOCKED'
+              ? item.quantity
+              : 0);
+
+          if (restockedQty > 0) {
+            await tx.productVariant.update({
+              where: { id: item.variantId },
+              data: { stock: { decrement: restockedQty } },
+            });
+          }
+        }
       }
 
-      // 2. Cancel remaining credit and reverse any settled due from customer outstanding balance
+      // Clean up linked ReturnInventoryItem records
+      await tx.returnInventoryItem.deleteMany({
+        where: { orderId },
+      });
+
+      // 2. Accurately update customer outstanding debt:
+      // Reverses remaining unpaid credit due (-creditDue), reverses settled due (+settledDue),
+      // and reverses return credit applied (+returnCredit)
       const creditDue = Math.max(0, order.totalAmount - order.paidAmount);
       const settledDue = Number((order as any).settledDueAmount || 0);
-      const adjustment = -creditDue + settledDue;
+      const returnCredit = Number(order.returnCreditApplied || 0) || (order.totalAmount < 0 ? Math.abs(order.totalAmount) : 0);
+      const adjustment = -creditDue + settledDue + returnCredit;
+
       if (order.customerId && adjustment !== 0) {
         await tx.customer.update({
           where: { id: order.customerId },
@@ -1527,6 +1595,9 @@ export class OrderService {
       where: { id: Number(orderId) },
       include: {
         customer: true,
+        payments: {
+          orderBy: { createdAt: 'asc' },
+        },
         items: {
           include: {
             variant: {
@@ -1706,20 +1777,41 @@ export class OrderService {
       orderBy: { createdAt: 'desc' },
       select: {
         id: true,
+        invoiceNumber: true,
+        source: true,
         totalAmount: true,
         paidAmount: true,
         createdAt: true,
+        payments: {
+          orderBy: { createdAt: 'asc' },
+          select: {
+            id: true,
+            amount: true,
+            method: true,
+            reference: true,
+            createdAt: true,
+          },
+        },
       },
       take: 100,
     });
 
     return orders.map((o) => ({
       id: o.id,
-      invoiceNo: `INV${o.id}`,
+      orderId: o.id,
+      invoiceNo: o.invoiceNumber || `INV${o.id}`,
+      invoiceNumber: o.invoiceNumber || `INV${o.id}`,
+      source: o.source,
+      totalAmount: o.totalAmount,
       total: o.totalAmount,
+      paidAmount: o.paidAmount,
       paid: o.paidAmount,
+      dueAmount: Math.max(0, o.totalAmount - o.paidAmount),
       due: Math.max(0, o.totalAmount - o.paidAmount),
+      createdAt: o.createdAt,
       date: new Date(o.createdAt).toISOString().split('T')[0],
+      payments: o.payments,
+      paymentHistory: o.payments,
     }));
   }
 
@@ -2002,6 +2094,148 @@ export class OrderService {
     }
 
     return result;
+  }
+
+  /**
+   * ----------------------------------------------------
+   * RETURN INVENTORY MANAGEMENT PIPELINE
+   * ----------------------------------------------------
+   */
+
+  /**
+   * Retrieve all items currently logged in the return inventory ledger
+   */
+  async getReturnInventory() {
+    const items = await prisma.returnInventoryItem.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: {
+        order: {
+          select: {
+            id: true,
+            invoiceNumber: true,
+            customerName: true,
+            customerPhone: true,
+            createdAt: true,
+          },
+        },
+        product: {
+          select: {
+            id: true,
+            name: true,
+            images: { select: { imageUrl: true }, take: 1 },
+          },
+        },
+        variant: {
+          select: {
+            id: true,
+            sku: true,
+            size: true,
+            color: true,
+            stock: true,
+            wholesalePrice: true,
+            retailPrice: true,
+          },
+        },
+      },
+    });
+
+    return items.map((item) => ({
+      ...item,
+      order: item.order
+        ? {
+            ...item.order,
+            orderNumber: item.order.invoiceNumber || `INV-${item.order.id}`,
+          }
+        : null,
+    }));
+  }
+
+  /**
+   * Move eligible items from Return Inventory back into sellable ProductVariant.stock
+   * Safely handles missing payload properties and executes in a transactional block.
+   */
+  async restockReturnItem(returnItemId: number, restockQty?: number) {
+    return prisma.$transaction(async (tx) => {
+      const returnItem = await tx.returnInventoryItem.findUnique({
+        where: { id: returnItemId },
+        include: { variant: true, orderItem: true },
+      });
+
+      if (!returnItem) {
+        throw new HttpException(404, 'Return inventory item not found');
+      }
+
+      const availableToRestock = Math.max(0, (returnItem.quantity || 0) - (returnItem.restockedQty || 0));
+      if (availableToRestock <= 0) {
+        throw new HttpException(400, 'This return item has already been fully restocked to main inventory');
+      }
+
+      const qtyToApply = restockQty && restockQty > 0
+        ? Math.min(availableToRestock, restockQty)
+        : availableToRestock;
+
+      // 1. Increment product variant main sellable stock if variant exists in DB
+      if (returnItem.variantId) {
+        const variantExists = await tx.productVariant.findUnique({
+          where: { id: returnItem.variantId },
+          select: { id: true },
+        });
+        if (variantExists) {
+          await tx.productVariant.update({
+            where: { id: returnItem.variantId },
+            data: { stock: { increment: qtyToApply } },
+          });
+        }
+      }
+
+      const newRestockedQty = (returnItem.restockedQty || 0) + qtyToApply;
+      const isFullyRestocked = newRestockedQty >= returnItem.quantity;
+
+      // 2. Update return inventory ledger record with valid schema select fields
+      const updated = await tx.returnInventoryItem.update({
+        where: { id: returnItemId },
+        data: {
+          restockedQty: newRestockedQty,
+          status: isFullyRestocked ? 'RESTOCKED' : 'PARTIALLY_RESTOCKED',
+        },
+        include: {
+          product: {
+            select: {
+              id: true,
+              name: true,
+              images: { select: { imageUrl: true }, take: 1 },
+            },
+          },
+          variant: true,
+          order: {
+            select: {
+              id: true,
+              invoiceNumber: true,
+              customerName: true,
+              customerPhone: true,
+            },
+          },
+        },
+      });
+
+      // 3. If linked to an order item and fully restocked, mark restockedToMain: true
+      if (returnItem.orderItemId && isFullyRestocked) {
+        await tx.orderItem.update({
+          where: { id: returnItem.orderItemId },
+          data: { restockedToMain: true },
+        });
+      }
+
+      return {
+        ...updated,
+        order: updated.order
+          ? {
+              ...updated.order,
+              orderNumber: updated.order.invoiceNumber || `INV-${updated.order.id}`,
+            }
+          : null,
+      };
+    });
   }
 }
 

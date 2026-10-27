@@ -1,4 +1,4 @@
-import { Prisma, RawMaterialUnit } from '@prisma/client';
+import { Prisma, RawMaterialUnit, MaterialMovementType } from '@prisma/client';
 import { prisma } from '../lib/prisma.ts';
 import { HttpException } from '../middleware/error.middleware.ts';
 
@@ -147,7 +147,7 @@ export class RawMaterialItemService {
     }
 
     try {
-      return await prisma.rawMaterialItem.create({
+      const createdItem = await prisma.rawMaterialItem.create({
         data: {
           name: trimmedName,
           code: finalCode,
@@ -158,6 +158,26 @@ export class RawMaterialItemService {
           unitCostAverage: Number(data.unitCostAverage) || 0,
         },
       });
+
+      // If initial opening stock was provided (> 0), record an initial stock movement for complete auditability
+      if (createdItem.currentStock > 0) {
+        try {
+          await prisma.rawMaterialMovement.create({
+            data: {
+              rawMaterialItemId: createdItem.id,
+              movementType: MaterialMovementType.STOCK_IN,
+              quantity: createdItem.currentStock,
+              previousStock: 0,
+              newStock: createdItem.currentStock,
+              reference: 'Initial opening stock allocation on creation',
+            },
+          });
+        } catch (logErr) {
+          console.warn('Failed to log initial opening stock movement:', logErr);
+        }
+      }
+
+      return createdItem;
     } catch (err: any) {
       // Catch Prisma unique constraint collision (P2002) as a clean 409 conflict
       if (err.code === 'P2002') {

@@ -105,6 +105,34 @@ router.post(
   productionController.sendToLine
 );
 
+// Sewing Line: Log daily pieces sewn
+router.post(
+  '/:id/log-sewn',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.logDailySewn
+);
+router.post(
+  '/batches/:id/log-sewn',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  productionController.logDailySewn
+);
+
+// Sewing Line: Rollback stage back to Cutting
+router.delete(
+  '/:id/line',
+  verifyToken,
+  requireRole('ADMIN'),
+  productionController.rollbackLine
+);
+router.delete(
+  '/batches/:id/line',
+  verifyToken,
+  requireRole('ADMIN'),
+  productionController.rollbackLine
+);
+
 // End-of-Day Workflow: Send batch to decoupled WASHING stage
 router.post(
   '/:id/send-to-wash',
@@ -117,6 +145,20 @@ router.post(
   verifyToken,
   requireRole('ADMIN', 'STAFF'),
   productionController.sendToWash
+);
+
+// Washing: Rollback stage back to Sewing Line
+router.delete(
+  '/:id/wash',
+  verifyToken,
+  requireRole('ADMIN'),
+  productionController.rollbackWash
+);
+router.delete(
+  '/batches/:id/wash',
+  verifyToken,
+  requireRole('ADMIN'),
+  productionController.rollbackWash
 );
 
 // Stage 4: Log Washed Items & Partial Sellable Stock Sync

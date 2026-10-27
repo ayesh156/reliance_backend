@@ -28,6 +28,16 @@ router.get('/orders/:id/pdf', orderController.downloadInvoicePdf);
 router.get('/', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.getInvoices);
 router.get('/invoices', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.getInvoices);
 router.get('/orders', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.getInvoices);
+/**
+ * Dedicated Return Inventory Pipeline Routes (strictly ABOVE /:id)
+ * Accessible to ADMIN, STAFF, CASHIER, and REP.
+ */
+router.get('/return-inventory', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.getReturnInventory);
+router.get('/orders/return-inventory', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.getReturnInventory);
+router.get('/invoices/return-inventory', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.getReturnInventory);
+router.post('/return-inventory/:id/restock', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.restockReturnItem);
+router.post('/orders/return-inventory/:id/restock', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.restockReturnItem);
+router.post('/invoices/return-inventory/:id/restock', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.restockReturnItem);
 
 router.get('/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.getInvoiceById);
 router.get('/invoices/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.getInvoiceById);
@@ -60,9 +70,9 @@ router.patch('/invoices/:id/dispatch', verifyToken, requireRole('ADMIN', 'STAFF'
 router.patch('/orders/:id/dispatch', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.toggleInvoiceDispatch);
 router.patch('/:id/dispatch', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), orderController.toggleInvoiceDispatch);
 
-// Restrict destructive invoice deletion: ADMIN has global access; REP is scoped to their own wholesale invoices
-router.delete('/invoices/:id', verifyToken, requireRole('ADMIN', 'REP'), orderController.deleteInvoiceOrder);
-router.delete('/orders/:id', verifyToken, requireRole('ADMIN', 'REP'), orderController.deleteInvoiceOrder);
-router.delete('/:id', verifyToken, requireRole('ADMIN', 'REP'), orderController.deleteInvoiceOrder);
+// Restrict destructive invoice deletion: ADMIN only (REP is forbidden)
+router.delete('/invoices/:id', verifyToken, requireRole('ADMIN'), orderController.deleteInvoiceOrder);
+router.delete('/orders/:id', verifyToken, requireRole('ADMIN'), orderController.deleteInvoiceOrder);
+router.delete('/:id', verifyToken, requireRole('ADMIN'), orderController.deleteInvoiceOrder);
 
 export default router;

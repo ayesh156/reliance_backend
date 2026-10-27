@@ -197,10 +197,16 @@ export const deleteInvoiceOrder = async (req: Request, res: Response, next: Next
     if (!user) {
       return res.status(401).json({ error: 'Authenticated user session invalid' });
     }
+
+    const userRole = String(user?.role || '').toUpperCase();
+    if (userRole === 'REP') {
+      return res.status(403).json({ error: 'Sales Representatives are not permitted to delete invoices' });
+    }
+
     const currentUser = {
       id: Number(user.userId ?? user.id),
       userId: Number(user.userId ?? user.id),
-      role: String(user.role || ''),
+      role: userRole,
       name: user.name,
       email: user.email,
     };
@@ -362,6 +368,43 @@ export const toggleInvoiceDispatch = async (req: Request, res: Response, next: N
     const result = await orderService.toggleInvoiceDispatch(id, { isDispatched }, user);
     sendSuccess(res, result);
   } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * Retrieve all items in the Return Inventory pipeline
+ * GET /api/orders/return-inventory
+ */
+export const getReturnInventory = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const items = await orderService.getReturnInventory();
+    sendSuccess(res, items);
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * Move returned garments from Return Inventory back into sellable ProductVariant.stock
+ * POST /api/orders/return-inventory/:id/restock
+ */
+export const restockReturnItem = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const id = parseInt(String(rawId), 10);
+    if (!id || isNaN(id) || id <= 0) {
+      return res.status(400).json({ success: false, error: 'Valid positive integer return inventory item ID is required' });
+    }
+    const quantity = req.body?.quantity !== undefined && req.body?.quantity !== null && req.body?.quantity !== ''
+      ? Math.max(1, parseInt(String(req.body.quantity), 10) || 1)
+      : undefined;
+    const result = await orderService.restockReturnItem(id, quantity);
+    sendSuccess(res, result);
+  } catch (err: any) {
+    if (err && err.status && typeof err.status === 'number') {
+      return res.status(err.status).json({ success: false, error: err.message, message: err.message });
+    }
     next(err);
   }
 };

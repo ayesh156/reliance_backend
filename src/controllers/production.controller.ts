@@ -309,7 +309,7 @@ export class ProductionController {
 
   /**
    * DELETE /api/production/:id
-   * Roll back and delete a production order
+   * Roll back and delete a production order, or roll back a specific stage if ?stage=LINE or ?stage=WASH
    */
   async delete(req: Request, res: Response, next: NextFunction) {
     try {
@@ -322,6 +322,16 @@ export class ProductionController {
         return res.status(400).json({ error: 'Valid integer ID is required' });
       }
       const userId = (req as any).user?.id;
+      const stage = String(req.query.stage || '').toUpperCase();
+
+      if (stage === 'LINE') {
+        const result = await productionService.rollbackLineStage(id, userId, userRole);
+        return sendSuccess(res, result);
+      } else if (stage === 'WASH') {
+        const result = await productionService.rollbackWashStage(id, userId, userRole);
+        return sendSuccess(res, result);
+      }
+
       const result = await productionService.deleteProductionOrder(id, userId);
       return sendSuccess(res, result);
     } catch (err) {
@@ -446,6 +456,62 @@ export class ProductionController {
       const limit = req.query.limit ? Number(req.query.limit) : undefined;
       const result = await productionService.getWashBatches({ search, page, limit });
       return sendSuccess(res, result);
+    } catch (err) {
+      next(err);
+    }
+  }
+  /**
+   * POST /api/production/:id/log-sewn
+   * Log daily pieces sewn on the Sewing Line
+   */
+  async logDailySewn(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: 'Valid integer ID is required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const order = await productionService.logDailySewn(id, req.body, userId, userRole);
+      return sendSuccess(res, order);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * DELETE /api/production/:id/line
+   * Reset/rollback Sewing Line stage progress back to Cutting
+   */
+  async rollbackLine(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: 'Valid integer ID is required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const order = await productionService.rollbackLineStage(id, userId, userRole);
+      return sendSuccess(res, order);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * DELETE /api/production/:id/wash
+   * Reset/rollback Washing stage progress back to Sewing Line
+   */
+  async rollbackWash(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: 'Valid integer ID is required' });
+      }
+      const userId = (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const order = await productionService.rollbackWashStage(id, userId, userRole);
+      return sendSuccess(res, order);
     } catch (err) {
       next(err);
     }

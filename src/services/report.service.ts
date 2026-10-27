@@ -219,8 +219,27 @@ export class ReportService {
       where: whereClause,
       orderBy: { createdAt: 'desc' },
       include: {
-        customer: { select: { id: true, name: true, phone: true } },
-        items: { select: { id: true, quantity: true, price: true } },
+        customer: { select: { id: true, name: true, phone: true, address: true, city: true } },
+        items: {
+          select: {
+            id: true,
+            quantity: true,
+            price: true,
+            variant: {
+              select: {
+                id: true,
+                size: true,
+                color: true,
+                sku: true,
+                product: { select: { id: true, name: true } },
+              },
+            },
+          },
+        },
+        payments: {
+          select: { id: true, method: true, amount: true },
+        },
+        user: { select: { id: true, name: true, role: true } },
       },
     });
 
@@ -265,19 +284,57 @@ export class ReportService {
 
       const itemCount = order.items.reduce((s, it) => s + it.quantity, 0);
 
+      const customerAddr = order.customer?.address || (order as any).shippingAddress || [order.customer?.address, order.customer?.city].filter(Boolean).join(', ') || '-';
+
+      let orderReturns = 0;
+      if (order.notes && order.notes.includes('returns')) {
+        const parsed = parseOrderStructuredNotes(order.notes);
+        if (Array.isArray(parsed.returns)) {
+          for (const ret of parsed.returns) {
+            orderReturns += Number(ret.totalReturnRefund || 0);
+          }
+        }
+      }
+
+      const itemsDetail = (order.items || [])
+        .map((it: any) => {
+          const prodName = it.variant?.product?.name || 'Item';
+          const specs = [it.variant?.size, it.variant?.color].filter(Boolean).join('/');
+          const specLabel = specs ? ` (${specs})` : '';
+          return `${prodName}${specLabel} x ${it.quantity}`;
+        })
+        .join('; ');
+
+      const paymentMethodsList = (order.payments && order.payments.length > 0)
+        ? Array.from(new Set(order.payments.map((p: any) => p.method))).join(', ')
+        : rawMethod;
+
+      const orderType = order.source
+        ? (order.source.toUpperCase().includes('WHOLESALE') ? 'Wholesale' : order.source.toUpperCase().includes('RETAIL') ? 'Retail' : order.source)
+        : 'Retail';
+
       return {
         id: order.id,
         invoiceNumber: order.invoiceNumber || `INV${order.id}`,
         createdAt: order.createdAt.toISOString(),
         customerName: order.customer?.name || order.customerName || 'Walk-in Customer',
         customerPhone: order.customer?.phone || order.customerPhone || '-',
+        customerAddress: customerAddr,
+        customerCity: order.customer?.city || '-',
+        customer: order.customer,
         source: order.source,
+        orderType,
+        itemsDetail: itemsDetail || `${itemCount} items`,
         subtotal: Math.round(sub * 100) / 100,
         discount: Math.round(disc * 100) / 100,
+        discountType: (order as any).discountType || 'FIXED',
+        returnedAmount: Math.round(orderReturns * 100) / 100,
         totalAmount: Math.round(total * 100) / 100,
         paidAmount: Math.round(paid * 100) / 100,
         dueAmount: due,
         paymentMethod: rawMethod,
+        paymentMethods: paymentMethodsList,
+        salesRep: order.user?.name || '-',
         status: order.status,
         itemCount,
       };
@@ -655,7 +712,10 @@ export class ReportService {
 
   /**
    * 5. RAW MATERIALS & FABRIC LEDGER REPORT
-   * Current fabric warehouse balances, weighted average cost valuation, and scrap/wastage aggregates.
+  /**
+   * 5. RAW MATERIALS & PRODUCTION FABRIC TRACKING REPORT
+   * Aggregates warehouse inventory, total cut amount vs remaining balance,
+   * weighted average cost valuation, and scrap/wastage logs dynamically filtered by date range.
    */
   async getMaterialsReport(dateFilter: DateFilterResult) {
     const { startDate, endDate } = dateFilter;
@@ -663,49 +723,92 @@ export class ReportService {
     const materials = await prisma.rawMaterialItem.findMany({
       where: {
         isActive: true,
-        OR: [
-          { createdAt: { gte: startDate, lte: endDate } },
-          { updatedAt: { gte: startDate, lte: endDate } },
-          {
-            movements: {
-              some: {
-                createdAt: { gte: startDate, lte: endDate },
-              },
-            },
-          },
-        ],
       },
       orderBy: { name: 'asc' },
     });
 
-    // Fetch scrap and damage movements recorded in the period
-    const movements = await prisma.rawMaterialMovement.findMany({
-      where: {
-        createdAt: { gte: startDate, lte: endDate },
-      },
-    });
+    // Fetch movements, MaterialLogs, cutLogs, and usages within the date filter
+    const [movements, materialLogs, cutLogs, materialUsages] = await Promise.all([
+      prisma.rawMaterialMovement.findMany({
+        where: {
+          createdAt: { gte: startDate, lte: endDate },
+        },
+      }),
+      prisma.materialLog.findMany({
+        where: {
+          processDate: { gte: startDate, lte: endDate },
+        },
+      }),
+      prisma.materialCutLog.findMany({
+        where: {
+          cutDate: { gte: startDate, lte: endDate },
+        },
+      }),
+      prisma.productionMaterialUsage.findMany({
+        where: {
+          OR: [
+            { processDate: { gte: startDate, lte: endDate } },
+            { createdAt: { gte: startDate, lte: endDate } },
+          ],
+        },
+      }),
+    ]);
 
     let totalMaterials = materials.length;
     let totalStockUnits = 0;
     let totalValuation = 0;
     let lowStockCount = 0;
+    let totalCutAmount = 0;
+    let totalRemainingAmount = 0;
+    let totalWasteAmount = 0;
     let periodScrapQty = 0;
     let periodDamageWasteQty = 0;
     let periodScrapValuation = 0;
 
-    // Movement maps
+    // Movement & Cut aggregation maps per material ID
     const materialScrapMap = new Map<number, number>();
-    const materialUsageMap = new Map<number, number>();
+    const materialCutMap = new Map<number, number>();
+    const materialWasteMap = new Map<number, number>();
 
+    // 1. Process movement logs
     for (const m of movements) {
       if (m.movementType === 'SCRAP_RETURN') {
         periodScrapQty += m.quantity;
         materialScrapMap.set(m.rawMaterialItemId, (materialScrapMap.get(m.rawMaterialItemId) || 0) + m.quantity);
       } else if (m.movementType === 'DAMAGE_WASTE') {
         periodDamageWasteQty += m.quantity;
-        materialScrapMap.set(m.rawMaterialItemId, (materialScrapMap.get(m.rawMaterialItemId) || 0) + m.quantity);
+        materialWasteMap.set(m.rawMaterialItemId, (materialWasteMap.get(m.rawMaterialItemId) || 0) + m.quantity);
       } else if (m.movementType === 'PRODUCTION_USE') {
-        materialUsageMap.set(m.rawMaterialItemId, (materialUsageMap.get(m.rawMaterialItemId) || 0) + m.quantity);
+        materialCutMap.set(m.rawMaterialItemId, (materialCutMap.get(m.rawMaterialItemId) || 0) + m.quantity);
+      }
+    }
+
+    // 2. Process MaterialLog entries
+    for (const ml of materialLogs) {
+      if (ml.cutAmount > 0) {
+        materialCutMap.set(ml.rawMaterialId, (materialCutMap.get(ml.rawMaterialId) || 0) + ml.cutAmount);
+      }
+      if (ml.wasteAmount > 0) {
+        materialWasteMap.set(ml.rawMaterialId, (materialWasteMap.get(ml.rawMaterialId) || 0) + ml.wasteAmount);
+      }
+    }
+
+    // 3. Process MaterialCutLog entries
+    for (const cl of cutLogs) {
+      if (cl.quantityCut > 0) {
+        materialCutMap.set(cl.rawMaterialId, (materialCutMap.get(cl.rawMaterialId) || 0) + cl.quantityCut);
+      }
+    }
+
+    // 4. Process ProductionMaterialUsage entries
+    for (const mu of materialUsages) {
+      const cut = mu.cutAmount > 0 ? mu.cutAmount : Number(mu.netConsumedQty || 0);
+      if (cut > 0) {
+        materialCutMap.set(mu.rawMaterialId, (materialCutMap.get(mu.rawMaterialId) || 0) + cut);
+      }
+      if (mu.returnedQty > 0 || (mu.returnedScrap && mu.returnedScrap > 0)) {
+        const scrap = Number(mu.returnedQty || 0) + Number(mu.returnedScrap || 0);
+        materialScrapMap.set(mu.rawMaterialId, (materialScrapMap.get(mu.rawMaterialId) || 0) + scrap);
       }
     }
 
@@ -714,13 +817,20 @@ export class ReportService {
       const unitCost = Number(mat.unitCostAverage || 0);
       const val = stock * unitCost;
 
+      const cutForMat = materialCutMap.get(mat.id) || 0;
+      const scrapForMat = materialScrapMap.get(mat.id) || 0;
+      const wasteForMat = (materialWasteMap.get(mat.id) || 0) + scrapForMat;
+      const remainingForMat = stock;
+
       totalStockUnits += stock;
       totalValuation += val;
+      totalCutAmount += cutForMat;
+      totalRemainingAmount += remainingForMat;
+      totalWasteAmount += wasteForMat;
 
       const isLow = stock <= mat.alertThreshold;
       if (isLow) lowStockCount += 1;
 
-      const scrapForMat = materialScrapMap.get(mat.id) || 0;
       periodScrapValuation += scrapForMat * unitCost;
 
       return {
@@ -732,7 +842,10 @@ export class ReportService {
         alertThreshold: mat.alertThreshold,
         unitCostAverage: Math.round(unitCost * 100) / 100,
         totalValuation: Math.round(val * 100) / 100,
-        periodUsage: Math.round((materialUsageMap.get(mat.id) || 0) * 100) / 100,
+        cutAmount: Math.round(cutForMat * 100) / 100,
+        remainingAmount: Math.round(remainingForMat * 100) / 100,
+        wasteAmount: Math.round(wasteForMat * 100) / 100,
+        periodUsage: Math.round(cutForMat * 100) / 100,
         periodScrap: Math.round(scrapForMat * 100) / 100,
         status: isLow ? ('Low Stock' as const) : ('Optimal' as const),
       };
@@ -745,6 +858,9 @@ export class ReportService {
         totalMaterials,
         totalStockUnits: Math.round(totalStockUnits * 100) / 100,
         totalValuation: Math.round(totalValuation * 100) / 100,
+        totalCutAmount: Math.round(totalCutAmount * 100) / 100,
+        totalRemainingAmount: Math.round(totalRemainingAmount * 100) / 100,
+        totalWasteAmount: Math.round(totalWasteAmount * 100) / 100,
         lowStockCount,
         periodScrapQty: Math.round(periodScrapQty * 100) / 100,
         periodDamageWasteQty: Math.round(periodDamageWasteQty * 100) / 100,

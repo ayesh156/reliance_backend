@@ -53,15 +53,6 @@ export class InvoicePdfService {
     const tendered = order.tenderedAmount !== undefined 
       ? Number(order.tenderedAmount) 
       : Number(order.paidAmount || 0);
-    const paidAmount = order.paidAmount !== undefined 
-      ? Number(order.paidAmount) 
-      : Math.min(total, tendered);
-    const settledDue = Number(order.settledDueAmount || 0);
-    const remainingChange = Math.max(0, Math.round((tendered - paidAmount - settledDue) * 100) / 100);
-    const balanceDue = Math.max(0, Math.round((total - paidAmount) * 100) / 100);
-    const discountVal = Number(order.discountAmount ?? order.discount ?? 0);
-    const subtotalVal = Number(order.subtotal || (total + discountVal) || 0);
-
     const isWholesale = order.source === 'POS_WHOLESALE' || order.orderType === 'WHOLESALE';
     const paymentMethodLabel = order.paymentMethod 
       ? order.paymentMethod.toUpperCase() 
@@ -69,7 +60,56 @@ export class InvoicePdfService {
 
     const invoiceTitle = isWholesale ? 'WHOLESALE INVOICE' : 'INVOICE';
 
+    // Extract itemized payments from order.payments or splits
+    interface PdfPaymentHistoryEntry {
+      dateTimeStr: string;
+      method: string;
+      amount: number;
+      reference?: string;
+    }
+    const pdfPayments: PdfPaymentHistoryEntry[] = [];
+    if (Array.isArray(order.payments) && order.payments.length > 0) {
+      order.payments.forEach((p: any) => {
+        const d = p.paymentDate || p.createdAt || order.createdAt;
+        const dateStr = d ? new Date(d).toISOString().slice(0, 16).replace('T', ' ') : '-';
+        pdfPayments.push({
+          dateTimeStr: dateStr,
+          method: String(p.method || 'CASH').toUpperCase(),
+          amount: Number(p.amount) || 0,
+          reference: p.reference || p.transactionId || (p.notes ? String(p.notes) : undefined),
+        });
+      });
+    }
+
     // ⭐ Enterprise Credit Synchronization: Prevents Double-Counting on PDF Re-print
+    const rawPaid = Number(order.paidAmount);
+    const paidAmount = (!isNaN(rawPaid))
+      ? (paymentMethodLabel.includes('CREDIT') && pdfPayments.length === 0 && rawPaid === 0 ? 0 : rawPaid)
+      : (paymentMethodLabel.includes('CREDIT') ? 0 : Math.min(total, tendered));
+
+    if (pdfPayments.length === 0 && paidAmount > 0) {
+      const dStr = order.createdAt ? new Date(order.createdAt).toISOString().slice(0, 16).replace('T', ' ') : '-';
+      pdfPayments.push({
+        dateTimeStr: dStr,
+        method: paymentMethodLabel.includes('CREDIT') ? 'CASH' : paymentMethodLabel,
+        amount: paidAmount,
+      });
+    }
+
+    const settledDue = Number(order.settledDueAmount || 0);
+    const remainingChange = Math.max(0, Math.round((tendered - paidAmount - settledDue) * 100) / 100);
+    const balanceDue = Math.max(0, Math.round((total - paidAmount) * 100) / 100);
+    const discountVal = Number(order.discountAmount ?? order.discount ?? 0);
+    const subtotalVal = Number(order.subtotal || (total + discountVal) || 0);
+
+    const isPercentDiscount = order.discountType === 'PERCENT' || (!order.discountType && Number(order.discountRate) > 0);
+    const rawDiscountVal = Number(order.discountValue ?? order.discountRate ?? 0);
+    const computedPercent = subtotalVal > 0 ? (discountVal / subtotalVal) * 100 : 0;
+    const displayPercent = rawDiscountVal > 0 ? rawDiscountVal : Math.round(computedPercent * 10) / 10;
+    const discountDisplay = isPercentDiscount && displayPercent > 0
+      ? `Discount (${displayPercent}%):`
+      : 'Discount (Rs.):';
+
     const isCreditOrder = paymentMethodLabel.includes('CREDIT') || balanceDue > 0;
     const currentBillCredit = isCreditOrder ? balanceDue : 0;
     
@@ -153,19 +193,7 @@ export class InvoicePdfService {
       ? Number(order.originalTotalAmount)
       : (total + totalReturnRefund);
 
-    const isFlatDiscount = order.discountType === 'FIXED';
-    const discountPercent = !isFlatDiscount
-      ? (Number(order.discountRate) || (subtotalVal > 0 ? ((discountVal / subtotalVal) * 100) : 0))
-      : 0;
 
-    let discountDisplay = 'Discount:';
-    if (discountVal > 0) {
-      if (discountPercent > 0) {
-        discountDisplay = `Discount (${discountPercent.toFixed(1).replace(/\.0$/, '')}%):`;
-      } else {
-        discountDisplay = 'Discount:';
-      }
-    }
 
     // Margins calibrated to 18mm Top/Bottom (51pt), 15mm Left/Right (42.5pt)
     const startX = 42.5; 
@@ -233,10 +261,25 @@ export class InvoicePdfService {
     doc.fontSize(8).font('Helvetica-Bold').fillColor('#000000').text('BILLED TO', startX, customerTop, { characterSpacing: 0.8 });
     doc.moveTo(startX, customerTop + 10).lineTo(startX + 50, customerTop + 10).lineWidth(1.2).strokeColor('#000000').stroke();
 
-    doc.fontSize(10.5).font('Helvetica-Bold').text(order.customerName || 'Walk-in Customer', startX, customerTop + 15);
-    doc.fontSize(9).font('Helvetica').fillColor('#000000');
-    doc.text(order.customer?.address || order.shippingAddress || '-', startX, customerTop + 28);
-    doc.font('Helvetica-Bold').text('Contact: ', startX, customerTop + 40, { continued: true }).font('Helvetica').text(order.customerPhone || order.customer?.phone || '-');
+    const custName = order.customerName || order.customer?.name || 'Walk-in Customer';
+    const custPhone = order.customerPhone || order.customer?.phone || '-';
+    const custAddr = [order.customer?.address || order.shippingAddress, order.customer?.city].filter(Boolean).join(', ') || '-';
+
+    // Clean 3-Column Compact Layout
+    const col1X = startX;
+    const col2X = startX + 155;
+    const col3X = startX + 275;
+    const labelY = customerTop + 14;
+    const valY = customerTop + 23;
+
+    doc.fontSize(6.5).font('Helvetica-Bold').fillColor('#666666').text('CUSTOMER NAME', col1X, labelY);
+    doc.fontSize(9.5).font('Helvetica-Bold').fillColor('#000000').text(custName, col1X, valY, { width: 145 });
+
+    doc.fontSize(6.5).font('Helvetica-Bold').fillColor('#666666').text('CONTACT PHONE', col2X, labelY);
+    doc.fontSize(8.5).font('Helvetica').fillColor('#000000').text(custPhone, col2X, valY, { width: 110 });
+
+    doc.fontSize(6.5).font('Helvetica-Bold').fillColor('#666666').text('ADDRESS / CITY', col3X, labelY);
+    doc.fontSize(8.5).font('Helvetica').fillColor('#000000').text(custAddr, col3X, valY, { width: 155 });
 
     // Clean user note text and split payment details for PDF
     let displayPdfNote = '';
@@ -516,8 +559,8 @@ export class InvoicePdfService {
       });
     }
 
-    // Total Due (Current Bill) / Net Total Due (After Returns): Solid 1.2pt Top, Solid 1.8pt Bottom
-    const totalDueLabel = hasReturns ? 'Net Total Due (After Returns)' : 'Total Due (Current Bill)';
+    // 3. Net Bill Total: Solid 1.2pt Top, Solid 1.8pt Bottom
+    const totalDueLabel = hasReturns ? 'Net Bill Total (After Returns)' : 'Net Bill Total';
     doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
     curY += 4;
     renderSummaryRow(totalDueLabel, `Rs ${total.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
@@ -530,45 +573,63 @@ export class InvoicePdfService {
     doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.8).strokeColor('#000000').stroke();
     curY += 5;
 
-    // 2. Tendered & Payment Breakdown (shown when customer tendered/paid cash or payment)
-    if (tendered > 0 || paidAmount > 0) {
-      doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(0.75).strokeColor('#888888').dash(2, { space: 2 }).stroke().undash();
-      curY += 4;
+    // 4. Paid Amount & Itemized Payment Breakdown
+    doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(0.75).strokeColor('#888888').dash(2, { space: 2 }).stroke().undash();
+    curY += 4;
 
-      renderSummaryRow(`Customer Tendered (${paymentMethodLabel})`, `Rs ${tendered.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
-        isBold: true,
-        fontSize: 8.8,
-        labelColor: '#000000',
-        valColor: '#000000'
+    renderSummaryRow('Paid Amount (Current Bill)', `Rs ${paidAmount.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+      isBold: true,
+      fontSize: 9,
+      labelColor: '#000000',
+      valColor: '#000000'
+    });
+
+    // Itemized payments
+    if (pdfPayments.length > 0) {
+      pdfPayments.forEach((p) => {
+        doc.fontSize(7).font('Helvetica').fillColor('#444444');
+        const pLabel = `  • ${p.dateTimeStr} | ${p.method}${p.reference ? ` (${p.reference})` : ''}`;
+        const pVal = `Rs ${p.amount.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`;
+        doc.text(pLabel, sumX, curY, { width: sumWidth - 80, align: 'left' });
+        doc.text(pVal, sumX + sumWidth - 80, curY, { width: 80, align: 'right' });
+        curY += 9;
       });
+      curY += 2;
+    }
 
-      renderSummaryRow('Paid for Current Bill', `Rs ${paidAmount.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
-        isBold: true,
-        fontSize: 8.8,
-        labelColor: '#000000',
-        valColor: '#000000'
+    if (tendered > paidAmount && !paymentMethodLabel.includes('CREDIT')) {
+      renderSummaryRow('Cash Tendered', `Rs ${tendered.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+        fontSize: 8,
+        labelColor: '#555555',
+        valColor: '#555555'
       });
-
-      if (settledDue > 0) {
-        renderSummaryRow('Due Settled from Tendered', `- Rs ${settledDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
-          isBold: true,
-          fontSize: 8.8,
-          labelColor: '#000000',
-          valColor: '#000000'
-        });
-      }
-
       if (remainingChange > 0) {
         renderSummaryRow('Change Returned', `Rs ${remainingChange.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
-          isBold: true,
-          fontSize: 8.8,
-          labelColor: '#000000',
-          valColor: '#000000'
+          fontSize: 8,
+          labelColor: '#555555',
+          valColor: '#555555'
         });
       }
     }
 
-    // 3. Previous Due & Total Accumulated Credit
+    if (settledDue > 0) {
+      renderSummaryRow('Due Settled from Tendered', `- Rs ${settledDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+        isBold: true,
+        fontSize: 8.5,
+        labelColor: '#059669',
+        valColor: '#059669'
+      });
+    }
+
+    // 5. Balance Due (Current Bill)
+    renderSummaryRow('Balance Due (Current Bill)', `Rs ${balanceDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+      isBold: true,
+      fontSize: 9,
+      labelColor: balanceDue > 0 ? '#b91c1c' : '#000000',
+      valColor: balanceDue > 0 ? '#b91c1c' : '#000000'
+    });
+
+    // 6. Previous Due & Total Accumulated Credit
     if (hasCreditLedger) {
       doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(0.75).strokeColor('#888888').dash(2, { space: 2 }).stroke().undash();
       curY += 4;
@@ -582,7 +643,7 @@ export class InvoicePdfService {
 
       doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
       curY += 4;
-      renderSummaryRow('Total Accumulated Credit Due', `Rs ${grandTotalCreditDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+      renderSummaryRow('Total Outstanding Due Balance', `Rs ${grandTotalCreditDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
         isBold: true,
         fontSize: 10.5,
         labelColor: '#000000',

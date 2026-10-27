@@ -44,13 +44,22 @@ export function resolveUserPermissions(role: string, permissions: unknown): stri
   if (normRole === 'ADMIN') {
     return ALL_ADMIN_PERMISSIONS;
   }
+  let parsedPermissions: any = permissions;
+  if (typeof permissions === 'string' && permissions.trim().length > 0) {
+    try {
+      parsedPermissions = JSON.parse(permissions);
+    } catch {
+      parsedPermissions = [];
+    }
+  }
+
   if (normRole === 'STAFF') {
-    if (!permissions || !Array.isArray(permissions) || permissions.length === 0) {
+    if (!parsedPermissions || !Array.isArray(parsedPermissions) || parsedPermissions.length === 0) {
       return [...DEFAULT_STAFF_PERMISSIONS];
     }
-    return permissions.map(String);
+    return parsedPermissions.map(String);
   }
-  return Array.isArray(permissions) ? permissions.map(String) : [];
+  return Array.isArray(parsedPermissions) ? parsedPermissions.map(String) : [];
 }
 
 /** Password policy regex: min 8 chars, at least 1 letter and 1 number */
@@ -85,6 +94,17 @@ export class AuthService {
     }
 
     const resolvedPermissions = resolveUserPermissions(user.role, user.permissions);
+
+    if (user.role === 'STAFF' && (!user.permissions || (typeof user.permissions === 'string' && user.permissions.trim() === ''))) {
+      try {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { permissions: JSON.stringify(DEFAULT_STAFF_PERMISSIONS) },
+        });
+      } catch (err) {
+        console.warn('[AuthService] Could not persist default staff permissions on login:', err);
+      }
+    }
 
     const token = jwt.sign(
       { userId: user.id, role: user.role, name: user.name, permissions: resolvedPermissions },
@@ -176,13 +196,22 @@ export class AuthService {
 
     const hashedPassword = await bcrypt.hash(password, 12);
 
+    let permissionsToSave: string | null = null;
+    if (Array.isArray(data.permissions) && data.permissions.length > 0) {
+      permissionsToSave = JSON.stringify(data.permissions);
+    } else if (typeof data.permissions === 'string' && (data.permissions as string).trim().length > 0) {
+      permissionsToSave = data.permissions;
+    } else if (role && role.toUpperCase() === 'STAFF') {
+      permissionsToSave = JSON.stringify(DEFAULT_STAFF_PERMISSIONS);
+    }
+
     const created = await prisma.user.create({
       data: {
         name,
         email,
         password: hashedPassword,
         role: role as never,
-        permissions: Array.isArray(data.permissions) ? (data.permissions as any) : undefined,
+        permissions: permissionsToSave,
       },
       select: userSelect,
     });
@@ -235,7 +264,9 @@ export class AuthService {
     }
 
     if (data.permissions !== undefined) {
-      updateData.permissions = Array.isArray(data.permissions) ? (data.permissions as any) : null;
+      updateData.permissions = Array.isArray(data.permissions)
+        ? JSON.stringify(data.permissions)
+        : (typeof data.permissions === 'string' ? data.permissions : null);
     }
 
     if (data.password !== undefined && data.password.trim().length > 0) {

@@ -93,6 +93,13 @@ export class CustomerCreditService {
             reference: p.reference,
             createdAt: p.createdAt,
           })),
+          payments: order.payments.map((p) => ({
+            id: p.id,
+            amount: p.amount,
+            method: p.method,
+            reference: p.reference,
+            createdAt: p.createdAt,
+          })),
         };
       })
       .filter((bill) => bill.dueAmount > 0.01);

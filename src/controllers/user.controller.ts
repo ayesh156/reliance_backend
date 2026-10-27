@@ -126,7 +126,9 @@ export class UserController {
 
       // 7. Dynamic Permissions update
       if (permissions !== undefined) {
-        updateData.permissions = Array.isArray(permissions) ? (permissions as any) : null;
+        updateData.permissions = Array.isArray(permissions)
+          ? JSON.stringify(permissions)
+          : (typeof permissions === 'string' ? permissions : null);
       }
 
       // 8. Password override with bcrypt (salt rounds: 10)
