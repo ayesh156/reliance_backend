@@ -15,7 +15,8 @@ export class CustomerStatementPdfService {
     customer: any,
     dueBills: any[],
     pendingCheques: any[] = [],
-    masterReceipt: any = null
+    masterReceipt: any = null,
+    returnBills: any[] = []
   ): InstanceType<typeof PDFDocument> {
     const doc = new PDFDocument({
       size: 'A4',
@@ -140,7 +141,7 @@ export class CustomerStatementPdfService {
 
     // ── 3. INVOICES TABLE ──
     const tableTop = customerTop + 62;
-    const colWidths = { num: 25.5, inv: 85, date: 75, type: 85, total: 80, paid: 75, due: 84.78 };
+    const colWidths = { num: 22, inv: 75, date: 76, type: 62, total: 83, paid: 87, due: 105.28 };
     const colX = {
       num: startX,
       inv: startX + colWidths.num,
@@ -241,11 +242,19 @@ export class CustomerStatementPdfService {
             const pRef = p.reference ? ` (${p.reference})` : '';
             const pAmt = Number(p.amount || 0).toLocaleString('en-LK', { minimumFractionDigits: 2 });
 
-            doc.fontSize(7.5).font('Helvetica-Oblique').fillColor('#374151');
-            doc.text(`↳ Payment: ${pDateStr} | ${pMethod}${pRef} | Paid Amount: Rs. ${pAmt}`, colX.inv + 12, curY, {
-              width: pageWidth - (colX.inv - startX) - 12,
-              lineBreak: false,
-            });
+            if (pMethod === 'RETURN_CREDIT') {
+              doc.fontSize(7.5).font('Helvetica-BoldOblique').fillColor('#6b21a8');
+              doc.text(`↳ Paid via Return Credit: ${pDateStr}${pRef} | Paid Amount: Rs. ${pAmt}`, colX.inv + 12, curY, {
+                width: pageWidth - (colX.inv - startX) - 12,
+                lineBreak: false,
+              });
+            } else {
+              doc.fontSize(7.5).font('Helvetica-Oblique').fillColor('#374151');
+              doc.text(`↳ Payment: ${pDateStr} | ${pMethod}${pRef} | Paid Amount: Rs. ${pAmt}`, colX.inv + 12, curY, {
+                width: pageWidth - (colX.inv - startX) - 12,
+                lineBreak: false,
+              });
+            }
             curY += 12;
           });
         }
@@ -253,6 +262,80 @@ export class CustomerStatementPdfService {
         curY += 4;
         doc.moveTo(startX, curY - 2).lineTo(rightMargin, curY - 2).lineWidth(0.75).strokeColor('#bbbbbb').dash(2, { space: 2 }).stroke().undash();
       });
+    }
+
+    // ── Dedicated Recent Return Bills & Credit Notes Section (When Present) ──
+    const rawReturnBills: any[] = (returnBills && returnBills.length > 0)
+      ? returnBills
+      : (customer.returnBills || (dueBills as any)?.returnBills || []);
+
+    if (rawReturnBills.length > 0) {
+      if (curY > 580) {
+        doc.addPage();
+        curY = 51;
+      }
+
+      curY += 10;
+      doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#000000').text('RECENT RETURN BILLS & CREDIT NOTES', startX, curY, { characterSpacing: 0.5 });
+      curY += 16;
+
+      const retColWidths = { num: 25.5, inv: 110, date: 105, ref: 155, value: 114.78 };
+      const retColX = {
+        num: startX,
+        inv: startX + retColWidths.num,
+        date: startX + retColWidths.num + retColWidths.inv,
+        ref: startX + retColWidths.num + retColWidths.inv + retColWidths.date,
+        value: startX + retColWidths.num + retColWidths.inv + retColWidths.date + retColWidths.ref,
+      };
+
+      doc.moveTo(startX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
+      const retThY = curY + 6;
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#000000');
+      doc.text('#', retColX.num, retThY, { width: retColWidths.num, align: 'center', lineBreak: false });
+      doc.text('INVOICE NO', retColX.inv + 2, retThY, { width: retColWidths.inv - 2, align: 'left', lineBreak: false });
+      doc.text('DATE', retColX.date + 2, retThY, { width: retColWidths.date - 2, align: 'left', lineBreak: false });
+      doc.text('OFFSET ALLOCATION', retColX.ref + 2, retThY, { width: retColWidths.ref - 2, align: 'left', lineBreak: false });
+      doc.text('RETURN VALUE', retColX.value, retThY, { width: retColWidths.value - 3, align: 'right', lineBreak: false });
+
+      curY += 18;
+      doc.moveTo(startX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
+      curY += 6;
+
+      rawReturnBills.forEach((rb: any, idx: number) => {
+        if (curY > 680) {
+          doc.addPage();
+          curY = 51;
+        }
+
+        const invNum = rb.invoiceNumber || `INV${rb.id || idx + 1}`;
+        const rawDate = rb.createdAt || rb.date;
+        let rDateStr = '-';
+        if (rawDate) {
+          try {
+            const d = new Date(rawDate);
+            const yyyy = d.getFullYear();
+            const mm = String(d.getMonth() + 1).padStart(2, '0');
+            const dd = String(d.getDate()).padStart(2, '0');
+            rDateStr = `${yyyy}-${mm}-${dd}`;
+          } catch {
+            rDateStr = String(rawDate);
+          }
+        }
+        const retVal = Math.abs(Number(rb.totalAmount || 0));
+        const statusNote = rb.returnCreditApplied > 0 
+          ? `Credit Applied: Rs. ${Number(rb.returnCreditApplied).toLocaleString('en-LK', { minimumFractionDigits: 2 })}` 
+          : (rb.status || 'RETURN NOTE');
+
+        doc.fontSize(8.6).font('Helvetica-Bold').fillColor('#444444').text(String(idx + 1), retColX.num, curY, { width: retColWidths.num, align: 'center', lineBreak: false });
+        doc.font('Helvetica-Bold').fillColor('#000000').text(invNum, retColX.inv + 2, curY, { width: retColWidths.inv - 2, lineBreak: false });
+        doc.font('Helvetica').fontSize(8).text(rDateStr, retColX.date + 2, curY + 0.5, { width: retColWidths.date - 2, lineBreak: false });
+        doc.font('Helvetica').fontSize(8).fillColor('#4b5563').text(statusNote, retColX.ref + 2, curY + 0.5, { width: retColWidths.ref - 2, lineBreak: false });
+        doc.font('Helvetica-Bold').fontSize(8.6).fillColor('#b91c1c').text(`- Rs. ${retVal.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, retColX.value, curY, { width: retColWidths.value - 3, align: 'right', lineBreak: false });
+
+        curY += 18;
+        doc.moveTo(startX, curY - 3).lineTo(rightMargin, curY - 3).lineWidth(0.75).strokeColor('#bbbbbb').dash(2, { space: 2 }).stroke().undash();
+      });
+      curY += 10;
     }
 
     // ── Dedicated Recent Settlement / Total Balance Deduction Summary Section ──

@@ -31,7 +31,8 @@ export const downloadCustomerStatementPdf = async (req: Request, res: Response, 
       customer,
       dueBillsData.bills || [],
       dueBillsData.pendingCheques || [],
-      dueBillsData.latestReceipt || null
+      dueBillsData.latestReceipt || null,
+      dueBillsData.returnBills || []
     );
 
     res.setHeader('Content-Type', 'application/pdf');

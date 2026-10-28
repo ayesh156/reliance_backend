@@ -1035,7 +1035,7 @@ export class OrderService {
       }
     }
 
-    const mappedOrders = orders.map((order) => {
+    const mappedOrders = await Promise.all(orders.map(async (order) => {
       (order.items || []).forEach((it: any) => {
         it.isReturn = Boolean(it.isReturn || (typeof it.price === 'number' && it.price < 0));
       });
@@ -1059,6 +1059,30 @@ export class OrderService {
         order.shippingAddress || resolvedCustomer?.address || null;
       const resolvedCity = order.city || resolvedCustomer?.city || null;
 
+      const isReturnBill = Boolean(order.isReturnBill || Number(order.totalAmount) < 0);
+      let appliedOffsets: any[] = [];
+      if (isReturnBill) {
+        const refConditions: any[] = [{ reference: { contains: String(order.id) } }];
+        if (order.invoiceNumber) {
+          refConditions.push({ reference: { contains: String(order.invoiceNumber) } });
+        }
+        appliedOffsets = await prisma.orderPayment.findMany({
+          where: {
+            method: 'RETURN_CREDIT',
+            OR: refConditions,
+          },
+          include: {
+            order: {
+              select: { invoiceNumber: true, id: true },
+            },
+          },
+        });
+      }
+
+      const trueReturnCreditApplied = order.returnCreditApplied > 0
+        ? order.returnCreditApplied
+        : (order.totalAmount < 0 ? Math.abs(order.totalAmount) - (order.refundedCashAmount || 0) : 0);
+
       return {
         ...order,
         customer: resolvedCustomer,
@@ -1069,8 +1093,10 @@ export class OrderService {
         splitPayments: parsed.splitPayments.length > 0 ? parsed.splitPayments : undefined,
         cheques: parsed.cheques.length > 0 ? parsed.cheques : undefined,
         userNotes: parsed.userNotes,
+        appliedOffsets,
+        trueReturnCreditApplied,
       };
-    });
+    }));
 
     let resultOrders = mappedOrders;
     if (isOverdueOldest || isOverdueRecent) {
@@ -1176,6 +1202,27 @@ export class OrderService {
       }
     }
 
+    const targetCustId = order.customerId || (order as any).customer?.id;
+    if (targetCustId) {
+      const freshCustomer = await prisma.customer.findUnique({
+        where: { id: Number(targetCustId) },
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          address: true,
+          city: true,
+          type: true,
+          outstandingBalance: true,
+          repId: true,
+          rep: { select: { id: true, name: true } },
+        },
+      });
+      if (freshCustomer) {
+        (order as any).customer = freshCustomer;
+      }
+    }
+
     // Attach resolved customer address into shippingAddress fallback for frontend print parities
     if (order.customer?.address && !order.shippingAddress) {
       (order as any).shippingAddress = order.customer.address;
@@ -1212,8 +1259,34 @@ export class OrderService {
       });
     }
 
+    const isReturnBill = Boolean(order.isReturnBill || Number(order.totalAmount) < 0);
+    let appliedOffsets: any[] = [];
+    if (isReturnBill) {
+      const refConditions: any[] = [{ reference: { contains: String(order.id) } }];
+      if (order.invoiceNumber) {
+        refConditions.push({ reference: { contains: String(order.invoiceNumber) } });
+      }
+      appliedOffsets = await prisma.orderPayment.findMany({
+        where: {
+          method: 'RETURN_CREDIT',
+          OR: refConditions,
+        },
+        include: {
+          order: {
+            select: { invoiceNumber: true, id: true },
+          },
+        },
+      });
+    }
+
+    const trueReturnCreditApplied = order.returnCreditApplied > 0
+      ? order.returnCreditApplied
+      : (order.totalAmount < 0 ? Math.abs(order.totalAmount) - (order.refundedCashAmount || 0) : 0);
+
     return {
       ...order,
+      appliedOffsets,
+      trueReturnCreditApplied,
       splitPayments: parsed.splitPayments.length > 0 ? parsed.splitPayments : undefined,
       cheques: parsed.cheques.length > 0 ? parsed.cheques : undefined,
       returns: parsed.returns,
@@ -1353,15 +1426,32 @@ export class OrderService {
 
       // 3. Bulletproof Financial and Customer Credit Delta Sync
       // Signed arithmetic: when an invoice is negative (returns), oldTotal/newTotal is signed negative.
-      const oldTotal = Number(existing.totalAmount || 0);
-      const oldPaid = Number(existing.paidAmount || 0);
-      const oldCreditDue = oldTotal < 0 ? oldTotal : Math.max(0, oldTotal - oldPaid);
+      const isReturnBill = Boolean(
+        (existing as any).isReturnBill ||
+        (data as any).isReturnBill ||
+        Number(data.totalAmount) < 0 ||
+        Number(existing.totalAmount) < 0
+      );
+
+      const oldTotal = isReturnBill
+        ? -Math.abs(Number(existing.totalAmount || 0))
+        : Number(existing.totalAmount || 0);
+      const oldPaid = isReturnBill ? 0 : Number(existing.paidAmount || 0);
+      const oldCreditDue = isReturnBill ? oldTotal : Math.max(0, oldTotal - oldPaid);
       const oldSettledDue = Number((existing as any).settledDueAmount || 0);
 
-      const newTotal = Number(data.totalAmount || 0);
-      const newPaid = newTotal < 0 ? 0 : Math.min(newTotal, Math.max(0, Number(data.paidAmount || 0)));
-      const newCreditDue = newTotal < 0 ? newTotal : Math.max(0, newTotal - newPaid);
+      const newTotal = isReturnBill
+        ? -Math.abs(Number(data.totalAmount ?? existing.totalAmount ?? 0))
+        : Number(data.totalAmount || 0);
+      const newPaid = isReturnBill ? 0 : Math.min(newTotal, Math.max(0, Number(data.paidAmount || 0)));
+      const newCreditDue = isReturnBill ? newTotal : Math.max(0, newTotal - newPaid);
       const newSettledDue = data.settledDueAmount !== undefined ? Math.max(0, Number(data.settledDueAmount) || 0) : oldSettledDue;
+      const refundedCash = (data as any).refundedCashAmount !== undefined
+        ? Math.max(0, Number((data as any).refundedCashAmount) || 0)
+        : Number(existing.refundedCashAmount || 0);
+      const newReturnCreditApplied = isReturnBill
+        ? Math.max(0, Math.abs(newTotal) - refundedCash)
+        : Number(existing.returnCreditApplied || 0);
 
       let targetCustomerId = data.customerId ? Number(data.customerId) : existing.customerId;
       let targetCustomer: any = null;
@@ -1398,109 +1488,128 @@ export class OrderService {
         const custId = Number(targetCustomerId);
         const isCustomerChanged = Boolean(existing.customerId && existing.customerId !== targetCustomerId);
 
-        // 1. If settledDueAmount increased (or customer changed), apply incremental FIFO Settlement on previous unpaid invoices
-        const settledDueToApply = isCustomerChanged
-          ? newSettledDue
-          : Math.max(0, Math.round((newSettledDue - oldSettledDue) * 100) / 100);
-
-        if (settledDueToApply > 0) {
-          // Master Receipt for bulk debt settlement during invoice update
-          const masterReceiptNumber = `REC-${Date.now().toString(36).toUpperCase()}`;
-          const masterReceipt = await tx.customerReceipt.create({
-            data: {
-              receiptNumber: masterReceiptNumber,
-              customerId: custId,
-              totalAmount: settledDueToApply,
-              paymentMethod: data.paymentMethod || 'CASH',
-              reference: `Settled from POS Invoice #${existing.invoiceNumber || orderId}`,
-              receiptDate: new Date(),
-              notes: `Allocated to previous unpaid invoices from Invoice #${existing.invoiceNumber || orderId}`,
-            },
-          });
-
-          let remainingToSettle = settledDueToApply;
-          const unpaidOrders = await tx.order.findMany({
-            where: {
-              customerId: custId,
-              id: { not: orderId },
-              status: { not: OrderStatus.CANCELLED },
-            },
-            orderBy: { createdAt: 'asc' },
-          });
-
-          for (const prevOrder of unpaidOrders) {
-            if (remainingToSettle <= 0) break;
-            const unpaidAmount = Math.max(0, Math.round((Number(prevOrder.totalAmount) - Number(prevOrder.paidAmount)) * 100) / 100);
-            if (unpaidAmount > 0) {
-              const settleForThis = Math.min(unpaidAmount, remainingToSettle);
-              const newPrevPaid = Math.round((Number(prevOrder.paidAmount) + settleForThis) * 100) / 100;
-              const isPrevPaid = newPrevPaid >= Number(prevOrder.totalAmount);
-
-              await tx.order.update({
-                where: { id: prevOrder.id },
-                data: {
-                  paidAmount: newPrevPaid,
-                  status: isPrevPaid ? OrderStatus.PAID : prevOrder.status,
-                  updatedAt: new Date(),
-                },
+        if (isReturnBill) {
+          // Return Bill customer debt sync
+          if (isCustomerChanged) {
+            // Revert return credit from previous customer
+            if (existing.customerId) {
+              await tx.customer.update({
+                where: { id: existing.customerId },
+                data: { outstandingBalance: { increment: Math.abs(oldTotal) } },
               });
-
-              await tx.orderPayment.create({
-                data: {
-                  orderId: prevOrder.id,
-                  amount: settleForThis,
-                  method: data.paymentMethod || 'CASH',
-                  reference: `Settled from POS Invoice #${orderId}`,
-                  customerReceiptId: masterReceipt.id,
-                  createdAt: new Date(),
-                },
+            }
+            // Apply return credit to new customer
+            const targetCustBal = Number(targetCustomer?.outstandingBalance || 0);
+            const newBal = Math.max(0, Math.round((targetCustBal - Math.abs(newTotal)) * 100) / 100);
+            await tx.customer.update({
+              where: { id: custId },
+              data: { outstandingBalance: newBal },
+            });
+          } else {
+            // Customer unchanged:
+            // If the Return Bill's total changed, adjust the customer's balance by the delta
+            const returnDelta = Math.abs(newTotal) - Math.abs(oldTotal);
+            if (Math.abs(returnDelta) > 0.001) {
+              const currentCustBal = Number(targetCustomer?.outstandingBalance || 0);
+              const newBal = Math.max(0, Math.round((currentCustBal - returnDelta) * 100) / 100);
+              await tx.customer.update({
+                where: { id: custId },
+                data: { outstandingBalance: newBal },
               });
+            }
+            // If returnDelta === 0, editing the Return Bill without changing its amount does NOT alter the customer's outstandingBalance!
+          }
+        } else {
+          // Standard Sales Invoice customer debt sync
+          // 1. If settledDueAmount increased (or customer changed), apply incremental FIFO Settlement on previous unpaid invoices
+          const settledDueToApply = isCustomerChanged
+            ? newSettledDue
+            : Math.max(0, Math.round((newSettledDue - oldSettledDue) * 100) / 100);
 
-              remainingToSettle = Math.round((remainingToSettle - settleForThis) * 100) / 100;
+          if (settledDueToApply > 0) {
+            // Master Receipt for bulk debt settlement during invoice update
+            const masterReceiptNumber = `REC-${Date.now().toString(36).toUpperCase()}`;
+            const masterReceipt = await tx.customerReceipt.create({
+              data: {
+                receiptNumber: masterReceiptNumber,
+                customerId: custId,
+                totalAmount: settledDueToApply,
+                paymentMethod: data.paymentMethod || 'CASH',
+                reference: `Settled from POS Invoice #${existing.invoiceNumber || orderId}`,
+                receiptDate: new Date(),
+                notes: `Allocated to previous unpaid invoices from Invoice #${existing.invoiceNumber || orderId}`,
+              },
+            });
+
+            let remainingToSettle = settledDueToApply;
+            const unpaidOrders = await tx.order.findMany({
+              where: {
+                customerId: custId,
+                id: { not: orderId },
+                status: { not: OrderStatus.CANCELLED },
+              },
+              orderBy: { createdAt: 'asc' },
+            });
+
+            for (const prevOrder of unpaidOrders) {
+              if (remainingToSettle <= 0) break;
+              const unpaidAmount = Math.max(0, Math.round((Number(prevOrder.totalAmount) - Number(prevOrder.paidAmount)) * 100) / 100);
+              if (unpaidAmount > 0) {
+                const settleForThis = Math.min(unpaidAmount, remainingToSettle);
+                const newPrevPaid = Math.round((Number(prevOrder.paidAmount) + settleForThis) * 100) / 100;
+                const isPrevPaid = newPrevPaid >= Number(prevOrder.totalAmount);
+
+                await tx.order.update({
+                  where: { id: prevOrder.id },
+                  data: {
+                    paidAmount: newPrevPaid,
+                    status: isPrevPaid ? OrderStatus.PAID : prevOrder.status,
+                    updatedAt: new Date(),
+                  },
+                });
+
+                await tx.orderPayment.create({
+                  data: {
+                    orderId: prevOrder.id,
+                    amount: settleForThis,
+                    method: data.paymentMethod || 'CASH',
+                    reference: `Settled from POS Invoice #${orderId}`,
+                    customerReceiptId: masterReceipt.id,
+                    createdAt: new Date(),
+                  },
+                });
+
+                remainingToSettle = Math.round((remainingToSettle - settleForThis) * 100) / 100;
+              }
+            }
+          }
+
+          // 2. Rollback previous customer's debt if customer was changed
+          if (isCustomerChanged && existing.customerId) {
+            const oldInvoiceDue = Math.max(0, oldTotal - oldPaid);
+            await tx.customer.update({
+              where: { id: existing.customerId },
+              data: { outstandingBalance: { decrement: oldInvoiceDue } },
+            });
+            const targetCustBal = Number(targetCustomer?.outstandingBalance || 0);
+            const newBal = Math.max(0, Math.round((targetCustBal + newCreditDue - settledDueToApply) * 100) / 100);
+            await tx.customer.update({
+              where: { id: custId },
+              data: { outstandingBalance: newBal },
+            });
+          } else {
+            const oldInvoiceDue = Math.max(0, oldTotal - oldPaid);
+            const balanceDelta = (newCreditDue - oldInvoiceDue) - settledDueToApply;
+            if (Math.abs(balanceDelta) > 0.001) {
+              const currentCustBal = Number(targetCustomer?.outstandingBalance || 0);
+              const newBal = Math.max(0, Math.round((currentCustBal + balanceDelta) * 100) / 100);
+              await tx.customer.update({
+                where: { id: custId },
+                data: { outstandingBalance: newBal },
+              });
             }
           }
         }
-
-        // 2. Rollback previous customer's debt if customer was changed
-        if (isCustomerChanged && existing.customerId) {
-          const oldCustOrders = await tx.order.findMany({
-            where: {
-              customerId: existing.customerId,
-              id: { not: orderId },
-              status: { not: OrderStatus.CANCELLED },
-            },
-            select: { totalAmount: true, paidAmount: true },
-          });
-          const oldCustDue = oldCustOrders.reduce((sum, o) => {
-            const tot = Number(o.totalAmount) || 0;
-            const pd = Number(o.paidAmount) || 0;
-            return sum + (tot < 0 ? tot : Math.max(0, tot - pd));
-          }, 0);
-          await tx.customer.update({
-            where: { id: existing.customerId },
-            data: { outstandingBalance: Math.round(oldCustDue * 100) / 100 },
-          });
-        }
-
-        // 3. Atomically synchronize live outstanding balance for active customer from all active orders
-        // Signed integer/float arithmetic for credit returns offsetting existing receivables:
-        // When an invoice has item returns that result in a negative net transaction (e.g. -Rs. 52,560) marked as Credit,
-        // ordTotal is signed negative. The negative balance must automatically decrement the customer's cumulative
-        // outstandingBalance (e.g. 91,650 + (-52,560) = Rs. 39,090), matching the frontend's adjusted accumulated due.
-        const allActiveCustomerOrders = await tx.order.findMany({
-          where: { customerId: custId, status: { not: OrderStatus.CANCELLED } },
-          select: { id: true, totalAmount: true, paidAmount: true },
-        });
-        const trueLiveDebt = allActiveCustomerOrders.reduce((sum, o) => {
-          const ordTotal = o.id === orderId ? newTotal : Number(o.totalAmount || 0);
-          const ordPaid = o.id === orderId ? newPaid : Number(o.paidAmount || 0);
-          const netOrderDue = ordTotal < 0 ? ordTotal : Math.max(0, ordTotal - ordPaid);
-          return sum + netOrderDue;
-        }, 0);
-        await tx.customer.update({
-          where: { id: custId },
-          data: { outstandingBalance: Math.round(trueLiveDebt * 100) / 100 },
-        });
       }
 
       // 4. Update order items and sync payments ledger
@@ -1615,10 +1724,12 @@ export class OrderService {
           totalAmount: newTotal,
           paidAmount: newPaid,
           settledDueAmount: newSettledDue,
-          paymentMethod: newCreditDue > 0 ? 'CREDIT' : data.paymentMethod || 'CASH',
+          paymentMethod: isReturnBill ? 'RETURN_CREDIT' : (newCreditDue > 0 ? 'CREDIT' : data.paymentMethod || 'CASH'),
           notes: finalOrderNotes,
-          refundedCashAmount: (data as any).refundedCashAmount !== undefined ? Math.max(0, Number((data as any).refundedCashAmount) || 0) : Number(existing.refundedCashAmount || 0),
-          status: newPaid >= newTotal ? OrderStatus.PAID : OrderStatus.PROCESSING,
+          refundedCashAmount: refundedCash,
+          returnCreditApplied: newReturnCreditApplied,
+          isReturnBill: isReturnBill,
+          status: isReturnBill ? OrderStatus.PAID : (newPaid >= newTotal ? OrderStatus.PAID : OrderStatus.PROCESSING),
           items: {
             create: data.items.map((i) => {
               const isRet = Boolean((i as any).isReturn || Number(i.quantity) < 0 || Number(i.price) < 0);
@@ -1672,6 +1783,15 @@ export class OrderService {
               status: 'IN_RETURN_STOCK',
             },
           });
+        }
+      }
+
+      if (targetCustomerId) {
+        const freshCustomer = await tx.customer.findUnique({
+          where: { id: Number(targetCustomerId) },
+        });
+        if (freshCustomer) {
+          (updatedOrder as any).customer = freshCustomer;
         }
       }
 
@@ -1959,6 +2079,37 @@ export class OrderService {
         }
       } catch {}
     }
+
+    const isReturnBill = Boolean(order.isReturnBill || Number(order.totalAmount) < 0);
+    const pdfCustId = order.customerId || (order as any).customer?.id;
+    if (pdfCustId) {
+      const freshCustomer = await prisma.customer.findUnique({
+        where: { id: Number(pdfCustId) },
+      });
+      if (freshCustomer) {
+        (order as any).customer = freshCustomer;
+      }
+    }
+    if (isReturnBill) {
+      const refConditions: any[] = [{ reference: { contains: String(order.id) } }];
+      if (order.invoiceNumber) {
+        refConditions.push({ reference: { contains: String(order.invoiceNumber) } });
+      }
+      const appliedOffsets = await prisma.orderPayment.findMany({
+        where: {
+          method: 'RETURN_CREDIT',
+          OR: refConditions,
+        },
+        include: {
+          order: {
+            select: { invoiceNumber: true, id: true },
+          },
+        },
+      });
+      (order as any).appliedOffsets = appliedOffsets;
+    }
+    const trueCreditApplied = Math.abs(Number(order.totalAmount || 0)) - (Number(order.refundedCashAmount) || 0);
+    (order as any).trueReturnCreditApplied = isReturnBill ? trueCreditApplied : Number(order.returnCreditApplied || 0);
 
     return InvoicePdfService.generate(order);
   }

@@ -267,6 +267,37 @@ export class CustomerCreditService {
       },
     });
 
+    // Retrieve recent return bills & credit notes for this customer
+    const rawReturnOrders = await prisma.order.findMany({
+      where: {
+        customerId,
+        OR: [
+          { totalAmount: { lt: 0 } },
+          { isReturnBill: true },
+        ],
+        status: { not: 'CANCELLED' },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+      select: {
+        id: true,
+        invoiceNumber: true,
+        createdAt: true,
+        totalAmount: true,
+        paidAmount: true,
+        returnCreditApplied: true,
+        refundedCashAmount: true,
+        status: true,
+      },
+    });
+
+    const returnBills = rawReturnOrders.map((ro) => ({
+      ...ro,
+      trueReturnCreditApplied: ro.returnCreditApplied > 0
+        ? ro.returnCreditApplied
+        : (ro.totalAmount < 0 ? Math.abs(ro.totalAmount) - (ro.refundedCashAmount || 0) : 0),
+    }));
+
     return {
       customer: {
         ...customer,
@@ -278,6 +309,7 @@ export class CustomerCreditService {
       pendingCheques,
       recentReceipts,
       latestReceipt: recentReceipts[0] || null,
+      returnBills,
     };
   }
 

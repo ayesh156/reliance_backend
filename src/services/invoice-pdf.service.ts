@@ -53,12 +53,17 @@ export class InvoicePdfService {
     const tendered = order.tenderedAmount !== undefined 
       ? Number(order.tenderedAmount) 
       : Number(order.paidAmount || 0);
+    const isReturnBill = Boolean(order.isReturnBill === true || Number(order.totalAmount) < 0);
+    const trueReturnCreditApplied = Math.abs(Number(order.totalAmount || total || 0)) - (Number(order.refundedCashAmount) || 0);
+    const returnCreditApplied = trueReturnCreditApplied;
+    const refundedCashAmount = Number(order.refundedCashAmount || 0);
+
     const isWholesale = order.source === 'POS_WHOLESALE' || order.orderType === 'WHOLESALE';
     const paymentMethodLabel = order.paymentMethod 
       ? order.paymentMethod.toUpperCase() 
-      : (isWholesale ? 'WHOLESALE CREDIT' : 'CASH');
+      : (isReturnBill ? 'RETURN CREDIT' : (isWholesale ? 'WHOLESALE CREDIT' : 'CASH'));
 
-    const invoiceTitle = isWholesale ? 'WHOLESALE INVOICE' : 'INVOICE';
+    const invoiceTitle = isReturnBill ? 'RETURN INVOICE' : (isWholesale ? 'WHOLESALE INVOICE' : 'INVOICE');
 
     // Extract itemized payments from order.payments or splits
     interface PdfPaymentHistoryEntry {
@@ -122,6 +127,9 @@ export class InvoicePdfService {
     
     // Cumulative total outstanding
     const grandTotalCreditDue = Math.max(0, Math.round((currentBillCredit + truePreviousDue - settledDue) * 100) / 100);
+    const updatedOutstandingBalance = Number(order.customer?.outstandingBalance ?? liveCustomerBalance);
+    const customerOutstanding = updatedOutstandingBalance;
+    const previousDueBeforeReturn = Math.max(0, Math.round((customerOutstanding + trueReturnCreditApplied) * 100) / 100);
 
     // Extract return records for PDF rendering
     let returnsList: any[] = [];
@@ -533,8 +541,11 @@ export class InvoicePdfService {
       curY += rowHeight + bottomPad;
     };
 
+    const formatNumber = (num: number) => Number(num || 0).toLocaleString('en-LK', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
     // 1. Sub Total
-    renderSummaryRow('Sub Total', `Rs ${subtotalVal.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+    const displaySubTotal = isReturnBill ? Math.abs(Number(order.totalAmount || total)) : subtotalVal;
+    renderSummaryRow('Sub Total', `Rs ${formatNumber(displaySubTotal)}`, {
       isBold: true,
       fontSize: 9,
       labelColor: '#222222',
@@ -568,91 +579,52 @@ export class InvoicePdfService {
       });
     }
 
-    // 3. Net Bill Total: Solid 1.2pt Top, Solid 1.8pt Bottom
-    const totalDueLabel = hasReturns ? 'Net Bill Total (After Returns)' : 'Net Bill Total';
-    doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
-    curY += 4;
-    renderSummaryRow(totalDueLabel, `Rs ${total.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
-      isBold: true,
-      fontSize: 10.5,
-      labelColor: '#000000',
-      valColor: '#000000',
-      bottomPadding: 4
-    });
-    doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.8).strokeColor('#000000').stroke();
-    curY += 5;
+    if (isReturnBill) {
+      const creditApplied = Math.abs(Number(order.totalAmount || total || 0)) - (Number(order.refundedCashAmount) || 0);
+      const updatedBalance = Number(order.customer?.outstandingBalance || 0);
+      const prevDue = updatedBalance + creditApplied;
 
-    // 4. Paid Amount & Itemized Payment Breakdown
-    doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(0.75).strokeColor('#888888').dash(2, { space: 2 }).stroke().undash();
-    curY += 4;
-
-    renderSummaryRow('Paid Amount (Current Bill)', `Rs ${paidAmount.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
-      isBold: true,
-      fontSize: 9,
-      labelColor: '#000000',
-      valColor: '#000000'
-    });
-
-    // Itemized payments
-    if (pdfPayments.length > 0) {
-      pdfPayments.forEach((p) => {
-        doc.fontSize(7).font('Helvetica').fillColor('#444444');
-        const pLabel = `  • ${p.dateTimeStr} | ${p.method}${p.reference ? ` (${p.reference})` : ''}`;
-        const pVal = `Rs ${p.amount.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`;
-        doc.text(pLabel, sumX, curY, { width: sumWidth - 80, align: 'left' });
-        doc.text(pVal, sumX + sumWidth - 80, curY, { width: 80, align: 'right' });
-        curY += 9;
-      });
-      curY += 2;
-    }
-
-    if (tendered > paidAmount && !paymentMethodLabel.includes('CREDIT')) {
-      renderSummaryRow('Cash Tendered', `Rs ${tendered.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
-        fontSize: 8,
-        labelColor: '#555555',
-        valColor: '#555555'
-      });
-      if (remainingChange > 0) {
-        renderSummaryRow('Change Returned', `Rs ${remainingChange.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
-          fontSize: 8,
-          labelColor: '#555555',
-          valColor: '#555555'
-        });
-      }
-    }
-
-    if (settledDue > 0) {
-      renderSummaryRow('Due Settled from Tendered', `- Rs ${settledDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
-        isBold: true,
-        fontSize: 8.5,
-        labelColor: '#059669',
-        valColor: '#059669'
-      });
-    }
-
-    // 5. Balance Due (Current Bill)
-    renderSummaryRow('Balance Due (Current Bill)', `Rs ${balanceDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
-      isBold: true,
-      fontSize: 9,
-      labelColor: balanceDue > 0 ? '#b91c1c' : '#000000',
-      valColor: balanceDue > 0 ? '#b91c1c' : '#000000'
-    });
-
-    // 6. Previous Due & Total Accumulated Credit
-    if (hasCreditLedger) {
-      doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(0.75).strokeColor('#888888').dash(2, { space: 2 }).stroke().undash();
+      // 2. Total Return Value
+      doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
       curY += 4;
+      renderSummaryRow('Total Return Value', `Rs ${formatNumber(Math.abs(Number(order.totalAmount || total)))}`, {
+        isBold: true,
+        fontSize: 10.5,
+        labelColor: '#000000',
+        valColor: '#000000',
+        bottomPadding: 4
+      });
+      doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.8).strokeColor('#000000').stroke();
+      curY += 5;
 
-      renderSummaryRow('Previous Due (Old Bills)', `Rs ${truePreviousDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+      // 3. Previous Due (Before Return):
+      renderSummaryRow('Previous Due (Before Return):', `Rs ${formatNumber(prevDue)}`, {
         isBold: true,
         fontSize: 9,
         labelColor: '#000000',
         valColor: '#000000'
       });
 
+      // 4. Deducted from Previous Due:
+      renderSummaryRow('Deducted from Previous Due:', `- Rs ${formatNumber(creditApplied)}`, {
+        isBold: true,
+        fontSize: 9,
+        labelColor: '#059669',
+        valColor: '#059669'
+      });
+
+      // 5. Cash Refunded (If Any):
+      renderSummaryRow('Cash Refunded (If Any):', `Rs ${formatNumber(Number(order.refundedCashAmount) || 0)}`, {
+        isBold: true,
+        fontSize: 9,
+        labelColor: (Number(order.refundedCashAmount) || 0) > 0 ? '#b91c1c' : '#374151',
+        valColor: (Number(order.refundedCashAmount) || 0) > 0 ? '#b91c1c' : '#374151'
+      });
+
+      // 6. Updated Outstanding Balance:
       doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
       curY += 4;
-      renderSummaryRow('Total Outstanding Due Balance', `Rs ${grandTotalCreditDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+      renderSummaryRow('Updated Outstanding Balance:', `Rs ${formatNumber(updatedBalance)}`, {
         isBold: true,
         fontSize: 10.5,
         labelColor: '#000000',
@@ -661,6 +633,101 @@ export class InvoicePdfService {
       });
       doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(2).strokeColor('#000000').stroke();
       curY += 8;
+    } else {
+      // 3. Net Bill Total: Solid 1.2pt Top, Solid 1.8pt Bottom
+      const totalDueLabel = hasReturns ? 'Net Bill Total (After Returns)' : 'Net Bill Total';
+      doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
+      curY += 4;
+      renderSummaryRow(totalDueLabel, `Rs ${total.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+        isBold: true,
+        fontSize: 10.5,
+        labelColor: '#000000',
+        valColor: '#000000',
+        bottomPadding: 4
+      });
+      doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.8).strokeColor('#000000').stroke();
+      curY += 5;
+
+      // 4. Paid Amount & Itemized Payment Breakdown
+      doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(0.75).strokeColor('#888888').dash(2, { space: 2 }).stroke().undash();
+      curY += 4;
+
+      renderSummaryRow('Paid Amount (Current Bill)', `Rs ${paidAmount.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+        isBold: true,
+        fontSize: 9,
+        labelColor: '#000000',
+        valColor: '#000000'
+      });
+
+      // Itemized payments
+      if (pdfPayments.length > 0) {
+        pdfPayments.forEach((p) => {
+          doc.fontSize(7).font('Helvetica').fillColor('#444444');
+          const pLabel = `  • ${p.dateTimeStr} | ${p.method}${p.reference ? ` (${p.reference})` : ''}`;
+          const pVal = `Rs ${p.amount.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`;
+          doc.text(pLabel, sumX, curY, { width: sumWidth - 80, align: 'left' });
+          doc.text(pVal, sumX + sumWidth - 80, curY, { width: 80, align: 'right' });
+          curY += 9;
+        });
+        curY += 2;
+      }
+
+      if (tendered > paidAmount && !paymentMethodLabel.includes('CREDIT')) {
+        renderSummaryRow('Cash Tendered', `Rs ${tendered.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+          fontSize: 8,
+          labelColor: '#555555',
+          valColor: '#555555'
+        });
+        if (remainingChange > 0) {
+          renderSummaryRow('Change Returned', `Rs ${remainingChange.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+            fontSize: 8,
+            labelColor: '#555555',
+            valColor: '#555555'
+          });
+        }
+      }
+
+      if (settledDue > 0) {
+        renderSummaryRow('Due Settled from Tendered', `- Rs ${settledDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+          isBold: true,
+          fontSize: 8.5,
+          labelColor: '#059669',
+          valColor: '#059669'
+        });
+      }
+
+      // 5. Balance Due (Current Bill)
+      renderSummaryRow('Balance Due (Current Bill)', `Rs ${balanceDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+        isBold: true,
+        fontSize: 9,
+        labelColor: balanceDue > 0 ? '#b91c1c' : '#000000',
+        valColor: balanceDue > 0 ? '#b91c1c' : '#000000'
+      });
+
+      // 6. Previous Due & Total Accumulated Credit
+      if (hasCreditLedger) {
+        doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(0.75).strokeColor('#888888').dash(2, { space: 2 }).stroke().undash();
+        curY += 4;
+
+        renderSummaryRow('Previous Due (Old Bills)', `Rs ${truePreviousDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+          isBold: true,
+          fontSize: 9,
+          labelColor: '#000000',
+          valColor: '#000000'
+        });
+
+        doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
+        curY += 4;
+        renderSummaryRow('Total Outstanding Due Balance', `Rs ${grandTotalCreditDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+          isBold: true,
+          fontSize: 10.5,
+          labelColor: '#000000',
+          valColor: '#000000',
+          bottomPadding: 4
+        });
+        doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(2).strokeColor('#000000').stroke();
+        curY += 8;
+      }
     }
 
     // ── 5. SIGNATURES (Dynamically positioned with clear vertical gaps) ──
