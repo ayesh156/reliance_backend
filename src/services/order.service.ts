@@ -119,6 +119,8 @@ export class OrderService {
     }[];
     subtotal: number;
     discount?: number;
+    discountType?: string;
+    discountValue?: number;
     totalAmount: number;
     paidAmount?: number;
     settledDueAmount?: number;
@@ -212,8 +214,25 @@ export class OrderService {
           return sum + Math.max(0, isNaN(lineNet) ? 0 : lineNet);
         }, 0);
 
+        // Proportional Return Credit Calculation (Discount Adjustment):
+        // When processing an item return, dynamically calculate the proportional discount applied to that specific item
+        // Formula: Net Return Credit = (Returned Qty * Unit Price) - ((Returned Qty * Unit Price) * Global Bill Discount %)
+        // Example: For 25 items at Rs. 2,090 with a 5% global bill discount:
+        // 52,250 - (52,250 * 0.05) = 49,637.50.
+        let returnBillDiscountShare = 0;
+        if (data.discountType === 'PERCENT' && Number(data.discountValue) > 0) {
+          const pct = Number(data.discountValue);
+          returnBillDiscountShare = Math.round((totalReturnValue * (pct / 100)) * 100) / 100;
+        } else if (data.discount && Number(data.discount) > 0) {
+          const totalNet = totalSaleValue + totalReturnValue;
+          if (totalNet > 0) {
+            const globalPct = Number(data.discount) / totalNet;
+            returnBillDiscountShare = Math.round((totalReturnValue * globalPct) * 100) / 100;
+          }
+        }
+        const netReturnCredit = Math.max(0, Math.round((totalReturnValue - returnBillDiscountShare) * 100) / 100);
         const sanitizedDiscount = isNaN(Number(data.discount)) ? 0 : Math.max(0, Number(data.discount));
-        const computedNet = totalSaleValue - totalReturnValue - sanitizedDiscount;
+        const computedNet = totalSaleValue - sanitizedDiscount - netReturnCredit;
         const isReturnBill = Boolean(data.isReturnBill || isReturnOnlyBill || data.totalAmount < 0 || computedNet < 0);
 
         // Financials with strict NaN guards
@@ -225,7 +244,7 @@ export class OrderService {
           } else if (!isNaN(rawTotal) && rawTotal > 0) {
             total = -rawTotal;
           } else {
-            total = computedNet < 0 ? computedNet : -Math.abs(totalReturnValue);
+            total = computedNet < 0 ? computedNet : -Math.abs(netReturnCredit);
           }
         } else {
           total = !isNaN(rawTotal) && rawTotal >= 0 ? rawTotal : Math.max(0, computedNet);
@@ -505,7 +524,7 @@ export class OrderService {
           // When submitting a Return Bill (or net invoice total is negative/return):
           // Automatically apply the return credit against existing unpaid/partially-paid invoices (oldest first - FIFO)
           if (isReturnBill || totalReturnValue > 0) {
-            const rawReturnCredit = isReturnBill ? (rawTotal < 0 ? Math.abs(rawTotal) : totalReturnValue) : (computedNet < 0 ? Math.abs(computedNet) : 0);
+            const rawReturnCredit = isReturnBill ? (rawTotal < 0 ? Math.abs(rawTotal) : netReturnCredit) : (computedNet < 0 ? Math.abs(computedNet) : 0);
 
             if (rawReturnCredit > 0) {
               let remainingCredit = rawReturnCredit;
@@ -593,6 +612,20 @@ export class OrderService {
                 data: { outstandingBalance: { decrement: sanitizedSettledDue } },
               });
 
+              // Create Master Receipt record for bulk payment settlement
+              const masterReceiptNumber = `REC-${Date.now().toString(36).toUpperCase()}`;
+              const masterReceipt = await tx.customerReceipt.create({
+                data: {
+                  receiptNumber: masterReceiptNumber,
+                  customerId: custId,
+                  totalAmount: sanitizedSettledDue,
+                  paymentMethod: data.paymentMethod || 'CASH',
+                  reference: `Settled from POS Invoice #${order.invoiceNumber || order.id}`,
+                  receiptDate: new Date(),
+                  notes: `Allocated to previous unpaid invoices from Invoice #${order.invoiceNumber || order.id}`,
+                },
+              });
+
               // FIFO Settlement on previous unpaid/partially paid credit invoices
               let remainingToSettle = sanitizedSettledDue;
               const unpaidOrders = await tx.order.findMany({
@@ -626,6 +659,7 @@ export class OrderService {
                       amount: settleForThis,
                       method: data.paymentMethod || 'CASH',
                       reference: `Settled from POS Invoice #${order.id}`,
+                      customerReceiptId: masterReceipt.id,
                     },
                   });
 
@@ -1318,14 +1352,15 @@ export class OrderService {
       }
 
       // 3. Bulletproof Financial and Customer Credit Delta Sync
+      // Signed arithmetic: when an invoice is negative (returns), oldTotal/newTotal is signed negative.
       const oldTotal = Number(existing.totalAmount || 0);
       const oldPaid = Number(existing.paidAmount || 0);
-      const oldCreditDue = Math.max(0, oldTotal - oldPaid);
+      const oldCreditDue = oldTotal < 0 ? oldTotal : Math.max(0, oldTotal - oldPaid);
       const oldSettledDue = Number((existing as any).settledDueAmount || 0);
 
       const newTotal = Number(data.totalAmount || 0);
-      const newPaid = Math.min(newTotal, Math.max(0, Number(data.paidAmount || 0)));
-      const newCreditDue = Math.max(0, newTotal - newPaid);
+      const newPaid = newTotal < 0 ? 0 : Math.min(newTotal, Math.max(0, Number(data.paidAmount || 0)));
+      const newCreditDue = newTotal < 0 ? newTotal : Math.max(0, newTotal - newPaid);
       const newSettledDue = data.settledDueAmount !== undefined ? Math.max(0, Number(data.settledDueAmount) || 0) : oldSettledDue;
 
       let targetCustomerId = data.customerId ? Number(data.customerId) : existing.customerId;
@@ -1369,6 +1404,20 @@ export class OrderService {
           : Math.max(0, Math.round((newSettledDue - oldSettledDue) * 100) / 100);
 
         if (settledDueToApply > 0) {
+          // Master Receipt for bulk debt settlement during invoice update
+          const masterReceiptNumber = `REC-${Date.now().toString(36).toUpperCase()}`;
+          const masterReceipt = await tx.customerReceipt.create({
+            data: {
+              receiptNumber: masterReceiptNumber,
+              customerId: custId,
+              totalAmount: settledDueToApply,
+              paymentMethod: data.paymentMethod || 'CASH',
+              reference: `Settled from POS Invoice #${existing.invoiceNumber || orderId}`,
+              receiptDate: new Date(),
+              notes: `Allocated to previous unpaid invoices from Invoice #${existing.invoiceNumber || orderId}`,
+            },
+          });
+
           let remainingToSettle = settledDueToApply;
           const unpaidOrders = await tx.order.findMany({
             where: {
@@ -1402,6 +1451,7 @@ export class OrderService {
                   amount: settleForThis,
                   method: data.paymentMethod || 'CASH',
                   reference: `Settled from POS Invoice #${orderId}`,
+                  customerReceiptId: masterReceipt.id,
                   createdAt: new Date(),
                 },
               });
@@ -1421,7 +1471,11 @@ export class OrderService {
             },
             select: { totalAmount: true, paidAmount: true },
           });
-          const oldCustDue = oldCustOrders.reduce((sum, o) => sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0)), 0);
+          const oldCustDue = oldCustOrders.reduce((sum, o) => {
+            const tot = Number(o.totalAmount) || 0;
+            const pd = Number(o.paidAmount) || 0;
+            return sum + (tot < 0 ? tot : Math.max(0, tot - pd));
+          }, 0);
           await tx.customer.update({
             where: { id: existing.customerId },
             data: { outstandingBalance: Math.round(oldCustDue * 100) / 100 },
@@ -1429,6 +1483,10 @@ export class OrderService {
         }
 
         // 3. Atomically synchronize live outstanding balance for active customer from all active orders
+        // Signed integer/float arithmetic for credit returns offsetting existing receivables:
+        // When an invoice has item returns that result in a negative net transaction (e.g. -Rs. 52,560) marked as Credit,
+        // ordTotal is signed negative. The negative balance must automatically decrement the customer's cumulative
+        // outstandingBalance (e.g. 91,650 + (-52,560) = Rs. 39,090), matching the frontend's adjusted accumulated due.
         const allActiveCustomerOrders = await tx.order.findMany({
           where: { customerId: custId, status: { not: OrderStatus.CANCELLED } },
           select: { id: true, totalAmount: true, paidAmount: true },
@@ -1436,7 +1494,8 @@ export class OrderService {
         const trueLiveDebt = allActiveCustomerOrders.reduce((sum, o) => {
           const ordTotal = o.id === orderId ? newTotal : Number(o.totalAmount || 0);
           const ordPaid = o.id === orderId ? newPaid : Number(o.paidAmount || 0);
-          return sum + Math.max(0, ordTotal - ordPaid);
+          const netOrderDue = ordTotal < 0 ? ordTotal : Math.max(0, ordTotal - ordPaid);
+          return sum + netOrderDue;
         }, 0);
         await tx.customer.update({
           where: { id: custId },
@@ -1731,8 +1790,13 @@ export class OrderService {
           },
           select: { totalAmount: true, paidAmount: true },
         });
+        // Signed arithmetic: credit returns offsetting existing receivables
         const trueRemainingDue = remainingCustomerOrders.reduce(
-          (sum, o) => sum + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0)),
+          (sum, o) => {
+            const tot = Number(o.totalAmount) || 0;
+            const pd = Number(o.paidAmount) || 0;
+            return sum + (tot < 0 ? tot : Math.max(0, tot - pd));
+          },
           0
         );
         await tx.customer.update({
@@ -1959,6 +2023,20 @@ export class OrderService {
         orderBy: { createdAt: strategy === 'LIFO' ? 'desc' : 'asc' },
       });
 
+      // Create Master Receipt record representing full lump-sum payment
+      const masterReceiptNumber = `REC-${Date.now().toString(36).toUpperCase()}`;
+      const customerReceipt = await tx.customerReceipt.create({
+        data: {
+          receiptNumber: masterReceiptNumber,
+          customerId,
+          totalAmount: paymentToApply,
+          paymentMethod: paymentMethod || 'CASH',
+          reference: notes?.trim() || `${strategy} Settlement`,
+          receiptDate: resolvedDate,
+          notes: notes?.trim() || undefined,
+        },
+      });
+
       let remainingCash = paymentToApply;
       const settledInvoiceDetails: { invoiceId: number; amountSettled: number }[] = [];
 
@@ -1986,13 +2064,14 @@ export class OrderService {
           },
         });
 
-        // Add explicit payment ledger transaction for this specific invoice
+        // Add explicit payment ledger transaction for this specific invoice linked to CustomerReceipt
         await tx.orderPayment.create({
           data: {
             orderId: order.id,
             amount: amountForThisOrder,
             method: paymentMethod || 'CASH',
             reference: notes?.trim() || 'Full Balance Settlement',
+            customerReceiptId: customerReceipt.id,
             createdAt: resolvedDate,
           },
         });
@@ -2015,6 +2094,7 @@ export class OrderService {
         settledAmount: paymentToApply,
         remainingBalance: updatedCustomer.outstandingBalance,
         settledInvoices: settledInvoiceDetails,
+        receipt: customerReceipt,
       };
     });
   }
@@ -2190,11 +2270,36 @@ export class OrderService {
           );
         }
 
-        // Calculate unit price and line amount
+        // Calculate unit price, gross return, and reclaim discount for garment shop
         const unitPrice = retItem.unitPrice !== undefined && Number(retItem.unitPrice) >= 0
           ? Number(retItem.unitPrice)
           : (originalOrderItem.unitPrice || (originalOrderItem.price / originalOrderItem.quantity));
-        const amount = Math.round(returnQty * unitPrice * 100) / 100;
+        const grossAmount = Math.round(returnQty * unitPrice * 100) / 100;
+
+        const originalSubtotal = Number(order.subtotal || 0);
+        const originalDiscount = Number(order.discount || 0);
+        const isPercentOrder = order.discountType === 'PERCENT' || parsedNotes.discountType === 'PERCENT';
+        let orderDiscountPercent = 0;
+        if (isPercentOrder && (Number(order.discountValue) > 0 || Number(parsedNotes.discountInput) > 0)) {
+          orderDiscountPercent = Number(order.discountValue || parsedNotes.discountInput || 0);
+        } else if (originalSubtotal > 0 && originalDiscount > 0) {
+          orderDiscountPercent = (originalDiscount / originalSubtotal) * 100;
+        }
+
+        // Proportional Return Credit Calculation (Discount Adjustment):
+        // When processing an item return, dynamically calculate the proportional discount applied to that specific item
+        // Formula: Net Return Credit = (Returned Qty * Unit Price) - ((Returned Qty * Unit Price) * Global Bill Discount %)
+        // Example: For 25 items at Rs. 2,090 with a 5% global bill discount:
+        // 52,250 - (52,250 * 0.05) = 49,637.50.
+        const itemDiscShare = originalOrderItem.discount && originalOrderItem.quantity > 0
+          ? Math.round((Number(originalOrderItem.discount) * (returnQty / originalOrderItem.quantity)) * 100) / 100
+          : 0;
+        const itemTotal = Math.max(0, Math.round((grossAmount - itemDiscShare) * 100) / 100);
+        const billDiscShare = orderDiscountPercent > 0
+          ? Math.round((itemTotal * (orderDiscountPercent / 100)) * 100) / 100
+          : 0;
+        const discountReclaimedByShop = Math.round((itemDiscShare + billDiscShare) * 100) / 100;
+        const amount = Math.max(0, Math.round((itemTotal - billDiscShare) * 100) / 100);
         totalReturnRefund += amount;
 
         // Extract variant descriptor

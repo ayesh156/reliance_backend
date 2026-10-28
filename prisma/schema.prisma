@@ -97,6 +97,7 @@ model Customer {
 
   orders             Order[]
   salesOrders        SalesOrder[] @relation("CustomerSalesOrders")
+  receipts           CustomerReceipt[]
   // ⭐ Soft delete / Archive support: Keeps sales ledger history while hiding customer from UI
   isActive           Boolean      @default(true)
   createdAt          DateTime     @default(now())
@@ -330,8 +331,34 @@ model OrderPayment {
   reference    String?       // Cheque No / Card Transaction ID
   chequeDate   DateTime?     // Cheque pass වෙන දිනය
   chequeStatus ChequeStatus? @default(PENDING)
+  customerReceiptId Int?              @map("customer_receipt_id")
+  customerReceipt   CustomerReceipt?  @relation(fields: [customerReceiptId], references: [id], onDelete: SetNull)
   createdAt    DateTime      @default(now())
   @@map("order_payments")
+}
+
+
+// ----------------------------------------------------
+// CUSTOMER MASTER RECEIPTS (Bulk / Lump-Sum Settlements)
+// ----------------------------------------------------
+
+model CustomerReceipt {
+  id            Int            @id @default(autoincrement())
+  receiptNumber String?        @unique @map("receipt_number") // e.g. "REC-00001"
+  customerId    Int            @map("customer_id")
+  customer      Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  totalAmount   Float          @map("total_amount")
+  paymentMethod String         @map("payment_method") // "CASH", "CARD", "CHEQUE", "BANK_TRANSFER"
+  reference     String?        // Check number, bank transaction ref, notes
+  receiptDate   DateTime       @default(now()) @map("receipt_date")
+  notes         String?        @db.Text
+  payments      OrderPayment[]
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  @@index([customerId])
+  @@index([receiptDate])
+  @@map("customer_receipts")
 }
 
 // ----------------------------------------------------

@@ -360,4 +360,25 @@ router.delete(
   productionController.delete
 );
 
+
+// Revert specific stage activity log entry & return to previous state
+router.post(
+  '/:id/revert-log/:logId',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF', 'CASHIER'),
+  productionController.revertActivityLog
+);
+router.post(
+  '/batches/:id/revert-log/:logId',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF', 'CASHIER'),
+  productionController.revertActivityLog
+);
+router.delete(
+  '/:id/activity-logs/:logId',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF', 'CASHIER'),
+  productionController.revertActivityLog
+);
+
 export default router;

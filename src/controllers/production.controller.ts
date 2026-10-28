@@ -516,6 +516,30 @@ export class ProductionController {
       next(err);
     }
   }
+
+  /**
+   * POST /api/production/:id/revert-log/:logId
+   * Revert a specific stage transition step and permanently delete its activity log
+   */
+  async revertActivityLog(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = parseInt(String(req.params.id), 10);
+      const logId = parseInt(String(req.params.logId), 10);
+      if (isNaN(id) || isNaN(logId)) {
+        return res.status(400).json({ success: false, message: 'Valid production order ID and log ID are required' });
+      }
+      const userId = (req as any).user?.userId || (req as any).user?.id;
+      const userRole = (req as any).user?.role;
+      const result = await productionService.revertActivityLog(id, logId, userId, userRole);
+      return res.status(200).json({
+        success: true,
+        message: 'Step reverted to previous state successfully and history entry removed',
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 
 export default new ProductionController();

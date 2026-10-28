@@ -30,7 +30,8 @@ export const downloadCustomerStatementPdf = async (req: Request, res: Response, 
     const doc = CustomerStatementPdfService.generate(
       customer,
       dueBillsData.bills || [],
-      dueBillsData.pendingCheques || []
+      dueBillsData.pendingCheques || [],
+      dueBillsData.latestReceipt || null
     );
 
     res.setHeader('Content-Type', 'application/pdf');
@@ -97,5 +98,33 @@ export const settleBillPayment = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Error in settleBillPayment:', error);
     return res.status(400).json({ success: false, message: error.message || 'Payment settlement failed.' });
+  }
+};
+
+/**
+ * Retrieve master receipts and cleared invoice allocations for a customer
+ */
+export const getCustomerReceipts = async (req: Request, res: Response) => {
+  try {
+    const rawCustomerId = Array.isArray(req.params.customerId)
+      ? req.params.customerId[0]
+      : req.params.customerId;
+    const customerId = Number(rawCustomerId);
+
+    if (!customerId || isNaN(customerId) || customerId <= 0) {
+      return res.status(400).json({ success: false, message: 'Valid customer ID is required.' });
+    }
+
+    const { startDate, endDate, search } = req.query;
+    const receipts = await CustomerCreditService.getCustomerReceipts(customerId, {
+      startDate: startDate ? String(startDate) : undefined,
+      endDate: endDate ? String(endDate) : undefined,
+      search: search ? String(search) : undefined,
+    });
+
+    return res.status(200).json({ success: true, receipts });
+  } catch (err: any) {
+    console.error('Error in getCustomerReceipts:', err);
+    return res.status(400).json({ success: false, message: err.message || 'Failed to fetch receipts.' });
   }
 };

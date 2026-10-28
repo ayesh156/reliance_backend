@@ -11,7 +11,12 @@ export class CustomerStatementPdfService {
    * secondary ledger table below the balance summary displaying Cheque No, Bank, Realization Date, and Amount.
    * If both outstanding balance is 0 and no pending cheques exist, retains a clean "No Outstanding Dues" statement.
    */
-  static generate(customer: any, dueBills: any[], pendingCheques: any[] = []): InstanceType<typeof PDFDocument> {
+  static generate(
+    customer: any,
+    dueBills: any[],
+    pendingCheques: any[] = [],
+    masterReceipt: any = null
+  ): InstanceType<typeof PDFDocument> {
     const doc = new PDFDocument({
       size: 'A4',
       margin: 0,
@@ -173,9 +178,27 @@ export class CustomerStatementPdfService {
       curY += 35;
     } else {
       dueBills.forEach((bill: any, idx: number) => {
+        if (curY > 710) {
+          doc.addPage();
+          curY = 51;
+        }
+
         const invNo = bill.invoiceNumber || `INV${bill.orderId || bill.id}`;
         const rawDate = bill.createdAt || bill.date;
-        const bDate = rawDate ? new Date(rawDate).toISOString().split('T')[0] : '-';
+        let bDateStr = '-';
+        if (rawDate) {
+          try {
+            const d = new Date(rawDate);
+            const yyyy = d.getFullYear();
+            const mm = String(d.getMonth() + 1).padStart(2, '0');
+            const dd = String(d.getDate()).padStart(2, '0');
+            const time = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+            bDateStr = `${yyyy}-${mm}-${dd} ${time}`;
+          } catch {
+            bDateStr = String(rawDate);
+          }
+        }
+
         const bType = bill.source === 'POS_WHOLESALE' ? 'WHOLESALE' : 'RETAIL';
         const bTotal = Number(bill.totalAmount || 0);
         const bPaid = Number(bill.paidAmount || 0);
@@ -183,32 +206,114 @@ export class CustomerStatementPdfService {
 
         doc.fontSize(8.6).font('Helvetica-Bold').fillColor('#444444').text(String(idx + 1), colX.num, curY, { width: colWidths.num, align: 'center', lineBreak: false });
         doc.font('Helvetica-Bold').fillColor('#000000').text(invNo, colX.inv + 2, curY, { width: colWidths.inv - 2, lineBreak: false });
-        doc.font('Helvetica').text(bDate, colX.date + 2, curY, { width: colWidths.date - 2, lineBreak: false });
-        doc.font('Helvetica-Bold').text(bType, colX.type + 2, curY, { width: colWidths.type - 2, lineBreak: false });
+        doc.font('Helvetica').fontSize(7.5).text(bDateStr, colX.date + 2, curY + 0.5, { width: colWidths.date - 2, lineBreak: false });
+        doc.font('Helvetica-Bold').fontSize(8.6).text(bType, colX.type + 2, curY, { width: colWidths.type - 2, lineBreak: false });
         doc.font('Helvetica').text(`Rs. ${bTotal.toLocaleString('en-LK')}`, colX.total, curY, { width: colWidths.total - 4, align: 'right', lineBreak: false });
         doc.text(`Rs. ${bPaid.toLocaleString('en-LK')}`, colX.paid, curY, { width: colWidths.paid - 4, align: 'right', lineBreak: false });
         doc.font('Helvetica-Bold').text(`Rs. ${bDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, colX.due, curY, { width: colWidths.due - 3, align: 'right', lineBreak: false });
 
-        curY += 20;
-        doc.moveTo(startX, curY - 4).lineTo(rightMargin, curY - 4).lineWidth(0.75).strokeColor('#bbbbbb').dash(2, { space: 2 }).stroke().undash();
+        curY += 16;
+
+        // Render line-by-line list of payments/allocations made against this specific bill
+        const paymentsList = Array.isArray(bill.payments) && bill.payments.length > 0
+          ? bill.payments
+          : (Array.isArray(bill.paymentHistory) ? bill.paymentHistory : []);
+
+        if (paymentsList.length > 0) {
+          paymentsList.forEach((p: any) => {
+            if (curY > 730) {
+              doc.addPage();
+              curY = 51;
+            }
+            const pRawDate = p.createdAt || p.paidAt || p.date;
+            let pDateStr = '-';
+            if (pRawDate) {
+              try {
+                const pd = new Date(pRawDate);
+                const py = pd.getFullYear();
+                const pm = String(pd.getMonth() + 1).padStart(2, '0');
+                const pday = String(pd.getDate()).padStart(2, '0');
+                const pTime = pd.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+                pDateStr = `${py}-${pm}-${pday} ${pTime}`;
+              } catch {}
+            }
+            const pMethod = String(p.method || 'CASH').toUpperCase();
+            const pRef = p.reference ? ` (${p.reference})` : '';
+            const pAmt = Number(p.amount || 0).toLocaleString('en-LK', { minimumFractionDigits: 2 });
+
+            doc.fontSize(7.5).font('Helvetica-Oblique').fillColor('#374151');
+            doc.text(`↳ Payment: ${pDateStr} | ${pMethod}${pRef} | Paid Amount: Rs. ${pAmt}`, colX.inv + 12, curY, {
+              width: pageWidth - (colX.inv - startX) - 12,
+              lineBreak: false,
+            });
+            curY += 12;
+          });
+        }
+
+        curY += 4;
+        doc.moveTo(startX, curY - 2).lineTo(rightMargin, curY - 2).lineWidth(0.75).strokeColor('#bbbbbb').dash(2, { space: 2 }).stroke().undash();
       });
     }
 
-    // Total Due Summary Row
-    curY += 10;
-    const sumWidth = 260;
-    const sumX = rightMargin - sumWidth;
-    const labelWidth = 145;
-    const valX = sumX + labelWidth;
-    const valWidth = sumWidth - labelWidth; // 115pt
+    // ── Dedicated Recent Settlement / Total Balance Deduction Summary Section ──
+    if (curY > 640) {
+      doc.addPage();
+      curY = 51;
+    }
 
-    doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
-    curY += 5;
-    doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#000000').text('Total Due Balance', sumX, curY, { width: labelWidth, align: 'left' });
-    doc.fontSize(11.5).font('Helvetica-Bold').fillColor(totalDue > 0 ? '#b91c1c' : '#15803d').text(`Rs. ${totalDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, valX, curY, { width: valWidth, align: 'right' });
-    curY += 16;
-    doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.8).strokeColor('#000000').stroke();
-    curY += 15;
+    curY += 12;
+    const totalHistoricalDue = dueBills.reduce((sum: number, b: any) => sum + Number(b.totalAmount || 0), 0);
+    const totalPaidAcrossBills = dueBills.reduce((sum: number, b: any) => sum + Number(b.paidAmount || 0), 0);
+    const finalNetDue = totalDue > 0 ? totalDue : Math.max(0, totalHistoricalDue - totalPaidAcrossBills);
+
+    // Resolve master receipt if provided or available on customer
+    const activeReceipt = masterReceipt || customer.latestReceipt || (dueBills as any)?.latestReceipt || null;
+    const hasMasterReceipt = Boolean(activeReceipt && Number(activeReceipt.totalAmount) > 0);
+
+    const sumBoxHeight = hasMasterReceipt ? 104 : 70;
+    const sumBoxWidth = 310;
+    const sumBoxX = rightMargin - sumBoxWidth;
+    const lblW = 180;
+    const valW = sumBoxWidth - lblW;
+
+    doc.rect(sumBoxX, curY, sumBoxWidth, sumBoxHeight).lineWidth(1).strokeColor('#000000').stroke();
+    doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#111111').text('RECENT SETTLEMENT / TOTAL BALANCE SUMMARY', sumBoxX + 10, curY + 8, { width: sumBoxWidth - 20, align: 'center', characterSpacing: 0.5 });
+    doc.moveTo(sumBoxX + 10, curY + 20).lineTo(rightMargin - 10, curY + 20).lineWidth(0.8).strokeColor('#444444').stroke();
+
+    let lineY = curY + 25;
+    if (hasMasterReceipt) {
+      const receiptDateStr = activeReceipt.receiptDate ? new Date(activeReceipt.receiptDate).toISOString().split('T')[0] : currentDate;
+      doc.fontSize(7.5).font('Helvetica-Bold').fillColor('#0284c7').text(`Master Receipt / Full Payment (${activeReceipt.receiptNumber || 'REC'} - ${receiptDateStr}):`, sumBoxX + 10, lineY);
+      doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#0284c7').text(`Rs. ${Number(activeReceipt.totalAmount).toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, sumBoxX + lblW, lineY, { width: valW - 10, align: 'right' });
+      lineY += 12;
+
+      if (Array.isArray(activeReceipt.payments) && activeReceipt.payments.length > 0) {
+        const clearedInvoicesSummary = activeReceipt.payments
+          .slice(0, 3)
+          .map((p: any) => `#${p.invoiceNumber || p.order?.invoiceNumber || p.orderId}: Rs. ${Number(p.amount).toLocaleString('en-LK')}`)
+          .join(', ');
+        doc.fontSize(6.5).font('Helvetica').fillColor('#555555').text(`Cleared: ${clearedInvoicesSummary}${activeReceipt.payments.length > 3 ? '...' : ''}`, sumBoxX + 10, lineY, { width: sumBoxWidth - 20, lineBreak: false });
+        lineY += 11;
+      }
+      doc.moveTo(sumBoxX + 10, lineY).lineTo(rightMargin - 10, lineY).lineWidth(0.5).strokeColor('#cccccc').stroke();
+      lineY += 4;
+    }
+
+    doc.fontSize(8).font('Helvetica').fillColor('#333333').text('Total Historical / Previous Due:', sumBoxX + 10, lineY);
+    doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#000000').text(`Rs. ${totalHistoricalDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, sumBoxX + lblW, lineY, { width: valW - 10, align: 'right' });
+    lineY += 13;
+
+    doc.fontSize(8).font('Helvetica').fillColor('#15803d').text('Total Paid / Settled Across Bills:', sumBoxX + 10, lineY);
+    doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#15803d').text(`- Rs. ${totalPaidAcrossBills.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, sumBoxX + lblW, lineY, { width: valW - 10, align: 'right' });
+    lineY += 13;
+
+    doc.moveTo(sumBoxX + 10, lineY).lineTo(rightMargin - 10, lineY).lineWidth(1).strokeColor('#000000').stroke();
+    lineY += 4;
+
+    doc.fontSize(9).font('Helvetica-Bold').fillColor('#000000').text('Final Net Outstanding Balance Due:', sumBoxX + 10, lineY);
+    doc.fontSize(10).font('Helvetica-Bold').fillColor(finalNetDue > 0 ? '#b91c1c' : '#15803d').text(`Rs. ${finalNetDue.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, sumBoxX + lblW, lineY - 1, { width: valW - 10, align: 'right' });
+
+    curY += sumBoxHeight + 15;
 
     // ── 4. PENDING / UNREALIZED CHEQUES IN HAND TABLE (When Present) ──
     if (cheques.length > 0) {
@@ -268,12 +373,16 @@ export class CustomerStatementPdfService {
       // Total In-Hand Cheques Summary Row
       curY += 6;
       const totalChequesAmt = cheques.reduce((acc: number, c: any) => acc + Number(c.amount || 0), 0);
-      doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
+      const chqSumX = rightMargin - 220;
+      const chqLabelWidth = 120;
+      const chqValX = chqSumX + chqLabelWidth;
+      const chqValWidth = 100;
+      doc.moveTo(chqSumX, curY).lineTo(rightMargin, curY).lineWidth(1.2).strokeColor('#000000').stroke();
       curY += 5;
-      doc.fontSize(10).font('Helvetica-Bold').fillColor('#000000').text('Total In-Hand Cheques', sumX, curY, { width: labelWidth, align: 'left' });
-      doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#0369a1').text(`Rs. ${totalChequesAmt.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, valX, curY, { width: valWidth, align: 'right' });
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#000000').text('Total In-Hand Cheques', chqSumX, curY, { width: chqLabelWidth, align: 'left' });
+      doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#0369a1').text(`Rs. ${totalChequesAmt.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, chqValX, curY, { width: chqValWidth, align: 'right' });
       curY += 15;
-      doc.moveTo(sumX, curY).lineTo(rightMargin, curY).lineWidth(1.5).strokeColor('#000000').stroke();
+      doc.moveTo(chqSumX, curY).lineTo(rightMargin, curY).lineWidth(1.5).strokeColor('#000000').stroke();
       curY += 15;
     }
 

@@ -560,7 +560,7 @@ export class InvoicePdfService {
         valColor: '#000000'
       });
 
-      renderSummaryRow('Return Adjustments', `- Rs ${totalReturnRefund.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
+      renderSummaryRow('Return Adjustments (Net Credit)', `- Rs ${totalReturnRefund.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`, {
         isBold: true,
         fontSize: 9,
         labelColor: '#b91c1c',

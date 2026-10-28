@@ -1623,7 +1623,7 @@ export class ProductionService {
             orderBy: { finishDate: 'desc' },
           },
           activityLogs: {
-            orderBy: { timestamp: 'desc' },
+            orderBy: { timestamp: 'asc' },
           },
         },
       }),
@@ -1795,7 +1795,7 @@ export class ProductionService {
             orderBy: { finishDate: 'desc' },
           },
           activityLogs: {
-            orderBy: { timestamp: 'desc' },
+            orderBy: { timestamp: 'asc' },
           },
         },
       }),
@@ -2009,8 +2009,8 @@ export class ProductionService {
           orderBy: { finishDate: 'desc' },
         },
         activityLogs: {
-          orderBy: { timestamp: 'desc' },
-        },
+            orderBy: { timestamp: 'asc' },
+          },
       },
     });
 
@@ -4226,17 +4226,11 @@ export class ProductionService {
         });
       }
 
-      // 3. Log activity log
-      await tx.batchActivityLog.create({
-        data: {
+      // 3. Permanently remove all LINE and WASHING activity log entries for clean history timeline
+      await tx.batchActivityLog.deleteMany({
+        where: {
           productionOrderId: order.id,
-          stage: 'LINE',
-          action: 'ROLLBACK_LINE',
-          quantity: 0,
-          notes: `Sewing Line & Wash progress reset back to Cutting stage by ${userRole || 'Admin'}`,
-          userId: userId || null,
-          userName: userRole || 'Admin',
-          timestamp: new Date(),
+          stage: { in: ['LINE', 'WASHING'] },
         },
       });
 
@@ -4334,17 +4328,11 @@ export class ProductionService {
         });
       }
 
-      // 3. Log activity log
-      await tx.batchActivityLog.create({
-        data: {
+      // 3. Permanently remove all WASHING activity log entries for clean history timeline
+      await tx.batchActivityLog.deleteMany({
+        where: {
           productionOrderId: order.id,
           stage: 'WASHING',
-          action: 'ROLLBACK_WASH',
-          quantity: 0,
-          notes: `Wash stage reset back to Sewing Line by ${userRole || 'Admin'}. Dispatched pieces returned to Line balance.`,
-          userId: userId || null,
-          userName: userRole || 'Admin',
-          timestamp: new Date(),
         },
       });
 
@@ -4363,6 +4351,166 @@ export class ProductionService {
       });
 
       return this.getByIdWithLogs(updated.id, tx);
+    });
+  }
+
+  /**
+   * Revert a specific stage activity log step and return to the previous state.
+   * Rolls back quantities, restores previous stage status, and permanently deletes
+   * the activity log entry from the history timeline.
+   */
+  async revertActivityLog(productionOrderId: number, logId: number, userId?: number, userRole?: string) {
+    const orderId = Number(productionOrderId);
+    const targetLogId = Number(logId);
+    if (!orderId || isNaN(orderId) || !targetLogId || isNaN(targetLogId)) {
+      throw new HttpException(400, 'Valid production order ID and log ID are required');
+    }
+
+    return prisma.$transaction(async (tx) => {
+      const log = await tx.batchActivityLog.findUnique({
+        where: { id: targetLogId },
+      });
+
+      if (!log || log.productionOrderId !== orderId) {
+        throw new HttpException(404, 'Activity log entry not found for this production batch');
+      }
+
+      const order = await tx.productionOrder.findUnique({
+        where: { id: orderId },
+        include: { product: true, variant: true },
+      });
+
+      if (!order) {
+        throw new HttpException(404, 'Production batch not found');
+      }
+
+      let currentTargetProducts: TargetProductMapping[] = [];
+      if (order.targetProducts) {
+        try {
+          currentTargetProducts = typeof order.targetProducts === 'string'
+            ? JSON.parse(order.targetProducts)
+            : (order.targetProducts as any);
+        } catch {
+          currentTargetProducts = [];
+        }
+      }
+      if (!Array.isArray(currentTargetProducts)) currentTargetProducts = [];
+
+      const act = (log.action || '').toUpperCase();
+      const stg = (log.stage || '').toUpperCase();
+      const qty = Number(log.quantity) || 0;
+
+      // 1. Revert Stock Sync / Wash Output
+      if (act.includes('STOCK') || act.includes('WASHED') || act.includes('WASH_COMPLETED')) {
+        if (qty > 0) {
+          if (order.variantId) {
+            const variant = await tx.productVariant.findUnique({ where: { id: order.variantId } });
+            if (variant) {
+              await tx.productVariant.update({
+                where: { id: variant.id },
+                data: { stock: Math.max(0, variant.stock - qty) },
+              });
+            }
+          } else if (currentTargetProducts.length > 0) {
+            let remainingRevert = qty;
+            for (const tp of currentTargetProducts) {
+              const vId = tp.variantId || order.variantId;
+              const wQty = Number(tp.washedQty || 0);
+              if (vId && wQty > 0 && remainingRevert > 0) {
+                const revertThis = Math.min(remainingRevert, wQty);
+                const variant = await tx.productVariant.findUnique({ where: { id: Number(vId) } });
+                if (variant) {
+                  await tx.productVariant.update({
+                    where: { id: variant.id },
+                    data: { stock: Math.max(0, variant.stock - revertThis) },
+                  });
+                }
+                remainingRevert -= revertThis;
+              }
+            }
+          }
+        }
+
+        const newWashedQty = Math.max(0, (order.washedQty || 0) - qty);
+        const newCompletedQty = Math.max(0, (order.completedQty || 0) - qty);
+        currentTargetProducts.forEach((tp) => {
+          tp.washedQty = Math.max(0, (Number(tp.washedQty) || 0) - qty);
+        });
+
+        await tx.productionOrder.update({
+          where: { id: order.id },
+          data: {
+            washedQty: newWashedQty,
+            completedQty: newCompletedQty,
+            status: 'WASHING',
+            isStockSynced: false,
+            stockSyncedAt: null,
+            targetProducts: serializeTargetProducts(currentTargetProducts),
+          },
+        });
+      }
+
+      // 2. Revert Send to Wash
+      else if (act.includes('SEND_TO_WASH') || (stg === 'WASHING' && act.includes('WASH'))) {
+        const newSentToWash = Math.max(0, (order.sentToWashQty || 0) - qty);
+        currentTargetProducts.forEach((tp) => {
+          tp.sentToWashQty = Math.max(0, (Number(tp.sentToWashQty) || 0) - qty);
+        });
+
+        const newStatus = newSentToWash === 0 ? 'LINE' : order.status;
+
+        await tx.productionOrder.update({
+          where: { id: order.id },
+          data: {
+            sentToWashQty: newSentToWash,
+            status: newStatus,
+            targetProducts: serializeTargetProducts(currentTargetProducts),
+          },
+        });
+      }
+
+      // 3. Revert Daily Sewn
+      else if (act.includes('SEWN') || act.includes('LOG_SEWN')) {
+        const newSewn = Math.max(0, (order.sewnQty || 0) - qty);
+        currentTargetProducts.forEach((tp) => {
+          tp.sewnQty = Math.max(0, (Number(tp.sewnQty) || 0) - qty);
+        });
+
+        await tx.productionOrder.update({
+          where: { id: order.id },
+          data: {
+            sewnQty: newSewn,
+            targetProducts: serializeTargetProducts(currentTargetProducts),
+          },
+        });
+      }
+
+      // 4. Revert Send to Line
+      else if (act.includes('SEND_TO_LINE') || (stg === 'LINE' && act.includes('LINE'))) {
+        const newLineSent = Math.max(0, ((order as any).lineSentQty || 0) - qty);
+        currentTargetProducts.forEach((tp) => {
+          tp.sentToLineQty = Math.max(0, (Number(tp.sentToLineQty) || Number(tp.lineSentQty) || 0) - qty);
+          tp.lineSentQty = tp.sentToLineQty;
+        });
+
+        const newStatus = newLineSent === 0 ? 'CUTTING' : order.status;
+
+        await tx.productionOrder.update({
+          where: { id: order.id },
+          data: {
+            lineSentQty: newLineSent,
+            status: newStatus,
+            targetProducts: serializeTargetProducts(currentTargetProducts),
+          },
+        });
+      }
+
+      // 5. Permanently delete the corresponding BatchActivityLog entry
+      await tx.batchActivityLog.delete({
+        where: { id: targetLogId },
+      });
+
+      return this.getByIdWithLogs(order.id, tx);
     });
   }
 }

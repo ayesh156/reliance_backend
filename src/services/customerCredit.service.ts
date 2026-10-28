@@ -244,6 +244,29 @@ export class CustomerCreditService {
       }
     }
 
+    // Retrieve recent master receipts for settlement audit trails
+    const recentReceipts = await prisma.customerReceipt.findMany({
+      where: { customerId },
+      orderBy: { receiptDate: 'desc' },
+      take: 10,
+      include: {
+        payments: {
+          include: {
+            order: {
+              select: {
+                id: true,
+                invoiceNumber: true,
+                totalAmount: true,
+                paidAmount: true,
+                status: true,
+                createdAt: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
     return {
       customer: {
         ...customer,
@@ -253,6 +276,8 @@ export class CustomerCreditService {
       },
       bills,
       pendingCheques,
+      recentReceipts,
+      latestReceipt: recentReceipts[0] || null,
     };
   }
 
@@ -305,12 +330,32 @@ export class CustomerCreditService {
       // 1. Create audit log entry with optional user-selected payment date
       const resolvedDate = paymentDate && !isNaN(new Date(paymentDate).getTime()) ? new Date(paymentDate) : new Date();
 
+      // Master Receipt creation for the settlement payment
+      let customerReceiptId: number | undefined = undefined;
+      let masterReceipt: any = null;
+      if (order.customerId) {
+        const receiptNumber = `REC-${Date.now().toString(36).toUpperCase()}`;
+        masterReceipt = await tx.customerReceipt.create({
+          data: {
+            receiptNumber,
+            customerId: order.customerId,
+            totalAmount: payAmount,
+            paymentMethod: paymentMethod || 'CASH',
+            reference: reference?.trim() || notes?.trim() || `Invoice #${order.invoiceNumber || order.id} Due Settlement`,
+            receiptDate: resolvedDate,
+            notes: notes?.trim() || undefined,
+          },
+        });
+        customerReceiptId = masterReceipt.id;
+      }
+
       const paymentLog = await tx.orderPayment.create({
         data: {
           orderId,
           amount: payAmount,
           method: paymentMethod || 'CASH',
           reference: reference?.trim() || notes?.trim() || 'Invoice Due Settlement',
+          customerReceiptId,
           createdAt: resolvedDate, // Records selected custom payment date
         },
       });
@@ -349,7 +394,86 @@ export class CustomerCreditService {
         paymentLog,
         updatedOrder,
         remainingBalance: Math.max(0, Math.round((total - newPaidAmount) * 100) / 100),
+        receipt: masterReceipt,
       };
     });
+  }
+
+  /**
+   * Retrieve Master Receipts with optional historical date range filtering
+   */
+  static async getCustomerReceipts(
+    customerId: number,
+    filters?: { startDate?: string; endDate?: string; search?: string }
+  ) {
+    const where: any = { customerId };
+
+    if (filters?.startDate || filters?.endDate) {
+      where.receiptDate = {};
+      if (filters.startDate) {
+        where.receiptDate.gte = new Date(filters.startDate);
+      }
+      if (filters.endDate) {
+        const end = new Date(filters.endDate);
+        end.setHours(23, 59, 59, 999);
+        where.receiptDate.lte = end;
+      }
+    }
+
+    if (filters?.search?.trim()) {
+      const q = filters.search.trim();
+      where.OR = [
+        { receiptNumber: { contains: q } },
+        { reference: { contains: q } },
+        { notes: { contains: q } },
+      ];
+    }
+
+    const receipts = await prisma.customerReceipt.findMany({
+      where,
+      orderBy: { receiptDate: 'desc' },
+      include: {
+        payments: {
+          include: {
+            order: {
+              select: {
+                id: true,
+                invoiceNumber: true,
+                totalAmount: true,
+                paidAmount: true,
+                status: true,
+                createdAt: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    return receipts.map((r) => ({
+      id: r.id,
+      receiptNumber: r.receiptNumber,
+      customerId: r.customerId,
+      totalAmount: r.totalAmount,
+      paymentMethod: r.paymentMethod,
+      reference: r.reference,
+      receiptDate: r.receiptDate,
+      notes: r.notes,
+      createdAt: r.createdAt,
+      payments: r.payments.map((p) => ({
+        id: p.id,
+        orderId: p.orderId,
+        amount: p.amount,
+        method: p.method,
+        reference: p.reference,
+        createdAt: p.createdAt,
+        invoiceNumber: p.order?.invoiceNumber || `INV${p.orderId}`,
+        invoiceTotal: p.order?.totalAmount || 0,
+        invoicePaid: p.order?.paidAmount || 0,
+        invoiceStatus: p.order?.status || 'PAID',
+        invoiceDate: p.order?.createdAt,
+      })),
+      clearedInvoicesCount: r.payments.length,
+    }));
   }
 }
