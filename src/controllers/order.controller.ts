@@ -33,7 +33,8 @@ export const createPosOrder = async (req: Request, res: Response, next: NextFunc
       userId,
     });
     sendCreated(res, order);
-  } catch (err) {
+  } catch (err: any) {
+    console.error('[createPosOrder Controller Error]:', err?.message || err);
     next(err);
   }
 };

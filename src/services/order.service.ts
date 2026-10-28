@@ -144,459 +144,534 @@ export class OrderService {
       amount: number | string;
     }>;
   }) {
-    if (!data.items || data.items.length === 0) {
-      throw new HttpException(400, 'Order must contain at least one item');
-    }
+    try {
+      const rawItems = Array.isArray(data.items) ? data.items : [];
+      if (rawItems.length === 0) {
+        throw new HttpException(400, 'Order must contain at least one valid line item');
+      }
 
-    const createdOrder = await prisma.$transaction(async (tx) => {
-      // 1. Verify and adjust variant inventory stock with strict input sanitization
-      for (const item of data.items) {
-        const rawQty = parseInt(String(item.quantity), 10);
-        const qty = Math.abs(rawQty);
-        const isReturnItem = Boolean(item.isReturn || rawQty < 0);
-
-        if (!qty || isNaN(qty) || qty <= 0) {
-          throw new HttpException(400, `Invalid line quantity specified for variant #${item.variantId}`);
-        }
-
-        const variant = await tx.productVariant.findUnique({
-          where: { id: Number(item.variantId) },
-          include: { product: { select: { name: true } } },
-        });
-
-        if (!variant) {
-          throw new HttpException(404, `Product variant #${item.variantId} not found`);
-        }
-
-        if (isReturnItem) {
-          // ⭐ Return item: Staged into dedicated Return Inventory (ReturnInventoryItem)
-          // Do NOT immediately increment main sellable stock.
-        } else {
-          // Normal sale item: Check availability and decrement inventory
-          if (variant.stock < qty) {
-            throw new HttpException(
-              400,
-              `Insufficient stock for "${variant.product.name}" (${variant.size || 'N/A'}/${variant.color || 'N/A'}). Available: ${variant.stock}`
-            );
+      const createdOrder = await prisma.$transaction(async (tx) => {
+        // 1. Verify and adjust variant inventory stock with strict input sanitization
+        for (const item of rawItems) {
+          const rawVariantId = Number(item.variantId);
+          if (!rawVariantId || isNaN(rawVariantId) || rawVariantId <= 0) {
+            throw new HttpException(400, `Invalid line item: missing or invalid variant ID`);
           }
 
-          // Deduct inventory stock atomically
-          await tx.productVariant.update({
-            where: { id: item.variantId },
-            data: { stock: { decrement: qty } },
+          const rawQty = parseInt(String(item.quantity), 10);
+          const qty = isNaN(rawQty) || Math.abs(rawQty) <= 0 ? 1 : Math.abs(rawQty);
+          const isReturnItem = Boolean(item.isReturn || rawQty < 0);
+
+          const variant = await tx.productVariant.findUnique({
+            where: { id: rawVariantId },
+            include: { product: { select: { name: true } } },
           });
-        }
-      }
 
-      // 2. Financial Calculations & Return Analysis
-      const returnItems = data.items.filter((i) => Boolean(i.isReturn || Number(i.quantity) < 0));
-      const saleItems = data.items.filter((i) => !i.isReturn && Number(i.quantity) > 0);
-      const isReturnOnlyBill = returnItems.length > 0 && saleItems.length === 0;
+          if (!variant) {
+            throw new HttpException(404, `Product variant #${rawVariantId} not found`);
+          }
 
-      const totalReturnValue = returnItems.reduce((sum, i) => {
-        const lineNet = Math.abs(Number(i.unitPrice)) * Math.abs(Number(i.quantity)) - (Number(i.discount) || 0);
-        return sum + Math.max(0, lineNet);
-      }, 0);
-
-      const totalSaleValue = saleItems.reduce((sum, i) => {
-        const lineNet = Math.abs(Number(i.unitPrice)) * Math.abs(Number(i.quantity)) - (Number(i.discount) || 0);
-        return sum + Math.max(0, lineNet);
-      }, 0);
-
-      const sanitizedDiscount = Math.max(0, Number(data.discount) || 0);
-      const computedNet = totalSaleValue - totalReturnValue - sanitizedDiscount;
-      const isReturnBill = Boolean(data.isReturnBill || isReturnOnlyBill || data.totalAmount < 0 || computedNet < 0);
-
-      // Financials
-      const rawTotal = Number(data.totalAmount);
-      const total = isReturnBill ? (rawTotal < 0 ? rawTotal : -Math.abs(rawTotal || totalReturnValue)) : Math.max(0, rawTotal || computedNet);
-      const paid = isReturnBill ? 0 : Math.min(Math.max(0, total), Math.max(0, Number(data.paidAmount) || 0));
-      const sanitizedSettledDue = Math.max(0, Number(data.settledDueAmount) || 0);
-      const isFullPaid = isReturnBill ? true : (paid >= total);
-
-      // Prepare Multi-Split, Multi-Cheque or standard payments
-      let paymentCreateEntries: any[] = [];
-      if (!isReturnBill) {
-        if (data.splitPayments && Array.isArray(data.splitPayments) && data.splitPayments.length > 0) {
-          paymentCreateEntries = data.splitPayments
-            .filter((s) => Number(s.amount) > 0)
-            .map((s) => {
-              let ref = s.reference || '';
-              if (s.method === 'CHEQUE') {
-                ref = `Cheque #${s.chequeNumber || ''}${s.bankName ? ` (${s.bankName})` : ''}`.trim() || ref || 'Cheque Payment';
-              } else if (s.method === 'BANK_TRANSFER' && s.bankName) {
-                ref = `Bank Transfer (${s.bankName})${ref ? `: ${ref}` : ''}`;
-              }
-              return {
-                amount: Number(s.amount),
-                method: s.method || 'CASH',
-                reference: ref || `${s.method} Payment`,
-                chequeDate: (s.method === 'CHEQUE' && s.date) ? new Date(s.date) : (s.date ? new Date(s.date) : undefined),
-              };
-            });
-        } else if (data.cheques && Array.isArray(data.cheques) && data.cheques.length > 0) {
-          paymentCreateEntries = data.cheques
-            .filter((c) => Number(c.amount) > 0)
-            .map((c) => ({
-              amount: Number(c.amount),
-              method: 'CHEQUE',
-              reference: `Cheque #${c.chequeNumber || ''}${c.bankName ? ` (${c.bankName})` : ''}`.trim() || 'Cheque Payment',
-              chequeDate: c.chequeDate ? new Date(c.chequeDate) : undefined,
-            }));
-        } else if (paid > 0) {
-          paymentCreateEntries = [
-            {
-              amount: paid,
-              method: data.paymentMethod || 'CASH',
-            },
-          ];
-        }
-      }
-
-      // Structure notes if split payments, multi-cheques, or discounts are included
-      let cleanUserNote = data.notes || '';
-      while (typeof cleanUserNote === 'string' && cleanUserNote.trim().startsWith('{')) {
-        try {
-          const parsed = JSON.parse(cleanUserNote);
-          cleanUserNote = parsed.userNotes || '';
-        } catch {
-          break;
-        }
-      }
-
-      const itemVariants = (data.items || []).map((i: any) => ({
-        variantId: Number(i.variantId),
-        size: i.size || i.selectedSize || '',
-        color: i.color || i.selectedColor || '',
-      }));
-
-      const itemDiscounts = (data.items || []).map((i: any) => ({
-        discountType: (i as any).discountType || 'FIXED',
-        discountInput: (i as any).discountInput !== undefined && (i as any).discountInput !== '' ? Number((i as any).discountInput) : 0,
-        discount: Number(i.discount) || 0,
-      }));
-
-      const hasItemVariants = itemVariants.some((iv: any) => iv.size || iv.color);
-      const hasItemDiscounts = itemDiscounts.some((id: any) => id.discount > 0 || id.discountInput > 0);
-      const hasOrderDiscount = (data as any).discountType || (data as any).discountInput !== undefined;
-
-      let finalOrderNotes: string | null = cleanUserNote || null;
-      if (
-        (data.splitPayments && data.splitPayments.length > 0) ||
-        (data.cheques && data.cheques.length > 0) ||
-        hasItemVariants ||
-        hasItemDiscounts ||
-        hasOrderDiscount ||
-        isReturnBill
-      ) {
-        try {
-          finalOrderNotes = JSON.stringify({
-            userNotes: cleanUserNote,
-            splitPayments: data.splitPayments || [],
-            cheques: data.cheques || (data.splitPayments ? data.splitPayments.filter((s) => s.method === 'CHEQUE') : []),
-            itemVariants: hasItemVariants ? itemVariants : undefined,
-            discountType: (data as any).discountType,
-            discountInput: (data as any).discountInput,
-            discountRate: (data as any).discountRate,
-            itemDiscounts: hasItemDiscounts ? itemDiscounts : undefined,
-            isReturnBill,
-            totalReturnValue: totalReturnValue > 0 ? totalReturnValue : undefined,
-          });
-        } catch {
-          finalOrderNotes = cleanUserNote || null;
-        }
-      }
-
-      // Automatic customer lookup & address backfill if customerId is missing or shippingAddress is empty
-      let targetCustomerId = data.customerId ? Number(data.customerId) : null;
-      let targetCustomer: any = null;
-
-      if (targetCustomerId) {
-        targetCustomer = await tx.customer.findUnique({
-          where: { id: targetCustomerId },
-          select: { id: true, name: true, phone: true, address: true, city: true, type: true, outstandingBalance: true, creditLimit: true },
-        });
-      } else if (data.customerPhone || data.customerName) {
-        const cleanPhone = data.customerPhone ? String(data.customerPhone).replace(/[^0-9]/g, '').slice(-9) : '';
-        const rawName = data.customerName ? String(data.customerName).trim() : '';
-
-        targetCustomer = await tx.customer.findFirst({
-          where: {
-            OR: [
-              ...(data.customerPhone ? [{ phone: data.customerPhone }] : []),
-              ...(cleanPhone ? [{ phone: { contains: cleanPhone } }] : []),
-              ...(rawName && rawName.toLowerCase() !== 'walk-in customer' ? [{ name: rawName }] : []),
-            ],
-          },
-          select: { id: true, name: true, phone: true, address: true, city: true, type: true, outstandingBalance: true, creditLimit: true },
-        });
-
-        if (targetCustomer) {
-          targetCustomerId = targetCustomer.id;
-        }
-      }
-
-      const resolvedShippingAddress = (data as any).shippingAddress || (data as any).customerAddress || targetCustomer?.address || null;
-      const resolvedCity = (data as any).city || (data as any).customerCity || targetCustomer?.city || null;
-
-      // 3. Create parent order entry
-      const order = await tx.order.create({
-        data: {
-          source: data.source || OrderSource.POS_RETAIL,
-          userId: data.userId,
-          customerId: targetCustomerId,
-          customerName: data.customerName || targetCustomer?.name || 'Walk-in Customer',
-          customerPhone: data.customerPhone || targetCustomer?.phone || null,
-          shippingAddress: resolvedShippingAddress,
-          city: resolvedCity,
-          subtotal: Number(data.subtotal) || total,
-          discount: sanitizedDiscount,
-          discountType: (data as any).discountType === 'PERCENT' ? 'PERCENT' : 'AMOUNT',
-          discountValue: Number((data as any).discountValue ?? (data as any).discountInput) || 0,
-          totalAmount: total,
-          paidAmount: isReturnBill ? 0 : paid,
-          settledDueAmount: sanitizedSettledDue,
-          status: isReturnBill ? OrderStatus.PAID : (isFullPaid ? OrderStatus.PAID : OrderStatus.PROCESSING),
-          paymentMethod: isReturnBill ? 'RETURN_CREDIT' : (data.paymentMethod || 'CASH'),
-          notes: finalOrderNotes,
-          isReturnBill: isReturnBill,
-          returnCreditApplied: 0,
-          refundedCashAmount: Math.max(0, Number(data.refundedCashAmount) || 0),
-          items: {
-            create: data.items.map((i) => {
-              const isRet = Boolean(i.isReturn || Number(i.quantity) < 0 || Number(i.price) < 0);
-              const absQty = Math.abs(Number(i.quantity));
-              const absPrice = i.price !== undefined && !isNaN(Number(i.price))
-                ? Math.abs(Number(i.price))
-                : Math.max(0, absQty * (Number(i.unitPrice) || 0) - (Number(i.discount) || 0));
-              return {
-                variantId: i.variantId,
-                quantity: absQty,
-                unitPrice: Number(i.unitPrice) || 0,
-                discount: Number(i.discount) || 0,
-                discountType: (i as any).discountType === 'PERCENT' ? 'PERCENT' : 'AMOUNT',
-                discountValue: Number((i as any).discountValue ?? (i as any).discountInput) || 0,
-                price: isRet ? -absPrice : absPrice,
-                isReturn: isRet,
-                returnReason: (i as any).returnReason || 'UNSOLD',
-                restockedToMain: false,
-              };
-            }),
-          },
-          payments: paymentCreateEntries.length > 0 ? { create: paymentCreateEntries } : undefined,
-        },
-        include: {
-          items: {
-            include: {
-              variant: {
-                include: {
-                  product: { select: { name: true } },
-                },
-              },
-            },
-          },
-          customer: true,
-          user: { select: { id: true, name: true, role: true } },
-        },
-      });
-
-      // 3.5. Stage returned items into dedicated Return Inventory ledger
-      for (const createdItem of createdOrder.items) {
-        if (createdItem.isReturn) {
-          await tx.returnInventoryItem.create({
-            data: {
-              orderId: createdOrder.id,
-              orderItemId: createdItem.id,
-              productId: createdItem.variant.productId,
-              variantId: createdItem.variantId,
-              quantity: createdItem.quantity,
-              restockedQty: 0,
-              reason: createdItem.returnReason || 'UNSOLD',
-              status: 'IN_RETURN_STOCK',
-            },
-          });
-        }
-      }
-
-      // 4. Return Credit Auto-Deduction & Customer Outstanding Debt Synchronization
-      if (targetCustomerId) {
-        const custId = Number(targetCustomerId);
-        const customerRecord = targetCustomer || (await tx.customer.findUnique({
-          where: { id: custId },
-        }));
-
-        if (!customerRecord) {
-          throw new HttpException(404, `Linked customer #${targetCustomerId} not found`);
-        }
-
-        // ⭐ DEDICATED RETURN BILL & CUSTOMER CREDIT AUTO-DEDUCTION
-        // When submitting a Return Bill (or net invoice total is negative/return):
-        // Automatically apply the return credit against existing unpaid/partially-paid invoices (oldest first - FIFO)
-        if (isReturnBill || totalReturnValue > 0) {
-          const rawReturnCredit = isReturnBill ? (rawTotal < 0 ? Math.abs(rawTotal) : totalReturnValue) : (computedNet < 0 ? Math.abs(computedNet) : 0);
-
-          if (rawReturnCredit > 0) {
-            let remainingCredit = rawReturnCredit;
-            let appliedCreditTotal = 0;
-
-            // Fetch previous unpaid or partially paid credit invoices for this customer (oldest first)
-            const unpaidOrders = await tx.order.findMany({
-              where: {
-                customerId: custId,
-                id: { not: order.id },
-                status: { not: OrderStatus.CANCELLED },
-              },
-              orderBy: { createdAt: 'asc' },
-            });
-
-            for (const prevOrder of unpaidOrders) {
-              if (remainingCredit <= 0) break;
-              const prevDue = Math.max(0, Math.round((Number(prevOrder.totalAmount) - Number(prevOrder.paidAmount)) * 100) / 100);
-              if (prevDue <= 0) continue;
-
-              const creditForThisOrder = Math.min(prevDue, remainingCredit);
-              const newPrevPaid = Math.round((Number(prevOrder.paidAmount) + creditForThisOrder) * 100) / 100;
-              const isPrevFullyPaid = newPrevPaid >= Number(prevOrder.totalAmount);
-
-              await tx.order.update({
-                where: { id: prevOrder.id },
-                data: {
-                  paidAmount: newPrevPaid,
-                  status: isPrevFullyPaid ? OrderStatus.PAID : prevOrder.status,
-                  updatedAt: new Date(),
-                },
-              });
-
-              await tx.orderPayment.create({
-                data: {
-                  orderId: prevOrder.id,
-                  amount: creditForThisOrder,
-                  method: 'RETURN_CREDIT',
-                  reference: `Return credit applied from Invoice #${order.invoiceNumber || order.id}`,
-                  createdAt: new Date(),
-                },
-              });
-
-              remainingCredit = Math.round((remainingCredit - creditForThisOrder) * 100) / 100;
-              appliedCreditTotal = Math.round((appliedCreditTotal + creditForThisOrder) * 100) / 100;
+          if (isReturnItem) {
+            // ⭐ Return item: Staged into dedicated Return Inventory (ReturnInventoryItem)
+            // Do NOT immediately increment main sellable stock.
+          } else {
+            // Normal sale item: Check availability and decrement inventory
+            if (variant.stock < qty) {
+              throw new HttpException(
+                400,
+                `Insufficient stock for "${variant.product.name}" (${variant.size || 'N/A'}/${variant.color || 'N/A'}). Available: ${variant.stock}`
+              );
             }
 
-            // Decrement customer's overall credit/due balance accurately
-            await tx.customer.update({
-              where: { id: custId },
-              data: {
-                outstandingBalance: { decrement: rawReturnCredit },
-              },
+            // Deduct inventory stock atomically
+            await tx.productVariant.update({
+              where: { id: rawVariantId },
+              data: { stock: { decrement: qty } },
             });
-
-            // Update returnCreditApplied on this order
-            await tx.order.update({
-              where: { id: order.id },
-              data: {
-                returnCreditApplied: appliedCreditTotal,
-              },
-            });
-            order.returnCreditApplied = appliedCreditTotal;
           }
         }
 
-        // Standard Sale Debt Settlement & Outstanding Balance Propagation (for non-return purchases)
-        if (!isReturnBill && computedNet > 0) {
-          const unpaidBalance = Math.max(0, Math.round((total - paid) * 100) / 100);
-          const custCreditLimit = Number(targetCustomer?.creditLimit || 0);
-          const currentOutstanding = Number(targetCustomer?.outstandingBalance || 0);
+        // 2. Financial Calculations & Return Analysis
+        const returnItems = rawItems.filter((i) => Boolean(i.isReturn || Number(i.quantity) < 0));
+        const saleItems = rawItems.filter((i) => !i.isReturn && Number(i.quantity) > 0);
+        const isReturnOnlyBill = returnItems.length > 0 && saleItems.length === 0;
 
-          // Check if customer exceeds allowable credit limit
-          if (unpaidBalance > 0 && custCreditLimit > 0 && (currentOutstanding + unpaidBalance) > custCreditLimit) {
-            throw new HttpException(
-              400,
-              `Transaction exceeds allowed credit limit of Rs. ${custCreditLimit}. Current outstanding: Rs. ${currentOutstanding}`
-            );
+        const totalReturnValue = returnItems.reduce((sum, i) => {
+          const uPrice = isNaN(Number(i.unitPrice)) ? 0 : Math.abs(Number(i.unitPrice));
+          const q = isNaN(Number(i.quantity)) ? 1 : Math.abs(Number(i.quantity));
+          const d = isNaN(Number(i.discount)) ? 0 : Number(i.discount);
+          const lineNet = uPrice * q - d;
+          return sum + Math.max(0, isNaN(lineNet) ? 0 : lineNet);
+        }, 0);
+
+        const totalSaleValue = saleItems.reduce((sum, i) => {
+          const uPrice = isNaN(Number(i.unitPrice)) ? 0 : Math.abs(Number(i.unitPrice));
+          const q = isNaN(Number(i.quantity)) ? 1 : Math.abs(Number(i.quantity));
+          const d = isNaN(Number(i.discount)) ? 0 : Number(i.discount);
+          const lineNet = uPrice * q - d;
+          return sum + Math.max(0, isNaN(lineNet) ? 0 : lineNet);
+        }, 0);
+
+        const sanitizedDiscount = isNaN(Number(data.discount)) ? 0 : Math.max(0, Number(data.discount));
+        const computedNet = totalSaleValue - totalReturnValue - sanitizedDiscount;
+        const isReturnBill = Boolean(data.isReturnBill || isReturnOnlyBill || data.totalAmount < 0 || computedNet < 0);
+
+        // Financials with strict NaN guards
+        const rawTotal = Number(data.totalAmount);
+        let total = 0;
+        if (isReturnBill) {
+          if (!isNaN(rawTotal) && rawTotal < 0) {
+            total = rawTotal;
+          } else if (!isNaN(rawTotal) && rawTotal > 0) {
+            total = -rawTotal;
+          } else {
+            total = computedNet < 0 ? computedNet : -Math.abs(totalReturnValue);
+          }
+        } else {
+          total = !isNaN(rawTotal) && rawTotal >= 0 ? rawTotal : Math.max(0, computedNet);
+        }
+        if (isNaN(total)) total = 0;
+
+        const rawPaid = Number(data.paidAmount);
+        const safePaid = isNaN(rawPaid) ? 0 : Math.max(0, rawPaid);
+        const paid = isReturnBill ? 0 : Math.min(Math.max(0, total), safePaid);
+        const sanitizedSettledDue = isNaN(Number(data.settledDueAmount)) ? 0 : Math.max(0, Number(data.settledDueAmount));
+        const sanitizedRefundedCash = isNaN(Number(data.refundedCashAmount)) ? 0 : Math.max(0, Number(data.refundedCashAmount));
+        const rawSubtotal = Number(data.subtotal);
+        const subtotal = !isNaN(rawSubtotal) && rawSubtotal >= 0 ? rawSubtotal : totalSaleValue;
+        const isFullPaid = isReturnBill ? true : (paid >= total);
+
+        // Prepare Multi-Split, Multi-Cheque or standard payments with safe date parsing
+        let paymentCreateEntries: any[] = [];
+        if (!isReturnBill) {
+          if (Array.isArray(data.splitPayments) && data.splitPayments.length > 0) {
+            paymentCreateEntries = data.splitPayments
+              .filter((s) => s && !isNaN(Number(s.amount)) && Number(s.amount) > 0)
+              .map((s) => {
+                let ref = (s.reference || '').trim();
+                const sMethod = String(s.method || 'CASH').toUpperCase();
+                if (sMethod === 'CHEQUE') {
+                  ref = `Cheque #${s.chequeNumber || ''}${s.bankName ? ` (${s.bankName})` : ''}`.trim() || ref || 'Cheque Payment';
+                } else if (sMethod === 'BANK_TRANSFER' && s.bankName) {
+                  ref = `Bank Transfer (${s.bankName})${ref ? `: ${ref}` : ''}`;
+                }
+
+                let parsedDate: Date | undefined = undefined;
+                const rawDate = (sMethod === 'CHEQUE' && s.date) ? s.date : (s.date || (s as any).chequeDate);
+                if (rawDate) {
+                  const d = new Date(rawDate);
+                  if (!isNaN(d.getTime())) {
+                    parsedDate = d;
+                  }
+                }
+
+                return {
+                  amount: Number(s.amount),
+                  method: sMethod,
+                  reference: ref || `${sMethod} Payment`,
+                  chequeDate: parsedDate,
+                };
+              });
+          } else if (Array.isArray(data.cheques) && data.cheques.length > 0) {
+            paymentCreateEntries = data.cheques
+              .filter((c) => c && !isNaN(Number(c.amount)) && Number(c.amount) > 0)
+              .map((c) => {
+                let parsedDate: Date | undefined = undefined;
+                if (c.chequeDate) {
+                  const d = new Date(c.chequeDate);
+                  if (!isNaN(d.getTime())) {
+                    parsedDate = d;
+                  }
+                }
+                return {
+                  amount: Number(c.amount),
+                  method: 'CHEQUE',
+                  reference: `Cheque #${c.chequeNumber || ''}${c.bankName ? ` (${c.bankName})` : ''}`.trim() || 'Cheque Payment',
+                  chequeDate: parsedDate,
+                };
+              });
+          } else if (paid > 0) {
+            paymentCreateEntries = [
+              {
+                amount: paid,
+                method: String(data.paymentMethod || 'CASH').toUpperCase(),
+              },
+            ];
+          }
+        }
+
+        // Structure notes if split payments, multi-cheques, or discounts are included
+        let cleanUserNote = data.notes || '';
+        while (typeof cleanUserNote === 'string' && cleanUserNote.trim().startsWith('{')) {
+          try {
+            const parsed = JSON.parse(cleanUserNote);
+            cleanUserNote = parsed.userNotes || '';
+          } catch {
+            break;
+          }
+        }
+
+        const itemVariants = (rawItems || []).map((i: any) => ({
+          variantId: Number(i.variantId) || 0,
+          size: i.size || i.selectedSize || '',
+          color: i.color || i.selectedColor || '',
+        }));
+
+        const itemDiscounts = (rawItems || []).map((i: any) => ({
+          discountType: (i as any).discountType || 'FIXED',
+          discountInput: (i as any).discountInput !== undefined && (i as any).discountInput !== '' && !isNaN(Number((i as any).discountInput))
+            ? Number((i as any).discountInput)
+            : 0,
+          discount: isNaN(Number(i.discount)) ? 0 : Number(i.discount),
+        }));
+
+        const hasItemVariants = itemVariants.some((iv: any) => iv.size || iv.color);
+        const hasItemDiscounts = itemDiscounts.some((id: any) => id.discount > 0 || id.discountInput > 0);
+        const hasOrderDiscount = (data as any).discountType || (data as any).discountInput !== undefined;
+
+        let finalOrderNotes: string | null = cleanUserNote || null;
+        if (
+          (data.splitPayments && data.splitPayments.length > 0) ||
+          (data.cheques && data.cheques.length > 0) ||
+          hasItemVariants ||
+          hasItemDiscounts ||
+          hasOrderDiscount ||
+          isReturnBill
+        ) {
+          try {
+            finalOrderNotes = JSON.stringify({
+              userNotes: cleanUserNote,
+              splitPayments: data.splitPayments || [],
+              cheques: data.cheques || (data.splitPayments ? data.splitPayments.filter((s) => s.method === 'CHEQUE') : []),
+              itemVariants: hasItemVariants ? itemVariants : undefined,
+              discountType: (data as any).discountType,
+              discountInput: (data as any).discountInput,
+              discountRate: (data as any).discountRate,
+              itemDiscounts: hasItemDiscounts ? itemDiscounts : undefined,
+              isReturnBill,
+              totalReturnValue: totalReturnValue > 0 ? totalReturnValue : undefined,
+            });
+          } catch {
+            finalOrderNotes = cleanUserNote || null;
+          }
+        }
+
+        // Automatic customer lookup & address backfill if customerId is missing or shippingAddress is empty
+        let targetCustomerId: number | null = null;
+        if (data.customerId !== undefined && data.customerId !== null && String(data.customerId).trim() !== '') {
+          const parsedId = Number(data.customerId);
+          if (!isNaN(parsedId) && parsedId > 0) {
+            targetCustomerId = parsedId;
+          }
+        }
+
+        let targetCustomer: any = null;
+
+        if (targetCustomerId) {
+          targetCustomer = await tx.customer.findUnique({
+            where: { id: targetCustomerId },
+            select: { id: true, name: true, phone: true, address: true, city: true, type: true, outstandingBalance: true, creditLimit: true },
+          });
+        } else if (data.customerPhone || data.customerName) {
+          const cleanPhone = data.customerPhone ? String(data.customerPhone).replace(/[^0-9]/g, '').slice(-9) : '';
+          const rawName = data.customerName ? String(data.customerName).trim() : '';
+
+          targetCustomer = await tx.customer.findFirst({
+            where: {
+              OR: [
+                ...(data.customerPhone ? [{ phone: data.customerPhone }] : []),
+                ...(cleanPhone ? [{ phone: { contains: cleanPhone } }] : []),
+                ...(rawName && rawName.toLowerCase() !== 'walk-in customer' ? [{ name: rawName }] : []),
+              ],
+            },
+            select: { id: true, name: true, phone: true, address: true, city: true, type: true, outstandingBalance: true, creditLimit: true },
+          });
+
+          if (targetCustomer) {
+            targetCustomerId = targetCustomer.id;
+          }
+        }
+
+        const resolvedShippingAddress = (data as any).shippingAddress || (data as any).customerAddress || targetCustomer?.address || null;
+        const resolvedCity = (data as any).city || (data as any).customerCity || targetCustomer?.city || null;
+
+        const rawDiscVal = Number((data as any).discountValue ?? (data as any).discountInput);
+        const safeOrderDiscountValue = isNaN(rawDiscVal) ? 0 : Math.max(0, rawDiscVal);
+
+        // 3. Create parent order entry with bulletproof fallback numbers
+        const order = await tx.order.create({
+          data: {
+            source: data.source || OrderSource.POS_RETAIL,
+            userId: data.userId,
+            customerId: targetCustomerId,
+            customerName: data.customerName || targetCustomer?.name || 'Walk-in Customer',
+            customerPhone: data.customerPhone || targetCustomer?.phone || null,
+            shippingAddress: resolvedShippingAddress,
+            city: resolvedCity,
+            subtotal: subtotal,
+            discount: sanitizedDiscount,
+            discountType: (data as any).discountType === 'PERCENT' ? 'PERCENT' : 'AMOUNT',
+            discountValue: safeOrderDiscountValue,
+            totalAmount: total,
+            paidAmount: isReturnBill ? 0 : paid,
+            settledDueAmount: sanitizedSettledDue,
+            status: isReturnBill ? OrderStatus.PAID : (isFullPaid ? OrderStatus.PAID : OrderStatus.PROCESSING),
+            paymentMethod: isReturnBill ? 'RETURN_CREDIT' : (data.paymentMethod || 'CASH'),
+            notes: finalOrderNotes,
+            isReturnBill: isReturnBill,
+            returnCreditApplied: 0,
+            refundedCashAmount: sanitizedRefundedCash,
+            items: {
+              create: rawItems.map((i) => {
+                const rawVarId = Number(i.variantId);
+                const absQty = Math.abs(Number(i.quantity));
+                const safeQty = isNaN(absQty) || absQty <= 0 ? 1 : Math.round(absQty);
+                const isRet = Boolean(i.isReturn || Number(i.quantity) < 0 || Number(i.price) < 0);
+                const safeUnitPrice = isNaN(Number(i.unitPrice)) ? 0 : Math.max(0, Number(i.unitPrice));
+                const safeItemDisc = isNaN(Number(i.discount)) ? 0 : Math.max(0, Number(i.discount));
+                const rawItemDiscVal = Number((i as any).discountValue ?? (i as any).discountInput);
+                const safeItemDiscVal = isNaN(rawItemDiscVal) ? 0 : Math.max(0, rawItemDiscVal);
+                const itemDiscType = (i as any).discountType === 'PERCENT' ? 'PERCENT' : 'AMOUNT';
+
+                let absPrice = 0;
+                if (i.price !== undefined && !isNaN(Number(i.price))) {
+                  absPrice = Math.abs(Number(i.price));
+                } else {
+                  absPrice = Math.max(0, (safeQty * safeUnitPrice) - safeItemDisc);
+                }
+                if (isNaN(absPrice)) absPrice = 0;
+
+                return {
+                  variantId: rawVarId,
+                  quantity: safeQty,
+                  unitPrice: safeUnitPrice,
+                  discount: safeItemDisc,
+                  discountType: itemDiscType,
+                  discountValue: safeItemDiscVal,
+                  price: isRet ? -absPrice : absPrice,
+                  isReturn: isRet,
+                  returnReason: (i as any).returnReason || 'UNSOLD',
+                  restockedToMain: false,
+                };
+              }),
+            },
+            payments: paymentCreateEntries.length > 0 ? { create: paymentCreateEntries } : undefined,
+          },
+          include: {
+            items: {
+              include: {
+                variant: {
+                  include: {
+                    product: { select: { name: true } },
+                  },
+                },
+              },
+            },
+            customer: true,
+            user: { select: { id: true, name: true, role: true } },
+          },
+        });
+
+        // 3.5. Stage returned items into dedicated Return Inventory ledger
+        for (const createdItem of order.items) {
+          if (createdItem.isReturn) {
+            await tx.returnInventoryItem.create({
+              data: {
+                orderId: order.id,
+                orderItemId: createdItem.id,
+                productId: createdItem.variant.productId,
+                variantId: createdItem.variantId,
+                quantity: createdItem.quantity,
+                restockedQty: 0,
+                reason: createdItem.returnReason || 'UNSOLD',
+                status: 'IN_RETURN_STOCK',
+              },
+            });
+          }
+        }
+
+        // 4. Return Credit Auto-Deduction & Customer Outstanding Debt Synchronization
+        if (targetCustomerId) {
+          const custId = Number(targetCustomerId);
+          const customerRecord = targetCustomer || (await tx.customer.findUnique({
+            where: { id: custId },
+          }));
+
+          if (!customerRecord) {
+            throw new HttpException(404, `Linked customer #${targetCustomerId} not found`);
           }
 
-          // Directly decrement customer outstanding if settledDueAmount > 0
-          if (sanitizedSettledDue > 0) {
-            await tx.customer.update({
-              where: { id: custId },
-              data: { outstandingBalance: { decrement: sanitizedSettledDue } },
-            });
+          // ⭐ DEDICATED RETURN BILL & CUSTOMER CREDIT AUTO-DEDUCTION
+          // When submitting a Return Bill (or net invoice total is negative/return):
+          // Automatically apply the return credit against existing unpaid/partially-paid invoices (oldest first - FIFO)
+          if (isReturnBill || totalReturnValue > 0) {
+            const rawReturnCredit = isReturnBill ? (rawTotal < 0 ? Math.abs(rawTotal) : totalReturnValue) : (computedNet < 0 ? Math.abs(computedNet) : 0);
 
-            // FIFO Settlement on previous unpaid/partially paid credit invoices
-            let remainingToSettle = sanitizedSettledDue;
-            const unpaidOrders = await tx.order.findMany({
-              where: {
-                customerId: custId,
-                id: { not: order.id },
-                status: { not: OrderStatus.CANCELLED },
-              },
-              orderBy: { createdAt: 'asc' },
-            });
+            if (rawReturnCredit > 0) {
+              let remainingCredit = rawReturnCredit;
+              let appliedCreditTotal = 0;
 
-            for (const prevOrder of unpaidOrders) {
-              if (remainingToSettle <= 0) break;
-              const unpaidAmount = Math.max(0, prevOrder.totalAmount - prevOrder.paidAmount);
-              if (unpaidAmount > 0 && remainingToSettle > 0) {
-                const settleForThis = Math.min(unpaidAmount, remainingToSettle);
-                const newPrevPaid = prevOrder.paidAmount + settleForThis;
-                const isPrevPaid = newPrevPaid >= prevOrder.totalAmount;
+              // Fetch previous unpaid or partially paid credit invoices for this customer (oldest first)
+              const unpaidOrders = await tx.order.findMany({
+                where: {
+                  customerId: custId,
+                  id: { not: order.id },
+                  status: { not: OrderStatus.CANCELLED },
+                },
+                orderBy: { createdAt: 'asc' },
+              });
+
+              for (const prevOrder of unpaidOrders) {
+                if (remainingCredit <= 0) break;
+                const prevDue = Math.max(0, Math.round((Number(prevOrder.totalAmount) - Number(prevOrder.paidAmount)) * 100) / 100);
+                if (prevDue <= 0) continue;
+
+                const creditForThisOrder = Math.min(prevDue, remainingCredit);
+                const newPrevPaid = Math.round((Number(prevOrder.paidAmount) + creditForThisOrder) * 100) / 100;
+                const isPrevFullyPaid = newPrevPaid >= Number(prevOrder.totalAmount);
 
                 await tx.order.update({
                   where: { id: prevOrder.id },
                   data: {
-                    paidAmount: { increment: settleForThis },
-                    status: isPrevPaid ? OrderStatus.PAID : prevOrder.status,
+                    paidAmount: newPrevPaid,
+                    status: isPrevFullyPaid ? OrderStatus.PAID : prevOrder.status,
+                    updatedAt: new Date(),
                   },
                 });
 
                 await tx.orderPayment.create({
                   data: {
                     orderId: prevOrder.id,
-                    amount: settleForThis,
-                    method: data.paymentMethod || 'CASH',
-                    reference: `Settled from POS Invoice #${order.id}`,
+                    amount: creditForThisOrder,
+                    method: 'RETURN_CREDIT',
+                    reference: `Return credit applied from Invoice #${order.invoiceNumber || order.id}`,
+                    createdAt: new Date(),
                   },
                 });
 
-                remainingToSettle -= settleForThis;
+                remainingCredit = Math.round((remainingCredit - creditForThisOrder) * 100) / 100;
+                appliedCreditTotal = Math.round((appliedCreditTotal + creditForThisOrder) * 100) / 100;
               }
+
+              // Decrement customer's overall credit/due balance accurately
+              await tx.customer.update({
+                where: { id: custId },
+                data: {
+                  outstandingBalance: { decrement: rawReturnCredit },
+                },
+              });
+
+              // Update returnCreditApplied on this order
+              await tx.order.update({
+                where: { id: order.id },
+                data: {
+                  returnCreditApplied: appliedCreditTotal,
+                },
+              });
+              order.returnCreditApplied = appliedCreditTotal;
             }
           }
 
-          // Atomic Customer Debt Synchronization:
-          // Increments Customer.outstandingBalance whenever unpaid balance remains on ANY payment method
-          if (unpaidBalance > 0) {
-            await tx.customer.update({
-              where: { id: custId },
-              data: { outstandingBalance: { increment: unpaidBalance } },
-            });
+          // Standard Sale Debt Settlement & Outstanding Balance Propagation (for non-return purchases)
+          if (!isReturnBill && computedNet > 0) {
+            const unpaidBalance = Math.max(0, Math.round((total - paid) * 100) / 100);
+            const custCreditLimit = Number(targetCustomer?.creditLimit || 0);
+            const currentOutstanding = Number(targetCustomer?.outstandingBalance || 0);
+
+            // Check if customer exceeds allowable credit limit
+            if (unpaidBalance > 0 && custCreditLimit > 0 && (currentOutstanding + unpaidBalance) > custCreditLimit) {
+              throw new HttpException(
+                400,
+                `Transaction exceeds allowed credit limit of Rs. ${custCreditLimit}. Current outstanding: Rs. ${currentOutstanding}`
+              );
+            }
+
+            // Directly decrement customer outstanding if settledDueAmount > 0
+            if (sanitizedSettledDue > 0) {
+              await tx.customer.update({
+                where: { id: custId },
+                data: { outstandingBalance: { decrement: sanitizedSettledDue } },
+              });
+
+              // FIFO Settlement on previous unpaid/partially paid credit invoices
+              let remainingToSettle = sanitizedSettledDue;
+              const unpaidOrders = await tx.order.findMany({
+                where: {
+                  customerId: custId,
+                  id: { not: order.id },
+                  status: { not: OrderStatus.CANCELLED },
+                },
+                orderBy: { createdAt: 'asc' },
+              });
+
+              for (const prevOrder of unpaidOrders) {
+                if (remainingToSettle <= 0) break;
+                const unpaidAmount = Math.max(0, prevOrder.totalAmount - prevOrder.paidAmount);
+                if (unpaidAmount > 0 && remainingToSettle > 0) {
+                  const settleForThis = Math.min(unpaidAmount, remainingToSettle);
+                  const newPrevPaid = prevOrder.paidAmount + settleForThis;
+                  const isPrevPaid = newPrevPaid >= prevOrder.totalAmount;
+
+                  await tx.order.update({
+                    where: { id: prevOrder.id },
+                    data: {
+                      paidAmount: { increment: settleForThis },
+                      status: isPrevPaid ? OrderStatus.PAID : prevOrder.status,
+                    },
+                  });
+
+                  await tx.orderPayment.create({
+                    data: {
+                      orderId: prevOrder.id,
+                      amount: settleForThis,
+                      method: data.paymentMethod || 'CASH',
+                      reference: `Settled from POS Invoice #${order.id}`,
+                    },
+                  });
+
+                  remainingToSettle -= settleForThis;
+                }
+              }
+            }
+
+            // Atomic Customer Debt Synchronization:
+            // Increments Customer.outstandingBalance whenever unpaid balance remains on ANY payment method
+            if (unpaidBalance > 0) {
+              await tx.customer.update({
+                where: { id: custId },
+                data: { outstandingBalance: { increment: unpaidBalance } },
+              });
+            }
           }
+
+          const freshCustomer = await tx.customer.findUnique({
+            where: { id: custId },
+          });
+
+          (order as any).customer = freshCustomer;
         }
 
-        const freshCustomer = await tx.customer.findUnique({
-          where: { id: custId },
-        });
+        return order;
+      });
 
-        (order as any).customer = freshCustomer;
+      /**
+       * SSE REAL-TIME CROSS-DEVICE BROADCAST HOOK
+       */
+      try {
+        broadcastLiveEvent('invoice_created', createdOrder);
+      } catch (sseErr) {
+        console.error('[SSE Broadcast] Failed to broadcast invoice_created after transaction commit:', sseErr);
       }
 
-      return order;
-    });
-
-    /**
-     * ========================================================================
-     * SSE REAL-TIME CROSS-DEVICE BROADCAST HOOK
-     * ========================================================================
-     * Executed strictly AFTER prisma.$transaction has committed successfully.
-     * Event name: 'invoice_created' (strictly matches frontend EventSource listener).
-     * Transmits the newly generated invoice across all terminals (POS, Mobile, Desktop).
-     */
-    try {
-      broadcastLiveEvent('invoice_created', createdOrder);
-    } catch (sseErr) {
-      console.error('[SSE Broadcast] Failed to broadcast invoice_created after transaction commit:', sseErr);
+      return createdOrder;
+    } catch (err: any) {
+      console.error('[createPosOrder Service Error]:', err?.message || err);
+      if (err instanceof HttpException) throw err;
+      throw new HttpException(
+        err?.status || 500,
+        err?.message || 'Failed to process POS checkout transaction'
+      );
     }
-
-    return createdOrder;
   }
 
   /**
