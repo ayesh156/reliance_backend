@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { orderService } from '../services/order.service.ts';
 import { sendCreated, sendSuccess } from '../utils/response.ts';
+import { createPosOrderSchema } from '../schemas/order.schema.ts';
 
 /**
  * Handle creation of new POS cashier invoice order with authenticated user validation

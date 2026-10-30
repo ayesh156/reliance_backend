@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { customerService } from '../services/customer.service.ts';
 import { sendSuccess, sendCreated } from '../utils/response.ts';
 import { CustomerType } from '@prisma/client';
+import { createCustomerSchema } from '../schemas/customer.schema.ts';
 
 /**
  * Handle listing customers with sanitized query keyword and validated customer type
@@ -81,7 +82,14 @@ export const createCustomer = async (req: Request, res: Response, next: NextFunc
       }
     }
 
-    const customer = await customerService.createCustomer(safePayload);
+    const parsedCustomer = createCustomerSchema.safeParse(safePayload);
+    if (!parsedCustomer.success) {
+      return res.status(400).json({ error: parsedCustomer.error.issues[0]?.message || 'Invalid customer data' });
+    }
+    const customer = await customerService.createCustomer({
+      ...safePayload,
+      ...parsedCustomer.data,
+    });
     sendCreated(res, customer);
   } catch (err) {
     next(err);

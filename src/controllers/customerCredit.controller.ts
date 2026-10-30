@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { CustomerCreditService } from '../services/customerCredit.service.ts';
 import { CustomerStatementPdfService } from '../services/customer-statement-pdf.service.ts';
 import { prisma } from '../lib/prisma.ts';
+import { settleBillPaymentSchema } from '../schemas/order.schema.ts';
 
 /**
  * Stream generated Customer Due Statement PDF directly to browser/client
@@ -80,14 +81,17 @@ export const getCustomerDueBills = async (req: Request, res: Response) => {
 
 export const settleBillPayment = async (req: Request, res: Response) => {
   try {
-    // Read optional custom paymentDate sent from frontend datepicker
-    const { orderId, amount, paymentMethod, reference, notes, paymentDate } = req.body;
+    const parsedSettle = settleBillPaymentSchema.safeParse(req.body);
+    if (!parsedSettle.success) {
+      return res.status(400).json({ success: false, message: parsedSettle.error.issues[0]?.message || 'Invalid payment payload' });
+    }
+    const { orderId, amount, paymentMethod, reference, notes, paymentDate } = parsedSettle.data;
     const result = await CustomerCreditService.settleBillPayment({
-      orderId: parseInt(orderId, 10),
-      amount: Number(amount),
+      orderId,
+      amount,
       paymentMethod,
-      reference,
-      notes,
+      reference: reference || undefined,
+      notes: notes || undefined,
       paymentDate: paymentDate ? new Date(paymentDate) : undefined,
     });
 

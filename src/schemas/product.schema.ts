@@ -16,8 +16,8 @@ export const productVariantSchema = z.object({
   stock: z.coerce.number().int().min(0).default(0),
   imageUrl: z.string().optional(),
   imageUrls: z.array(z.string()).optional(),
-  imageIndex: z.number().nullable().optional(),
-  imageIndexes: z.array(z.number()).optional(),
+  imageIndex: z.coerce.number().int().nullable().optional(),
+  imageIndexes: z.array(z.coerce.number().int()).optional(),
 });
 
 /**
@@ -41,12 +41,7 @@ export const createProductSchema = z.object({
     .trim()
     .min(2, 'Product title must be between 2 and 200 characters')
     .max(200, 'Product title must be between 2 and 200 characters'),
-  categoryId: z.coerce
-    .number({
-      message: 'A valid positive integer categoryId is required',
-    })
-    .int('A valid positive integer categoryId is required')
-    .positive('A valid positive integer categoryId is required'),
+  categoryId: categoryIdSchema,
   description: z.string().optional().nullable(),
   searchKey: z.string().optional().nullable(),
   isFeatured: z.union([z.boolean(), z.string()]).optional(),
@@ -58,16 +53,17 @@ export const createProductSchema = z.object({
  * Product Update Zod Schema
  */
 export const updateProductSchema = createProductSchema.partial().extend({
-  categoryId: z.coerce
-    .number({
-      message: 'A valid positive integer categoryId is required',
-    })
-    .int('A valid positive integer categoryId is required')
-    .positive('A valid positive integer categoryId is required')
-    .optional(),
+  categoryId: categoryIdSchema.optional(),
+});
+
+export const productQuerySchema = z.object({
+  search: z.string().optional(),
+  categoryId: z.coerce.number().int().positive().optional(),
+  page: z.coerce.number().int().positive().optional(),
+  limit: z.coerce.number().int().positive().optional(),
 });
 
 export type CreateProductInput = z.infer<typeof createProductSchema>;
 export type UpdateProductInput = z.infer<typeof updateProductSchema>;
 export type ProductVariantInput = z.infer<typeof productVariantSchema>;
-
+export type ProductQueryInput = z.infer<typeof productQuerySchema>;

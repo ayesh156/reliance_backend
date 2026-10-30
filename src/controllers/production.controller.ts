@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import productionService from '../services/production.service.ts';
 import { sendSuccess } from '../utils/response.ts';
+import { createCutBatchSchema, sendToLineSchema, sendToWashSchema } from '../schemas/production.schema.ts';
 
 export class ProductionController {
   /**
@@ -9,11 +10,18 @@ export class ProductionController {
    */
   async createCutBatch(req: Request, res: Response, next: NextFunction) {
     try {
+      const parsedBatch = createCutBatchSchema.safeParse(req.body);
+      if (!parsedBatch.success) {
+        return res.status(400).json({ error: parsedBatch.error.issues[0]?.message || 'Invalid cut batch payload' });
+      }
       const user = (req as any).user;
       const userId = user?.userId || user?.id;
       const userRole = user?.role;
       const userName = user?.name;
-      const order = await productionService.createMaterialCutBatch(req.body, userId, userRole, userName);
+      const order = await productionService.createMaterialCutBatch({
+        ...req.body,
+        ...parsedBatch.data,
+      }, userId, userRole, userName);
       return sendSuccess(res, order, 201);
     } catch (err) {
       next(err);

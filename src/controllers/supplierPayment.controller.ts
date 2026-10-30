@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { SupplierPaymentService } from '../services/supplierPayment.service.ts';
 import { prisma } from '../lib/prisma.ts';
 import { sendSuccess, sendCreated } from '../utils/response.ts';
+import { settleSupplierBillSchema } from '../schemas/supplier.schema.ts';
 
 /**
  * Settle supplier outstanding bill dues individually with custom payment timestamp
