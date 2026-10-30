@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import productService from '../services/product.service.ts';
 import { sendErrorFrom, sendNoContent } from '../utils/response.ts';
+import { createProductSchema, categoryIdSchema } from '../schemas/product.schema.ts';
 
 export class ProductController {
   /** GET /api/products — Fetch with sanitized search & category filter */
@@ -52,6 +53,12 @@ export class ProductController {
           }
         } catch { /* proceed to service parser */ }
       }
+      const parsedPayload = createProductSchema.safeParse(req.body);
+      if (!parsedPayload.success) {
+        res.status(400).json({ error: parsedPayload.error.issues[0]?.message || 'Invalid product data' });
+        return;
+      }
+      req.body.categoryId = parsedPayload.data.categoryId;
       const product = await productService.createProduct(req);
       res.status(201).json(product);
     } catch (error) {
@@ -72,6 +79,14 @@ export class ProductController {
       if (!id || isNaN(id) || id <= 0) {
         res.status(400).json({ error: 'Valid positive integer product ID is required' });
         return;
+      }
+      if (req.body.categoryId !== undefined) {
+        const parsedCat = categoryIdSchema.safeParse(req.body.categoryId);
+        if (!parsedCat.success) {
+          res.status(400).json({ error: 'A valid positive integer categoryId is required' });
+          return;
+        }
+        req.body.categoryId = parsedCat.data;
       }
       // Ensure variant stock defaults to 0 if omitted or blank, allowing stock of 0
       if (req.body.variants) {

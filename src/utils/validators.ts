@@ -1,3 +1,4 @@
+import { categoryIdSchema } from '../schemas/product.schema.ts';
 
 /**
  * Validate Sri Lankan National Identity Card (NIC) numbers.
@@ -48,8 +49,8 @@ export const validateProductPayload = (
   if (name.trim().length < 2 || name.trim().length > 200) {
     return { isValid: false, message: 'Product title must be between 2 and 200 characters' };
   }
-  const parsedCatId = Number(categoryId);
-  if (isNaN(parsedCatId) || parsedCatId <= 0) {
+  const parsedCat = categoryIdSchema.safeParse(categoryId);
+  if (!parsedCat.success) {
     return { isValid: false, message: 'A valid positive integer categoryId is required' };
   }
   return { isValid: true };
@@ -68,4 +69,4 @@ export const sanitizeMultiValue = (val?: any): string | null => {
   const unique = Array.from(new Set(tokens));
   if (unique.length === 0) return null;
   return unique.join(', ').slice(0, 190);
-};
+};

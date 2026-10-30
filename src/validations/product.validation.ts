@@ -1,3 +1,23 @@
+import {
+  categoryIdSchema,
+  createProductSchema,
+  updateProductSchema,
+  productVariantSchema,
+  type CreateProductInput,
+  type UpdateProductInput,
+  type ProductVariantInput,
+} from '../schemas/product.schema.ts';
+
+export {
+  categoryIdSchema,
+  createProductSchema,
+  updateProductSchema,
+  productVariantSchema,
+  type CreateProductInput,
+  type UpdateProductInput,
+  type ProductVariantInput,
+};
+
 /**
  * Product & Variant Request Validation Schemas
  *
@@ -97,8 +117,8 @@ export const validateProductRequest = (
   if (name.trim().length < 2 || name.trim().length > 200) {
     return { isValid: false, message: 'Product title must be between 2 and 200 characters' };
   }
-  const parsedCatId = Number(categoryId);
-  if (isNaN(parsedCatId) || parsedCatId <= 0) {
+  const parsedCat = categoryIdSchema.safeParse(categoryId);
+  if (!parsedCat.success) {
     return { isValid: false, message: 'A valid positive integer categoryId is required' };
   }
   if (variants !== undefined) {
