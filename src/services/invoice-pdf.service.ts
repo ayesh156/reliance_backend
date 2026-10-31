@@ -238,7 +238,7 @@ export class InvoicePdfService {
     doc.fontSize(8).font('Helvetica').fillColor('#222222');
     doc.text('Mawarala Road, Makandura, Matara.', brandTextX, headerTop + 36);
     doc.font('Helvetica-Bold').text('Tel: ', brandTextX, headerTop + 47, { continued: true }).font('Helvetica').text('041-2268739, 071-1350123');
-    doc.font('Helvetica-Bold').text('Web: ', brandTextX, headerTop + 58, { continued: true }).font('Helvetica').text('relianceclothing.lk');
+    doc.font('Helvetica-Bold').text('Web: ', brandTextX, headerTop + 58, { continued: true }).font('Helvetica').text('relianceapparel.lk');
 
     // Right-aligned Modern Invoice Title (Preserves exact standard black color)
     doc

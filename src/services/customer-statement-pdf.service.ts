@@ -107,7 +107,7 @@ export class CustomerStatementPdfService {
     doc.fontSize(8).font('Helvetica').fillColor('#222222');
     doc.text('Mawarala Road, Makandura, Matara.', brandTextX, headerTop + 36);
     doc.font('Helvetica-Bold').text('Tel: ', brandTextX, headerTop + 47, { continued: true }).font('Helvetica').text('041-2268739, 071-1350123');
-    doc.font('Helvetica-Bold').text('Web: ', brandTextX, headerTop + 58, { continued: true }).font('Helvetica').text('relianceclothing.lk');
+    doc.font('Helvetica-Bold').text('Web: ', brandTextX, headerTop + 58, { continued: true }).font('Helvetica').text('relianceapparel.lk');
 
     // Right-aligned Document Title
     doc.fontSize(19).font('Helvetica-Bold').fillColor('#000000').text('STATEMENT OF ACCOUNT', 280, headerTop - 3, { width: 272.78, align: 'right', characterSpacing: 1 });

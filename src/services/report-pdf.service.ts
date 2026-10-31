@@ -297,7 +297,7 @@ export class ReportPdfService {
     // Brand details (Crisp black monochrome typography)
     doc.fontSize(15).font('Helvetica-Bold').fillColor('#000000').text('RELIANCE', brandTextX, headerTop - 2, { characterSpacing: 1.2 });
     doc.fontSize(6.5).font('Helvetica-Bold').fillColor('#000000').text('BRANDED MENS CLOTHING & APPAREL MFG', brandTextX, headerTop + 14, { characterSpacing: 1.2 });
-    doc.fontSize(7).font('Helvetica').fillColor('#333333').text('Mawarala Road, Makandura, Matara | Tel: 041-2268739, 071-1350123  •  Web: relianceclothing.lk', brandTextX, headerTop + 24);
+    doc.fontSize(7).font('Helvetica').fillColor('#333333').text('Mawarala Road, Makandura, Matara | Tel: 041-2268739, 071-1350123  •  Web: relianceapparel.lk', brandTextX, headerTop + 24);
 
     // Dynamic Header Block Below Brand
     const headerContentY = headerTop + 38;
