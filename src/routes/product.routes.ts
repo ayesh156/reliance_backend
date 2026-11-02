@@ -60,6 +60,32 @@ router.put(
   productController.update
 );
 
+
+// ── Dedicated Product & Variant Image Upload ──
+router.post(
+  '/:id/images',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  upload.any(),
+  productController.uploadImage
+);
+
+router.post(
+  '/:productId/images',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  upload.any(),
+  productController.uploadImage
+);
+
+router.post(
+  '/upload-image',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF'),
+  upload.any(),
+  productController.uploadImage
+);
+
 router.delete(
   '/:productId/images/:imageId',
   verifyToken,

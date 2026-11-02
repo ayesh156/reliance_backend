@@ -25,6 +25,8 @@ const productInclude = {
       imageUrl: true,
       order: true,
       variantId: true,
+      isWebImage: true,
+      tag: true,
     },
   },
 } as const;
@@ -243,6 +245,8 @@ export class ProductService {
               create: incomingImages.map((img) => ({
                 imageUrl: img.imageUrl,
                 order: img.order,
+                isWebImage: true,
+                tag: 'WEB',
               })),
             }
           : undefined,
@@ -293,7 +297,7 @@ export class ProductService {
       if (targetImageIds.size > 0) {
         await prisma.productImage.updateMany({
           where: { id: { in: Array.from(targetImageIds) } },
-          data: { variantId: createdVariant.id },
+          data: { variantId: createdVariant.id, isWebImage: false, tag: 'VARIANT' },
         });
       }
     }
@@ -357,13 +361,75 @@ export class ProductService {
     }
 
     return prisma.$transaction(async (tx) => {
-      // 1. Rebuild Images if provided
+      // 1. Rebuild / Synchronize WEB catalog images (without wiping variant images)
       if (incomingImages) {
-        await tx.productImage.deleteMany({ where: { productId: id } });
-        if (incomingImages.length > 0) {
-          await tx.productImage.createMany({
-            data: incomingImages.map((img) => ({ productId: id, imageUrl: img.imageUrl, order: img.order })),
+        const incomingWebUrls = incomingImages.map((i) => normalizeImageUrl(i.imageUrl));
+        const incomingSet = new Set(incomingWebUrls);
+
+        // Delete only unassigned/web images that are no longer in incomingImages
+        // Crucial: do not touch variant images (where variantId !== null and isWebImage is false)
+        const webImagesToDelete = await tx.productImage.findMany({
+          where: {
+            productId: id,
+            OR: [
+              { variantId: null },
+              { isWebImage: true },
+            ],
+            imageUrl: { notIn: Array.from(incomingSet) },
+          },
+        });
+
+        for (const img of webImagesToDelete) {
+          if (img.imageUrl && !img.imageUrl.startsWith('http')) {
+            const usageCount = await tx.productImage.count({
+              where: { imageUrl: img.imageUrl, id: { not: img.id } },
+            });
+            if (usageCount === 0) {
+              deleteLocalFile(img.imageUrl);
+            }
+          }
+        }
+
+        await tx.productImage.deleteMany({
+          where: {
+            id: { in: webImagesToDelete.map((img) => img.id) },
+          },
+        });
+
+        // Upsert incoming WEB catalog images
+        for (let i = 0; i < incomingImages.length; i++) {
+          const img = incomingImages[i];
+          const cleanUrl = normalizeImageUrl(img.imageUrl);
+
+          const existingWeb = await tx.productImage.findFirst({
+            where: {
+              productId: id,
+              variantId: null,
+              imageUrl: cleanUrl,
+            },
           });
+
+          if (existingWeb) {
+            await tx.productImage.update({
+              where: { id: existingWeb.id },
+              data: {
+                order: i,
+                isWebImage: true,
+                tag: 'WEB',
+              },
+            });
+          } else {
+            await tx.productImage.create({
+              data: {
+                productId: id,
+                imageUrl: cleanUrl,
+                order: i,
+                variantId: null,
+                isWebImage: true,
+                tag: 'WEB',
+              },
+            });
+          }
         }
       }
 
@@ -371,23 +437,10 @@ export class ProductService {
       if (variants !== undefined && parsedVariants.length > 0) {
         const retainedIds = new Set<number>();
 
-        // Query active images for this product inside transaction after image step
-        const currentImages = await tx.productImage.findMany({
-          where: { productId: id },
-          orderBy: { order: 'asc' },
-        });
-
-        // Reset stale variant mappings to allow fresh assignment
-        await tx.productImage.updateMany({
-          where: { productId: id },
-          data: { variantId: null },
-        });
-
         for (const v of parsedVariants) {
           const cleanBarcode =
             v.barcode && typeof v.barcode === 'string' && v.barcode.trim() !== '' ? v.barcode.trim() : null;
 
-          // Enterprise Security Validation: සෘණ අගයන් සහ Database බිඳවැටීම් වළක්වයි
           const variantData = {
             size: sanitizeMultiValue(v.size),
             color: sanitizeMultiValue(v.color),
@@ -402,14 +455,12 @@ export class ProductService {
 
           let resolvedVariantId: number;
           if (v.id && !isNaN(Number(v.id))) {
-            // Update existing variant (preserves sales history)
             const updated = await tx.productVariant.update({
               where: { id: Number(v.id) },
               data: variantData,
             });
             resolvedVariantId = updated.id;
           } else {
-            // Insert newly appended variant row
             const created = await tx.productVariant.create({
               data: {
                 ...variantData,
@@ -421,33 +472,29 @@ export class ProductService {
 
           retainedIds.add(resolvedVariantId);
 
-          // Enterprise Hardened: Map all matched catalog images to this variant via index or URL match
-          const matchedImageIds = new Set<number>();
-
-          if (Array.isArray(v.imageIndexes)) {
-            v.imageIndexes.forEach(idx => {
-              if (currentImages[idx]) matchedImageIds.add(currentImages[idx].id);
-            });
-          }
-          if (v.imageIndex !== undefined && v.imageIndex !== null && currentImages[v.imageIndex]) {
-            matchedImageIds.add(currentImages[v.imageIndex].id);
-          }
-
-          // Support both absolute web URLs, relative paths, and sanitized photo strings
-          // Enterprise Hardened: Allow sharing the exact same image link across multiple variants
+          // Synchronize variant images strictly for this variant ID without duplicating as WEB images
           const urlsToCheck = Array.isArray(v.imageUrls) 
             ? v.imageUrls 
             : v.imageUrl 
             ? [v.imageUrl] 
             : [];
+          const normalizedVariantUrls = urlsToCheck
+            .map((u) => (u ? normalizeImageUrl(String(u).trim()) : ''))
+            .filter(Boolean);
 
-          // Enterprise Multi-Variant Image Assignment:
-          // Reliably binds the image URL to each variant in the database without overwriting
-          for (const url of urlsToCheck) {
-            if (!url) continue;
-            const cleanTarget = normalizeImageUrl(String(url).trim());
+          // Detach/delete obsolete images for this specific variant
+          await tx.productImage.deleteMany({
+            where: {
+              productId: id,
+              variantId: resolvedVariantId,
+              imageUrl: { notIn: normalizedVariantUrls },
+            },
+          });
 
-            // 1. Check if this exact variant is already linked to this image
+          // Ensure every variant image exists strictly for this variant
+          for (let uIdx = 0; uIdx < normalizedVariantUrls.length; uIdx++) {
+            const cleanTarget = normalizedVariantUrls[uIdx];
+
             const alreadyLinked = await tx.productImage.findFirst({
               where: {
                 productId: id,
@@ -457,32 +504,16 @@ export class ProductService {
             });
 
             if (!alreadyLinked) {
-              // 2. Check if an unassigned base image exists for this URL
-              const unassignedBase = await tx.productImage.findFirst({
-                where: {
+              await tx.productImage.create({
+                data: {
                   productId: id,
-                  variantId: null,
                   imageUrl: cleanTarget,
+                  variantId: resolvedVariantId,
+                  isWebImage: false,
+                  tag: 'VARIANT',
+                  order: uIdx,
                 },
               });
-
-              if (unassignedBase) {
-                // Bind unassigned image to this variant
-                await tx.productImage.update({
-                  where: { id: unassignedBase.id },
-                  data: { variantId: resolvedVariantId },
-                });
-              } else {
-                // 3. Image is already bound to another variant: Create a variant link record
-                await tx.productImage.create({
-                  data: {
-                    productId: id,
-                    imageUrl: cleanTarget,
-                    variantId: resolvedVariantId,
-                    order: currentImages.length + 1,
-                  },
-                });
-              }
             }
           }
         }
@@ -497,7 +528,6 @@ export class ProductService {
           if (soldCount === 0) {
             await tx.productVariant.delete({ where: { id: vt.id } });
           } else {
-            // If historical orders exist, keep the record intact and set stock to 0 to prevent orphaned order items
             await tx.productVariant.update({
               where: { id: vt.id },
               data: { stock: 0 },
@@ -540,6 +570,158 @@ export class ProductService {
   /**
    * Delete image asset
    */
+  
+  /**
+   * Dedicated Product & Variant Image Upload
+   * Handles WEB catalog images and variant-specific image uploads safely.
+   * Guarantees a variant image upload ONLY creates a single database record associated strictly with that variant ID.
+   * Prevents race conditions, unique constraint violations, and unhandled rejections that trigger 500 errors.
+   */
+  async uploadProductImage(params: {
+    productId: number;
+    variantId?: number | null;
+    isWebImage?: boolean;
+    tag?: string;
+    req: Request;
+  }) {
+    const { productId, variantId, isWebImage, tag, req } = params;
+
+    const product = await prisma.product.findUnique({
+      where: { id: productId },
+      select: { id: true },
+    });
+    if (!product) {
+      throw new HttpException(404, `Product #${productId} not found`);
+    }
+
+    let verifiedVariantId: number | null = null;
+    if (variantId && !isWebImage) {
+      const variant = await prisma.productVariant.findFirst({
+        where: { id: variantId, productId },
+        select: { id: true },
+      });
+      if (!variant) {
+        throw new HttpException(404, `Variant #${variantId} not found for product #${productId}`);
+      }
+      verifiedVariantId = variant.id;
+    }
+
+    const collected: { imageUrl: string; order: number }[] = [];
+    const seen = new Set<string>();
+
+    const files = (req.files as Express.Multer.File[]) || (req.file ? [req.file] : []);
+    if (Array.isArray(files)) {
+      for (const f of files) {
+        const url = '/uploads/products/' + f.filename;
+        if (!seen.has(url)) {
+          seen.add(url);
+          collected.push({ imageUrl: url, order: collected.length });
+        }
+      }
+    }
+
+    if (req.body.imageUrl && typeof req.body.imageUrl === 'string' && req.body.imageUrl.trim()) {
+      const normalized = normalizeImageUrl(req.body.imageUrl.trim());
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        collected.push({ imageUrl: normalized, order: collected.length });
+      }
+    }
+
+    if (req.body.imageUrls) {
+      try {
+        const urls = typeof req.body.imageUrls === 'string' ? JSON.parse(req.body.imageUrls) : req.body.imageUrls;
+        if (Array.isArray(urls)) {
+          for (const u of urls) {
+            if (typeof u === 'string' && u.trim()) {
+              const normalized = normalizeImageUrl(u.trim());
+              if (!seen.has(normalized)) {
+                seen.add(normalized);
+                collected.push({ imageUrl: normalized, order: collected.length });
+              }
+            }
+          }
+        }
+      } catch { /* ignore malformed JSON */ }
+    }
+
+    if (collected.length === 0) {
+      throw new HttpException(400, 'No image file or URL was provided');
+    }
+
+    const createdImages: any[] = [];
+    try {
+      const isWeb = verifiedVariantId === null || isWebImage === true;
+      const finalVariantId = isWeb ? null : verifiedVariantId;
+      const finalTag = isWeb ? 'WEB' : (tag || 'VARIANT');
+
+      const maxOrderResult = await prisma.productImage.aggregate({
+        where: { productId },
+        _max: { order: true },
+      });
+      let nextOrder = (maxOrderResult._max.order ?? -1) + 1;
+
+      for (const item of collected) {
+        const cleanUrl = normalizeImageUrl(item.imageUrl);
+
+        // Check if an identical record already exists for this scope to prevent duplicate constraint violation
+        const existing = await prisma.productImage.findFirst({
+          where: {
+            productId,
+            variantId: finalVariantId,
+            imageUrl: cleanUrl,
+          },
+        });
+
+        if (existing) {
+          createdImages.push(existing);
+          continue;
+        }
+
+        // CRITICAL: Variant image upload ONLY creates a single database record associated strictly with that specific variant ID.
+        // No auto-duplication as a 'WEB' record!
+        const record = await prisma.productImage.create({
+          data: {
+            productId,
+            variantId: finalVariantId,
+            imageUrl: cleanUrl,
+            order: nextOrder++,
+            isWebImage: isWeb,
+            tag: finalTag,
+          },
+          select: {
+            id: true,
+            productId: true,
+            variantId: true,
+            imageUrl: true,
+            order: true,
+            isWebImage: true,
+            tag: true,
+            createdAt: true,
+          },
+        });
+        createdImages.push(record);
+      }
+    } catch (err: any) {
+      console.error('[ProductService] Error saving uploaded image records:', err);
+      for (const item of collected) {
+        if (item.imageUrl.startsWith('/uploads/')) {
+          deleteLocalFile(item.imageUrl);
+        }
+      }
+      throw new HttpException(500, err?.message || 'Failed to save uploaded image record');
+    }
+
+    return {
+      success: true,
+      scope: verifiedVariantId ? 'VARIANT' : 'WEB',
+      variantId: verifiedVariantId,
+      images: createdImages,
+      image: createdImages[0] || null,
+      imageUrl: createdImages[0]?.imageUrl || null,
+    };
+  }
+
   async deleteProductImage(productId: number, imageId: number) {
     if (isNaN(productId) || isNaN(imageId)) throw new HttpException(400, 'Invalid IDs');
 

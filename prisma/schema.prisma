@@ -205,7 +205,11 @@ model ProductImage {
   variant     ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
   imageUrl    String          @db.LongText
   order       Int             @default(0)
+  isWebImage  Boolean         @default(false)
+  tag         String?         @default("VARIANT")
   createdAt   DateTime        @default(now())
+  @@index([productId])
+  @@index([variantId])
   @@map("product_images")
 }
 

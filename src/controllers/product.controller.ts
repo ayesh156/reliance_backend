@@ -112,6 +112,51 @@ export class ProductController {
   }
 
   /** DELETE /api/products/:productId/images/:imageId — Delete image with param validation */
+  
+  /** POST /api/products/:productId/images — Upload image for product (WEB) or variant */
+  async uploadImage(req: Request, res: Response): Promise<void> {
+    try {
+      const userRole = String((req as any).user?.role || '').toUpperCase();
+      if (userRole === 'REP') {
+        res.status(403).json({ error: 'Forbidden: Representatives cannot upload images.' });
+        return;
+      }
+      const rawProductId = req.params.productId || req.params.id || req.body.productId;
+      const productId = Number(Array.isArray(rawProductId) ? rawProductId[0] : rawProductId);
+      if (!productId || isNaN(productId) || productId <= 0) {
+        res.status(400).json({ error: 'Valid positive integer product ID is required' });
+        return;
+      }
+
+      const rawVariantId = req.body.variantId || req.query.variantId;
+      const variantId = rawVariantId !== undefined && rawVariantId !== null && String(rawVariantId).trim() !== ''
+        ? Number(rawVariantId)
+        : null;
+
+      if (variantId !== null && (isNaN(variantId) || variantId <= 0)) {
+        res.status(400).json({ error: 'variantId must be a valid positive integer if provided' });
+        return;
+      }
+
+      const rawScope = String(req.body.scope || '').toUpperCase();
+      const isExplicitWeb = rawScope === 'WEB' || req.body.isWebImage === true || req.body.isWebImage === 'true';
+      const isExplicitVariant = rawScope === 'VARIANT' || (!isExplicitWeb && variantId !== null);
+
+      const result = await productService.uploadProductImage({
+        productId,
+        variantId: isExplicitVariant ? variantId : null,
+        isWebImage: isExplicitWeb || !isExplicitVariant,
+        tag: isExplicitWeb ? 'WEB' : (req.body.tag || 'VARIANT'),
+        req,
+      });
+
+      res.status(201).json(result);
+    } catch (error) {
+      console.error('[ProductController] Upload image error:', error);
+      sendErrorFrom(res, error, 'Failed to upload image');
+    }
+  }
+
   async deleteImage(req: Request, res: Response): Promise<void> {
     try {
       const userRole = String((req as any).user?.role || '').toUpperCase();
