@@ -157,6 +157,7 @@ model Product {
   images      ProductImage[]
   productionOrders ProductionOrder[]
   returnInventoryItems ReturnInventoryItem[]
+  finishingLogs FinishingLog[]
   isFeatured  Boolean          @default(false)
   // ⭐ Soft delete / Archive support: Retains sales order lines while hiding from POS & Catalog
   isActive    Boolean          @default(true)
@@ -822,4 +823,24 @@ model MaterialLog {
   @@index([rawMaterialId])
   @@index([processDate])
   @@map("material_logs")
+}
+
+// ----------------------------------------------------
+// FINISHING LOGS (Garment Ironing & Packing Tracking)
+// ----------------------------------------------------
+
+model FinishingLog {
+  id         Int      @id @default(autoincrement())
+  productId  Int      @map("product_id")
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  actionType String   @default("PACK") @map("action_type")
+  quantity   Int      @default(0)
+  date       DateTime @default(now())
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([productId])
+  @@index([actionType])
+  @@index([date])
+  @@map("finishing_logs")
 }

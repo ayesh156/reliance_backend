@@ -11,6 +11,7 @@ import buyRawMaterialRoutes from './buyRawMaterial.routes.ts';
 import customerCreditRoutes from './customerCredit.routes.ts';
 import paymentRoutes from './payment.routes.ts';
 import productionRoutes from './production.routes.ts';
+import finishingRoutes from './finishing.routes.ts';
 import reportRoutes from './report.routes.ts';
 import userRoutes from './user.routes.ts';
 import salesOrderRoutes from './salesOrder.routes.ts';
@@ -41,6 +42,9 @@ router.use('/production-orders', productionRoutes);
 // Fallback aliases for duplicate /api requests
 router.use('/api/production', productionRoutes);
 router.use('/api/production-orders', productionRoutes);
+// Finishing (Iron & Pack) Production Module
+router.use('/finishing', finishingRoutes);
+router.use('/api/finishing', finishingRoutes);
 router.use('/reports', reportRoutes);
 // Real-time Server-Sent Events (SSE) Synchronization Routes
 router.use('/sync', syncRouter);
