@@ -47,9 +47,10 @@ export class GrnPdfService {
     }
 
     doc.fontSize(22).font('Helvetica-Bold').fillColor('#000000').text('RELIANCE', brandTextX, headerTop - 3);
-    doc.fontSize(8).font('Helvetica-Bold').fillColor('#111111').text('APPAREL MANUFACTURING & WAREHOUSE', brandTextX, headerTop + 24);
-    doc.fontSize(8).font('Helvetica').fillColor('#222222').text('Makandura, Matara, Sri Lanka.', brandTextX, headerTop + 36);
-    doc.font('Helvetica-Bold').text('Contact: ', brandTextX, headerTop + 47, { continued: true }).font('Helvetica').text('041-2268739, 071-1350123');
+    doc.fontSize(7.5).font('Helvetica-Bold').fillColor('#111111').text('BRANDED MENS CLOTHING', brandTextX, headerTop + 24, { characterSpacing: 2 });
+    doc.fontSize(8).font('Helvetica').fillColor('#222222').text('Mawarala Road, Makandura, Matara.', brandTextX, headerTop + 36);
+    doc.font('Helvetica-Bold').text('Tel: ', brandTextX, headerTop + 47, { continued: true }).font('Helvetica').text('041-2268739, 071-1350123');
+    doc.font('Helvetica-Bold').text('Web: ', brandTextX, headerTop + 58, { continued: true }).font('Helvetica').text('relianceapparel.lk');
 
     // ⭐ GOODS RECEIVED NOTE මාතෘකාව විශාල කර (STOCK-IN VOUCHER) ඉවත් කිරීම
     doc.fontSize(21).font('Helvetica-Bold').fillColor('#000000').text('GOODS RECEIVED NOTE', 260, headerTop - 2, { width: 292.78, align: 'right', characterSpacing: 1 });

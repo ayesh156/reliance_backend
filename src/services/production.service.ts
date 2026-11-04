@@ -403,6 +403,15 @@ export class ProductionService {
           status: initialStatus,
           sentToWashQty: initialSentToWashQty,
           isStockSynced: false,
+          yaraAllocated: sanitizedMaterials.reduce((sum, m) => sum + (Number(m.issuedQty) || 0), 0),
+          yaraPerPiece:
+            (totalCutQty > 0 ? totalCutQty : targetQuantity) > 0
+              ? Math.round(
+                  (sanitizedMaterials.reduce((sum, m) => sum + (Number(m.issuedQty) || 0), 0) /
+                    (totalCutQty > 0 ? totalCutQty : targetQuantity)) *
+                    100
+                ) / 100
+              : 0,
           reason: payload.reason?.trim() || (isDirectWash ? 'Finishing-First: Sent to Wash' : (completedQty > 0 ? 'Finishing-First Run' : 'Multi-Product Batch')),
           notes: payload.notes?.trim() || null,
           productionDate: cutDate,
@@ -1155,6 +1164,15 @@ export class ProductionService {
           variantId: targetVariantId,
           targetQuantity,
           cutQty: totalCutQty > 0 ? totalCutQty : targetQuantity,
+          yaraAllocated: sanitizedMaterials.reduce((sum, m) => sum + (Number(m.issuedQty) || 0), 0),
+          yaraPerPiece:
+            (totalCutQty > 0 ? totalCutQty : targetQuantity) > 0
+              ? Math.round(
+                  (sanitizedMaterials.reduce((sum, m) => sum + (Number(m.issuedQty) || 0), 0) /
+                    (totalCutQty > 0 ? totalCutQty : targetQuantity)) *
+                    100
+                ) / 100
+              : 0,
           completedQty: payload.completedQty !== undefined ? Math.max(0, Number(payload.completedQty)) : existingOrder.completedQty,
           status: payload.status || existingOrder.status || 'CUTTING',
           reason: payload.reason?.trim() || existingOrder.reason || 'Multi-Product Batch',

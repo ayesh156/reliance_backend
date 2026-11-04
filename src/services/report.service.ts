@@ -231,6 +231,9 @@ export class ReportService {
                 size: true,
                 color: true,
                 sku: true,
+                costPrice: true,
+                retailPrice: true,
+                wholesalePrice: true,
                 product: { select: { id: true, name: true } },
               },
             },
@@ -355,6 +358,69 @@ export class ReportService {
       }
     }
 
+    // ── Sold Products COGS & Operational Expenses Aggregation ──
+    let totalCostOfGoodsSold = 0;
+    orders.forEach((o) => {
+      (o.items || []).forEach((it: any) => {
+        const cost = Number(it.variant?.costPrice || 0);
+        totalCostOfGoodsSold += cost * Number(it.quantity || 0);
+      });
+    });
+
+    const [periodMaterialUsages, periodGrnPurchases] = await Promise.all([
+      prisma.productionMaterialUsage.findMany({
+        where: {
+          productionOrder: {
+            OR: [
+              { productionDate: { gte: startDate, lte: endDate } },
+              { createdAt: { gte: startDate, lte: endDate } },
+            ],
+            status: { not: 'CANCELLED' },
+          },
+        },
+        select: {
+          netConsumedQty: true,
+          unitCost: true,
+        },
+      }),
+      prisma.buyRawMaterial.findMany({
+        where: {
+          OR: [
+            { purchaseDate: { gte: startDate, lte: endDate } },
+            { createdAt: { gte: startDate, lte: endDate } },
+          ],
+        },
+        select: {
+          totalAmount: true,
+          paidAmount: true,
+        },
+      }),
+    ]);
+
+    const totalProductionCost = periodMaterialUsages.reduce(
+      (sum, u) => sum + Number(u.netConsumedQty || 0) * Number(u.unitCost || 0),
+      0
+    );
+
+    const totalGrnExpenses = periodGrnPurchases.reduce(
+      (sum, p) => sum + Number(p.totalAmount || 0),
+      0
+    );
+    const totalGrnPaid = periodGrnPurchases.reduce(
+      (sum, p) => sum + Number(p.paidAmount || 0),
+      0
+    );
+    const totalGrnLiabilities = Math.max(0, totalGrnExpenses - totalGrnPaid);
+
+    const grossProfit = Math.round((netSales - totalCostOfGoodsSold) * 100) / 100;
+    const grossProfitMargin =
+      netSales > 0 ? Math.round(((netSales - totalCostOfGoodsSold) / netSales) * 10000) / 100 : 0;
+    // Net Operational Revenue: Collected Revenue (or Gross - Discounts - Customer Credits) less Production Costs and GRN Expenses
+    const netOperationalRevenue =
+      Math.round((totalPaid - totalProductionCost - totalGrnExpenses) * 100) / 100;
+    const netOperationalProfit =
+      Math.round((netSales - totalProductionCost - totalGrnExpenses) * 100) / 100;
+
     return {
       module: 'sales',
       dateFilter,
@@ -368,6 +434,15 @@ export class ReportService {
         totalDue: Math.round(totalDue * 100) / 100,
         averageOrderValue,
         paymentSplit,
+        totalCostOfGoodsSold: Math.round(totalCostOfGoodsSold * 100) / 100,
+        grossProfit,
+        grossProfitMargin,
+        totalProductionCost: Math.round(totalProductionCost * 100) / 100,
+        totalGrnExpenses: Math.round(totalGrnExpenses * 100) / 100,
+        totalGrnPaid: Math.round(totalGrnPaid * 100) / 100,
+        totalGrnLiabilities: Math.round(totalGrnLiabilities * 100) / 100,
+        netOperationalRevenue,
+        netOperationalProfit,
       },
       tableItems,
     };
@@ -1478,6 +1553,32 @@ export class ReportService {
       productionYieldPct: production.summary?.overallYieldPercentage || 0,
       auditedInvoices: audit.summary?.totalInvoicesInPeriod || 0,
       modifiedInvoices: audit.summary?.modifiedInvoicesCount || 0,
+
+      // Advanced Net Revenue & Operational Profit Analytics
+      totalProductionCost: production.summary?.totalMaterialCost || sales.summary?.totalProductionCost || 0,
+      costOfGoodsSold: sales.summary?.totalCostOfGoodsSold || 0,
+      grossProfit: sales.summary?.grossProfit || 0,
+      grossProfitMargin: sales.summary?.grossProfitMargin || 0,
+      grnExpenses: suppliers.summary?.totalPurchases || sales.summary?.totalGrnExpenses || 0,
+      grnLiabilities: suppliers.summary?.totalOutstandingPayables || sales.summary?.totalGrnLiabilities || 0,
+      appliedDiscounts: sales.summary?.totalDiscount || 0,
+      customerCredits: sales.summary?.totalDue || 0,
+      netOperationalRevenue:
+        sales.summary?.netOperationalRevenue ??
+        Math.round(
+          ((sales.summary?.totalPaid || 0) -
+            (production.summary?.totalMaterialCost || 0) -
+            (suppliers.summary?.totalPurchases || 0)) *
+            100
+        ) / 100,
+      netOperationalProfit:
+        sales.summary?.netOperationalProfit ??
+        Math.round(
+          ((sales.summary?.netSales || 0) -
+            (production.summary?.totalMaterialCost || 0) -
+            (suppliers.summary?.totalPurchases || 0)) *
+            100
+        ) / 100,
     };
 
     return {

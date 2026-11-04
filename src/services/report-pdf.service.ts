@@ -287,30 +287,29 @@ export class ReportPdfService {
     let brandTextX = startX;
     if (logoPath && fs.existsSync(logoPath) && fs.statSync(logoPath).size > 0) {
       try {
-        doc.image(logoPath, startX, headerTop - 2, { width: 36, height: 36 });
-        brandTextX = startX + 44;
+        doc.image(logoPath, startX, headerTop - 2, { width: 48, height: 48 });
+        brandTextX = startX + 56;
       } catch {
         brandTextX = startX;
       }
     }
 
-    // Brand details (Crisp black monochrome typography)
-    doc.fontSize(15).font('Helvetica-Bold').fillColor('#000000').text('RELIANCE', brandTextX, headerTop - 2, { characterSpacing: 1.2 });
-    doc.fontSize(6.5).font('Helvetica-Bold').fillColor('#000000').text('BRANDED MENS CLOTHING & APPAREL MFG', brandTextX, headerTop + 14, { characterSpacing: 1.2 });
-    doc.fontSize(7).font('Helvetica').fillColor('#333333').text('Mawarala Road, Makandura, Matara | Tel: 041-2268739, 071-1350123  •  Web: relianceapparel.lk', brandTextX, headerTop + 24);
+    // Brand details (Crisp black monochrome typography matching official Reliance Invoice)
+    doc.fontSize(22).font('Helvetica-Bold').fillColor('#000000').text('RELIANCE', brandTextX, headerTop - 3, { characterSpacing: 1.5 });
+    doc.fontSize(7.5).font('Helvetica-Bold').fillColor('#111111').text('BRANDED MENS CLOTHING', brandTextX, headerTop + 24, { characterSpacing: 2 });
+    doc.fontSize(8).font('Helvetica').fillColor('#222222').text('Mawarala Road, Makandura, Matara.', brandTextX, headerTop + 36);
+    doc.font('Helvetica-Bold').fontSize(8).text('Tel: ', brandTextX, headerTop + 47, { continued: true }).font('Helvetica').text('041-2268739, 071-1350123');
+    doc.font('Helvetica-Bold').fontSize(8).text('Web: ', brandTextX, headerTop + 58, { continued: true }).font('Helvetica').text('relianceapparel.lk');
 
-    // Dynamic Header Block Below Brand
-    const headerContentY = headerTop + 38;
-
-    // 1. Constrain Report Section Title to width: 320 with align: 'left' and allow auto-wrapping (lineBreak: true)
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000');
-    doc.text(reportTitle, startX, headerContentY, { width: 320, align: 'left', lineBreak: true });
-    const titleBottomY = doc.y;
-
-    // 2. Position metadata block (PERIOD, GENERATED, PRINTED BY) at dedicated right-aligned X coordinate
+    // Right-aligned report header section
     const metaX = doc.page.width - 200;
     const metaWidth = 160;
-    let metaY = headerContentY;
+
+    doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000');
+    doc.text(reportTitle, 260, headerTop - 1, { width: rightMargin - 260, align: 'right' });
+    const titleBottomY = doc.y;
+
+    let metaY = headerTop + 20;
 
     const metaRows = [
       { label: 'PERIOD:', value: dateLabel, isBold: true },
@@ -319,7 +318,6 @@ export class ReportPdfService {
     ];
 
     metaRows.forEach((row) => {
-      // Separate the label ('PERIOD:') and the value ('October 2026') on distinct coordinate lines/columns
       doc.fontSize(7).font('Helvetica-Bold').fillColor('#555555')
         .text(row.label, metaX, metaY, { width: 55, align: 'left' });
 
@@ -332,9 +330,9 @@ export class ReportPdfService {
     });
     const metaBottomY = metaY;
 
-    // 3. Move the Y-cursor dynamically after the header block before drawing top divider line and KPI cards
-    const dividerY = Math.max(titleBottomY, metaBottomY) + 15;
-    doc.moveTo(startX, dividerY).lineTo(rightMargin, dividerY).lineWidth(1).strokeColor('#000000').stroke();
+    // Move the Y-cursor dynamically after the header block before drawing top divider line and KPI cards
+    const dividerY = Math.max(headerTop + 68, Math.max(titleBottomY, metaBottomY)) + 6;
+    doc.moveTo(startX, dividerY).lineTo(rightMargin, dividerY).lineWidth(1.2).strokeColor('#000000').stroke();
     doc.y = dividerY + 12;
 
     return doc.y;
@@ -662,6 +660,15 @@ export class ReportPdfService {
       { label: 'SUPPLIER PAYABLES', value: formatCurrency(master.supplierDebt) },
     ];
     curY = this.drawKpiCards(doc, secondaryCards, curY);
+
+    // Master Tertiary 4 KPI Cards (Operational Net Revenue & Profit Formula)
+    const profitCards: KpiCard[] = [
+      { label: 'NET OPERATIONAL REV.', value: formatCurrency(master.netOperationalRevenue) },
+      { label: 'OPERATIONAL PROFIT', value: formatCurrency(master.netOperationalProfit) },
+      { label: 'TOTAL PRODUCTION COST', value: formatCurrency(master.totalProductionCost) },
+      { label: 'GROSS PROFIT (COGS)', value: `${formatCurrency(master.grossProfit)}` },
+    ];
+    curY = this.drawKpiCards(doc, profitCards, curY);
 
     // Operational KPI Cards
     const operationalCards: KpiCard[] = [

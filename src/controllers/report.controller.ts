@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import { reportService, resolveDateFilter, type ReportModule } from '../services/report.service.ts';
 import { ReportPdfService } from '../services/report-pdf.service.ts';
+import { auditService } from '../services/audit.service.ts';
 import { HttpException } from '../middleware/error.middleware.ts';
 
 const VALID_MODULES: ReportModule[] = [
@@ -116,6 +117,44 @@ export async function downloadConsolidatedReportPdf(req: Request, res: Response)
 
   const dateTag = dateFilter.startDate.toISOString().split('T')[0];
   const filename = `reliance-consolidated-master-report-${dateTag}.pdf`;
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+  pdfDoc.pipe(res);
+  pdfDoc.end();
+}
+
+/**
+ * Controller handling Financial Audit & Operational Revenue data calculation
+ */
+export async function getFinancialAuditData(req: Request, res: Response): Promise<void> {
+  const auditData = await auditService.getFinancialAuditData({
+    preset: req.query.preset as string,
+    startDate: req.query.startDate as string,
+    endDate: req.query.endDate as string,
+  });
+
+  res.status(200).json({
+    success: true,
+    data: auditData,
+  });
+}
+
+/**
+ * Controller handling streamed Master Financial Audit PDF summary export
+ */
+export async function downloadFinancialAuditPdf(req: Request, res: Response): Promise<void> {
+  const auditData = await auditService.getFinancialAuditData({
+    preset: req.query.preset as string,
+    startDate: req.query.startDate as string,
+    endDate: req.query.endDate as string,
+  });
+
+  const pdfDoc = auditService.generateMasterAuditPdf(auditData, req.user);
+  const dateTag = auditData.dateFilter.startDate.toISOString().split('T')[0];
+  const filename = `reliance-master-financial-audit-${dateTag}.pdf`;
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

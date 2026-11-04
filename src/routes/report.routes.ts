@@ -23,6 +23,21 @@ router.get(
   reportController.downloadConsolidatedReportPdf
 );
 
+// Dedicated Financial Audit & Operational Revenue Summary Endpoints
+router.get(
+  '/financial-audit/data',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF', 'CASHIER'),
+  reportController.getFinancialAuditData
+);
+
+router.get(
+  '/financial-audit/pdf',
+  verifyToken,
+  requireRole('ADMIN', 'STAFF', 'CASHIER'),
+  reportController.downloadFinancialAuditPdf
+);
+
 router.get(
   '/:module/data',
   verifyToken,

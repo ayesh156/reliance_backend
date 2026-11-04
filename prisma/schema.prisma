@@ -685,6 +685,9 @@ model ProductionOrder {
   sewnQty           Int                       @default(0) @map("sewn_qty")
   sentToWashQty     Int                       @default(0) @map("sent_to_wash_qty")
   washedQty         Int                       @default(0) @map("washed_qty")
+  yaraAllocated     Float?                    @default(0) @map("yara_allocated")
+  yaraPerPiece      Float?                    @default(0) @map("yara_per_piece")
+  totalProductionCost Float?                  @default(0) @map("total_production_cost")
   
   materialUsages  ProductionMaterialUsage[]
   cutLogs         MaterialCutLog[]
