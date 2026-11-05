@@ -12,11 +12,8 @@ export const getCustomers = async (req: Request, res: Response, next: NextFuncti
     const userRole = String((req as any).user?.role || '').toUpperCase();
     const rawQuery = typeof req.query.query === 'string' ? req.query.query.trim().slice(0, 100) : undefined;
     let rawType = typeof req.query.type === 'string' ? req.query.type.toUpperCase() : undefined;
-
-    // Strict wholesale customer visibility scope for Sales Representatives (REP)
-    if (userRole === 'REP') {
-      rawType = CustomerType.WHOLESALE;
-    }
+    // RBAC Rule: Master data (Customers, Products, Supplier Shops) has global read access
+    // across ADMIN, STAFF, and REP roles regardless of creator or account type.
 
     const type = (rawType && Object.values(CustomerType).includes(rawType as CustomerType))
       ? (rawType as CustomerType)
@@ -42,11 +39,6 @@ export const getCustomerById = async (req: Request, res: Response, next: NextFun
     const customer = await customerService.getCustomerById(id);
     if (!customer) {
       return res.status(404).json({ error: 'Customer not found' });
-    }
-
-    const userRole = String((req as any).user?.role || '').toUpperCase();
-    if (userRole === 'REP' && customer.type !== CustomerType.WHOLESALE) {
-      return res.status(403).json({ error: 'Forbidden: Representatives are strictly restricted to wholesale customer records.' });
     }
 
     sendSuccess(res, customer);
@@ -114,8 +106,8 @@ export const updateCustomer = async (req: Request, res: Response, next: NextFunc
     const userRole = String((req as any).user?.role || '').toUpperCase();
     if (userRole === 'REP') {
       const existing = await customerService.getCustomerById(id);
-      if (!existing || existing.type !== CustomerType.WHOLESALE) {
-        return res.status(403).json({ error: 'Forbidden: Representatives can only update wholesale customer records.' });
+      if (!existing) {
+        return res.status(404).json({ error: 'Customer not found' });
       }
     }
 

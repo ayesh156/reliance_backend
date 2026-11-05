@@ -19,6 +19,18 @@ const userSelect = {
 /** Default permissions strictly granted to Staff if unconfigured or empty */
 export const DEFAULT_STAFF_PERMISSIONS: string[] = ['production', 'line', 'wash', 'materials'];
 
+/** Default permissions strictly granted to Sales Representatives (REP) */
+export const DEFAULT_REP_PERMISSIONS: string[] = [
+  'pos',
+  'invoices',
+  'orders',
+  'products',
+  'customers',
+  'materials',
+  'reports',
+];
+
+
 /** Full system module permissions for Administrators */
 export const ALL_ADMIN_PERMISSIONS: string[] = [
   'pos',
@@ -56,6 +68,12 @@ export function resolveUserPermissions(role: string, permissions: unknown): stri
   if (normRole === 'STAFF') {
     if (!parsedPermissions || !Array.isArray(parsedPermissions) || parsedPermissions.length === 0) {
       return [...DEFAULT_STAFF_PERMISSIONS];
+    }
+    return parsedPermissions.map(String);
+  }
+    if (normRole === 'REP') {
+    if (!parsedPermissions || !Array.isArray(parsedPermissions) || parsedPermissions.length === 0) {
+      return [...DEFAULT_REP_PERMISSIONS];
     }
     return parsedPermissions.map(String);
   }
@@ -103,6 +121,16 @@ export class AuthService {
         });
       } catch (err) {
         console.warn('[AuthService] Could not persist default staff permissions on login:', err);
+      }
+    }
+    if (user.role === 'REP' && (!user.permissions || (typeof user.permissions === 'string' && user.permissions.trim() === ''))) {
+      try {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { permissions: JSON.stringify(DEFAULT_REP_PERMISSIONS) },
+        });
+      } catch (err) {
+        console.warn('[AuthService] Could not persist default rep permissions on login:', err);
       }
     }
 
