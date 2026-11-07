@@ -85,7 +85,7 @@ export const settleBillPayment = async (req: Request, res: Response) => {
     if (!parsedSettle.success) {
       return res.status(400).json({ success: false, message: parsedSettle.error.issues[0]?.message || 'Invalid payment payload' });
     }
-    const { orderId, amount, paymentMethod, reference, notes, paymentDate } = parsedSettle.data;
+    const { orderId, amount, paymentMethod, reference, notes, paymentDate, payments } = parsedSettle.data;
     const result = await CustomerCreditService.settleBillPayment({
       orderId,
       amount,
@@ -93,11 +93,16 @@ export const settleBillPayment = async (req: Request, res: Response) => {
       reference: reference || undefined,
       notes: notes || undefined,
       paymentDate: paymentDate ? new Date(paymentDate) : undefined,
+      payments: payments && payments.length > 0 ? payments : undefined,
     });
+
+    const totalSettled = payments && payments.length > 0
+      ? payments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
+      : Number(amount || 0);
 
     return res.status(200).json({
       success: true,
-      message: `Payment of Rs. ${Number(amount).toFixed(2)} settled successfully.`,
+      message: `Payment of Rs. ${totalSettled.toFixed(2)} settled successfully.`,
       data: result,
     });
   } catch (error: any) {

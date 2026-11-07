@@ -65,6 +65,26 @@ export class InvoicePdfService {
 
     const invoiceTitle = isReturnBill ? 'RETURN INVOICE' : (isWholesale ? 'WHOLESALE INVOICE' : 'INVOICE');
 
+    const formatPaymentDateTime = (dateVal: any): string => {
+      if (!dateVal) return '-';
+      try {
+        const d = new Date(dateVal);
+        if (isNaN(d.getTime())) return '-';
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        let hours = d.getHours();
+        const minutes = String(d.getMinutes()).padStart(2, '0');
+        const ampm = hours >= 12 ? 'PM' : 'AM';
+        hours = hours % 12;
+        hours = hours ? hours : 12;
+        const strHours = String(hours).padStart(2, '0');
+        return `${year}-${month}-${day} ${strHours}:${minutes} ${ampm}`;
+      } catch {
+        return '-';
+      }
+    };
+
     // Extract itemized payments from order.payments or splits
     interface PdfPaymentHistoryEntry {
       dateTimeStr: string;
@@ -76,14 +96,54 @@ export class InvoicePdfService {
     if (Array.isArray(order.payments) && order.payments.length > 0) {
       order.payments.forEach((p: any) => {
         const d = p.paymentDate || p.createdAt || order.createdAt;
-        const dateStr = d ? new Date(d).toISOString().slice(0, 16).replace('T', ' ') : '-';
+        const dateStr = formatPaymentDateTime(d);
+        const pMethod = String(p.method || 'CASH').toUpperCase();
+        let ref = p.reference || p.transactionId || (p.notes ? String(p.notes) : undefined);
+        if (pMethod === 'CHEQUE' && p.chequeDate) {
+          const matDate = new Date(p.chequeDate).toISOString().slice(0, 10);
+          if (ref && !ref.includes('Mat:')) {
+            ref = `${ref} | Mat: ${matDate}`;
+          } else if (!ref) {
+            ref = `Mat: ${matDate}`;
+          }
+        }
         pdfPayments.push({
           dateTimeStr: dateStr,
-          method: String(p.method || 'CASH').toUpperCase(),
+          method: pMethod,
           amount: Number(p.amount) || 0,
-          reference: p.reference || p.transactionId || (p.notes ? String(p.notes) : undefined),
+          reference: ref,
         });
       });
+    }
+
+    if (pdfPayments.length === 0 && order.notes) {
+      try {
+        let current: any = order.notes;
+        while (typeof current === 'string' && current.trim().startsWith('{')) {
+          current = JSON.parse(current);
+        }
+        if (current && Array.isArray(current.splitPayments)) {
+          current.splitPayments.forEach((s: any) => {
+            const d = s.date || order.createdAt;
+            const dateStr = formatPaymentDateTime(d);
+            let ref = s.reference || '';
+            if (String(s.method).toUpperCase() === 'CHEQUE') {
+              const chq = s.chequeNumber || '';
+              const bName = s.bankName || '';
+              const mat = s.chequeDate ? new Date(s.chequeDate).toISOString().slice(0, 10) : '';
+              ref = `Chq #${chq || 'N/A'}${bName ? ` | ${bName}` : ''}${mat ? ` | Mat: ${mat}` : ''}`;
+            }
+            pdfPayments.push({
+              dateTimeStr: dateStr,
+              method: String(s.method || 'CASH').toUpperCase(),
+              amount: Number(s.amount) || 0,
+              reference: ref || undefined,
+            });
+          });
+        }
+      } catch {
+        // Ignore note parsing error
+      }
     }
 
     // ⭐ Enterprise Credit Synchronization: Prevents Double-Counting on PDF Re-print
@@ -93,7 +153,7 @@ export class InvoicePdfService {
       : (paymentMethodLabel.includes('CREDIT') ? 0 : Math.min(total, tendered));
 
     if (pdfPayments.length === 0 && paidAmount > 0) {
-      const dStr = order.createdAt ? new Date(order.createdAt).toISOString().slice(0, 16).replace('T', ' ') : '-';
+      const dStr = formatPaymentDateTime(order.createdAt);
       pdfPayments.push({
         dateTimeStr: dStr,
         method: paymentMethodLabel.includes('CREDIT') ? 'CASH' : paymentMethodLabel,
@@ -659,15 +719,34 @@ export class InvoicePdfService {
         valColor: '#000000'
       });
 
-      // Itemized payments
+      // Itemized payments (Clean 3-column layout with dynamic multiline calculation to eliminate overlapping)
       if (pdfPayments.length > 0) {
+        const colDateWidth = 72;
+        const colAmtWidth = 72;
+        const colDescWidth = sumWidth - colDateWidth - colAmtWidth - 6; // ~115pt safe bounded width
+        const colDescX = sumX + colDateWidth + 3;
+        const colAmtX = sumX + sumWidth - colAmtWidth;
+
         pdfPayments.forEach((p) => {
-          doc.fontSize(7).font('Helvetica').fillColor('#444444');
-          const pLabel = `  • ${p.dateTimeStr} | ${p.method}${p.reference ? ` (${p.reference})` : ''}`;
+          const dateLabel = `  • ${p.dateTimeStr}`;
+          const descText = `${p.method}${p.reference ? ` (${p.reference})` : ''}`;
           const pVal = `Rs ${p.amount.toLocaleString('en-LK', { minimumFractionDigits: 2 })}`;
-          doc.text(pLabel, sumX, curY, { width: sumWidth - 80, align: 'left' });
-          doc.text(pVal, sumX + sumWidth - 80, curY, { width: 80, align: 'right' });
-          curY += 9;
+
+          doc.fontSize(7).font('Helvetica');
+          const descHeight = doc.heightOfString(descText, { width: colDescWidth });
+          const dateHeight = doc.heightOfString(dateLabel, { width: colDateWidth });
+          const rowHeight = Math.max(9, descHeight, dateHeight);
+
+          // 1. Render Date Column (Left)
+          doc.fillColor('#555555').text(dateLabel, sumX, curY, { width: colDateWidth, align: 'left' });
+
+          // 2. Render Method & Reference Column (Center, strictly bounded to prevent bleeding into amount)
+          doc.fillColor('#333333').text(descText, colDescX, curY, { width: colDescWidth, align: 'left' });
+
+          // 3. Render Amount Column (Right, bold black)
+          doc.fontSize(7.5).font('Helvetica-Bold').fillColor('#000000').text(pVal, colAmtX, curY, { width: colAmtWidth, align: 'right' });
+
+          curY += rowHeight + 2.5;
         });
         curY += 2;
       }

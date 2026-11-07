@@ -58,16 +58,31 @@ export const createPosOrderSchema = z.object({
   cheques: z.array(chequeItemSchema).optional(),
 });
 
+export const paymentEntrySchema = z.object({
+  amount: z.coerce.number().positive({ message: 'Amount must be > 0' }),
+  method: z.string().optional().default('CASH'),
+  paymentMethod: z.string().optional(),
+  reference: z.string().optional().nullable(),
+  chequeNumber: z.string().optional().nullable(),
+  bankName: z.string().optional().nullable(),
+  chequeDate: z.union([z.string(), z.date()]).optional().nullable(),
+  paymentDate: z.union([z.string(), z.date()]).optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+
 /**
  * Customer Due Settlement Schema
  */
 export const settleCustomerDebtSchema = z.object({
   customerId: z.coerce.number().int().positive({ message: 'Valid customerId is required' }),
-  amount: z.coerce.number().positive({ message: 'Settlement amount must be > 0' }),
+  amount: z.coerce.number().positive().optional(),
   paymentMethod: z.string().optional().default('CASH'),
   reference: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
   paymentDate: z.string().optional(),
+  strategy: z.enum(['FULL', 'FIFO', 'LIFO', 'CUSTOM']).optional().default('FIFO'),
+  selectedInvoiceIds: z.array(z.coerce.number().int()).optional(),
+  payments: z.array(paymentEntrySchema).optional(),
 });
 
 /**
@@ -75,11 +90,12 @@ export const settleCustomerDebtSchema = z.object({
  */
 export const settleBillPaymentSchema = z.object({
   orderId: z.coerce.number().int().positive({ message: 'Valid orderId is required' }),
-  amount: z.coerce.number().positive({ message: 'Settlement amount must be > 0' }),
+  amount: z.coerce.number().positive().optional(),
   paymentMethod: z.string().optional().default('CASH'),
   reference: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
   paymentDate: z.union([z.string(), z.date()]).optional(),
+  payments: z.array(paymentEntrySchema).optional(),
 });
 
 /**

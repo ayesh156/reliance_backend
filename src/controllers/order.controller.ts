@@ -271,7 +271,27 @@ export const settleCustomerDebt = async (req: Request, res: Response, next: Next
       return res.status(400).json({ error: 'Valid positive customer ID is required' });
     }
 
-    const amount = Math.max(0, Number(req.body.amount) || 0);
+    const rawPayments = Array.isArray(req.body.payments) ? req.body.payments : undefined;
+    const payments = rawPayments
+      ? rawPayments
+          .map((p: any) => ({
+            amount: Math.max(0, Number(p.amount) || 0),
+            method: typeof (p.method || p.paymentMethod) === 'string' ? (p.method || p.paymentMethod).trim().slice(0, 30) : 'CASH',
+            reference: typeof p.reference === 'string' ? p.reference.trim().slice(0, 255) : (typeof p.chequeNumber === 'string' ? p.chequeNumber.trim().slice(0, 255) : undefined),
+            chequeNumber: typeof p.chequeNumber === 'string' ? p.chequeNumber.trim().slice(0, 100) : undefined,
+            bankName: typeof p.bankName === 'string' ? p.bankName.trim().slice(0, 100) : undefined,
+            chequeDate: p.chequeDate && !isNaN(new Date(p.chequeDate).getTime()) ? new Date(p.chequeDate) : undefined,
+            paymentDate: p.paymentDate && !isNaN(new Date(p.paymentDate).getTime()) ? new Date(p.paymentDate) : undefined,
+            notes: typeof p.notes === 'string' ? p.notes.trim().slice(0, 255) : undefined,
+          }))
+          .filter((p: any) => p.amount > 0)
+      : undefined;
+
+    const totalBatchAmount = payments && payments.length > 0
+      ? payments.reduce((sum: number, p: any) => sum + p.amount, 0)
+      : 0;
+
+    const amount = totalBatchAmount > 0 ? totalBatchAmount : Math.max(0, Number(req.body.amount) || 0);
     const strategy = ['FULL', 'FIFO', 'LIFO', 'CUSTOM'].includes(req.body.strategy)
       ? req.body.strategy
       : 'FIFO';
@@ -291,9 +311,10 @@ export const settleCustomerDebt = async (req: Request, res: Response, next: Next
       amount,
       strategy,
       selectedInvoiceIds,
-      paymentMethod: typeof req.body.paymentMethod === 'string' ? req.body.paymentMethod.trim().slice(0, 30) : 'CASH',
+      paymentMethod: typeof req.body.paymentMethod === 'string' ? req.body.paymentMethod.trim().slice(0, 30) : (payments && payments.length > 0 ? (payments.every((p: any) => p.method === payments[0].method) ? payments[0].method : 'SPLIT') : 'CASH'),
       notes: typeof req.body.notes === 'string' ? req.body.notes.trim().slice(0, 255) : undefined,
       paymentDate,
+      payments,
     });
     sendSuccess(res, result);
   } catch (err) {

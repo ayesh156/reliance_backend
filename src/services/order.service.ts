@@ -2130,8 +2130,19 @@ export class OrderService {
     paymentMethod?: string;
     notes?: string;
     paymentDate?: string | Date;
+    payments?: Array<{
+      amount: number;
+      method?: string;
+      paymentMethod?: string;
+      reference?: string;
+      chequeNumber?: string;
+      bankName?: string;
+      chequeDate?: string | Date;
+      paymentDate?: string | Date;
+      notes?: string;
+    }>;
   }) {
-    const { customerId, amount, strategy, selectedInvoiceIds = [], paymentMethod = 'CASH', notes, paymentDate } = data;
+    const { customerId, amount, strategy, selectedInvoiceIds = [], paymentMethod = 'CASH', notes, paymentDate, payments } = data;
 
     return prisma.$transaction(async (tx) => {
       const customer = await tx.customer.findUnique({
@@ -2174,6 +2185,16 @@ export class OrderService {
         orderBy: { createdAt: strategy === 'LIFO' ? 'desc' : 'asc' },
       });
 
+      // Format consolidated payment reference for Master Receipt
+      const consolidatedRef = Array.isArray(payments) && payments.length > 0
+        ? payments.map((p) => {
+            const parts = [p.method || p.paymentMethod || 'CASH'];
+            if (p.chequeNumber) parts.push(`Chq #${p.chequeNumber}`);
+            if (p.bankName) parts.push(`(${p.bankName})`);
+            return `${parts.join(' ')}: Rs. ${Number(p.amount).toLocaleString()}`;
+          }).join(' | ')
+        : (notes?.trim() || `${strategy} Settlement`);
+
       // Create Master Receipt record representing full lump-sum payment
       const masterReceiptNumber = `REC-${Date.now().toString(36).toUpperCase()}`;
       const customerReceipt = await tx.customerReceipt.create({
@@ -2182,7 +2203,7 @@ export class OrderService {
           customerId,
           totalAmount: paymentToApply,
           paymentMethod: paymentMethod || 'CASH',
-          reference: notes?.trim() || `${strategy} Settlement`,
+          reference: consolidatedRef.slice(0, 255),
           receiptDate: resolvedDate,
           notes: notes?.trim() || undefined,
         },
@@ -2191,44 +2212,123 @@ export class OrderService {
       let remainingCash = paymentToApply;
       const settledInvoiceDetails: { invoiceId: number; amountSettled: number }[] = [];
 
-      for (const order of unpaidOrders) {
-        if (remainingCash <= 0) break;
+      if (Array.isArray(payments) && payments.length > 0) {
+        // Multi-Payment Batch Queue Allocation
+        const paymentQueue = payments.map((p) => ({
+          ...p,
+          remaining: Number(p.amount) || 0,
+        }));
+        let pQueueIdx = 0;
 
-        const currentDebt = Math.max(0, Math.round((Number(order.totalAmount) - Number(order.paidAmount)) * 100) / 100);
-        if (currentDebt <= 0) continue;
+        for (const order of unpaidOrders) {
+          if (remainingCash <= 0) break;
 
-        const amountForThisOrder = strategy === 'FULL' 
-          ? currentDebt 
-          : Math.min(remainingCash, currentDebt);
+          let currentDebt = Math.max(0, Math.round((Number(order.totalAmount) - Number(order.paidAmount)) * 100) / 100);
+          if (currentDebt <= 0) continue;
 
-        const newPaid = Math.round((Number(order.paidAmount) + amountForThisOrder) * 100) / 100;
-        const isNowFullyPaid = newPaid >= Number(order.totalAmount);
+          let orderSettledTotal = 0;
 
-        // Update Order balance & status
-        await tx.order.update({
-          where: { id: order.id },
-          data: {
-            paidAmount: newPaid,
-            status: isNowFullyPaid ? OrderStatus.PAID : order.status,
-            paymentMethod: isNowFullyPaid ? (paymentMethod || 'CASH') : order.paymentMethod,
-            updatedAt: new Date(),
-          },
-        });
+          while (currentDebt > 0 && pQueueIdx < paymentQueue.length) {
+            const curPay = paymentQueue[pQueueIdx];
+            if (curPay.remaining <= 0) {
+              pQueueIdx++;
+              continue;
+            }
 
-        // Add explicit payment ledger transaction for this specific invoice linked to CustomerReceipt
-        await tx.orderPayment.create({
-          data: {
-            orderId: order.id,
-            amount: amountForThisOrder,
-            method: paymentMethod || 'CASH',
-            reference: notes?.trim() || 'Full Balance Settlement',
-            customerReceiptId: customerReceipt.id,
-            createdAt: resolvedDate,
-          },
-        });
+            const alloc = Math.min(curPay.remaining, currentDebt);
+            if (alloc <= 0) {
+              pQueueIdx++;
+              continue;
+            }
 
-        remainingCash = Math.round((remainingCash - amountForThisOrder) * 100) / 100;
-        settledInvoiceDetails.push({ invoiceId: order.id, amountSettled: amountForThisOrder });
+            const refSummary = [
+              curPay.chequeNumber ? `Chq #${curPay.chequeNumber}` : curPay.reference,
+              curPay.bankName ? `Bank: ${curPay.bankName}` : '',
+              curPay.chequeDate ? `Mat: ${new Date(curPay.chequeDate).toISOString().slice(0, 10)}` : '',
+            ].filter(Boolean).join(' | ') || (notes?.trim() || 'Balance Settlement');
+
+            await tx.orderPayment.create({
+              data: {
+                orderId: order.id,
+                amount: alloc,
+                method: curPay.method || curPay.paymentMethod || 'CASH',
+                reference: refSummary.slice(0, 255),
+                chequeDate: curPay.chequeDate ? new Date(curPay.chequeDate) : undefined,
+                customerReceiptId: customerReceipt.id,
+                createdAt: curPay.paymentDate && !isNaN(new Date(curPay.paymentDate).getTime())
+                  ? new Date(curPay.paymentDate)
+                  : resolvedDate,
+              },
+            });
+
+            curPay.remaining = Math.round((curPay.remaining - alloc) * 100) / 100;
+            currentDebt = Math.round((currentDebt - alloc) * 100) / 100;
+            remainingCash = Math.round((remainingCash - alloc) * 100) / 100;
+            orderSettledTotal = Math.round((orderSettledTotal + alloc) * 100) / 100;
+
+            if (curPay.remaining <= 0) {
+              pQueueIdx++;
+            }
+          }
+
+          if (orderSettledTotal > 0) {
+            const newPaid = Math.round((Number(order.paidAmount) + orderSettledTotal) * 100) / 100;
+            const isNowFullyPaid = newPaid >= Number(order.totalAmount);
+
+            await tx.order.update({
+              where: { id: order.id },
+              data: {
+                paidAmount: newPaid,
+                status: isNowFullyPaid ? OrderStatus.PAID : order.status,
+                paymentMethod: isNowFullyPaid ? (paymentMethod || 'CASH') : order.paymentMethod,
+                updatedAt: new Date(),
+              },
+            });
+
+            settledInvoiceDetails.push({ invoiceId: order.id, amountSettled: orderSettledTotal });
+          }
+        }
+      } else {
+        // Single payment backward-compatible flow
+        for (const order of unpaidOrders) {
+          if (remainingCash <= 0) break;
+
+          const currentDebt = Math.max(0, Math.round((Number(order.totalAmount) - Number(order.paidAmount)) * 100) / 100);
+          if (currentDebt <= 0) continue;
+
+          const amountForThisOrder = strategy === 'FULL' 
+            ? currentDebt 
+            : Math.min(remainingCash, currentDebt);
+
+          const newPaid = Math.round((Number(order.paidAmount) + amountForThisOrder) * 100) / 100;
+          const isNowFullyPaid = newPaid >= Number(order.totalAmount);
+
+          // Update Order balance & status
+          await tx.order.update({
+            where: { id: order.id },
+            data: {
+              paidAmount: newPaid,
+              status: isNowFullyPaid ? OrderStatus.PAID : order.status,
+              paymentMethod: isNowFullyPaid ? (paymentMethod || 'CASH') : order.paymentMethod,
+              updatedAt: new Date(),
+            },
+          });
+
+          // Add explicit payment ledger transaction for this specific invoice linked to CustomerReceipt
+          await tx.orderPayment.create({
+            data: {
+              orderId: order.id,
+              amount: amountForThisOrder,
+              method: paymentMethod || 'CASH',
+              reference: notes?.trim() || 'Full Balance Settlement',
+              customerReceiptId: customerReceipt.id,
+              createdAt: resolvedDate,
+            },
+          });
+
+          remainingCash = Math.round((remainingCash - amountForThisOrder) * 100) / 100;
+          settledInvoiceDetails.push({ invoiceId: order.id, amountSettled: amountForThisOrder });
+        }
       }
 
       // Deduct settled amount atomically from Customer outstanding balance

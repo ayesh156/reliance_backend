@@ -1,17 +1,31 @@
 import { prisma } from '../lib/prisma.ts';
+import { ChequeStatus } from '@prisma/client';
 
 /**
  * Enterprise Secure Customer Credit & Bill Settlement Service
  * Enforces ACID transaction guarantees, concurrency control, and zero-overpayment rules
  */
 
+export interface PaymentEntryInput {
+  amount: number;
+  method?: string;
+  paymentMethod?: string;
+  reference?: string | null;
+  chequeNumber?: string | null;
+  bankName?: string | null;
+  chequeDate?: string | Date | null;
+  paymentDate?: string | Date | null;
+  notes?: string | null;
+}
+
 export interface SettleBillInput {
   orderId: number;
-  amount: number;
+  amount?: number;
   paymentMethod?: string;
-  reference?: string;
-  notes?: string;
-  paymentDate?: Date; // Custom audit payment date
+  reference?: string | null;
+  notes?: string | null;
+  paymentDate?: Date | string; // Custom audit payment date
+  payments?: PaymentEntryInput[];
 }
 
 export class CustomerCreditService {
@@ -315,14 +329,26 @@ export class CustomerCreditService {
 
   /**
    * Settle invoice due payment atomically (Strict ACID Transaction & Zero Overpayment Rule)
+   * Supports both single payment and multi-payment batch queues
    */
   static async settleBillPayment(input: SettleBillInput) {
-    const { orderId, amount, paymentMethod, reference, notes, paymentDate } = input;
-    const payAmount = Math.round(Number(amount) * 100) / 100;
+    const { orderId, amount, paymentMethod, reference, notes, paymentDate, payments } = input;
 
     if (!orderId || isNaN(orderId)) {
       throw new Error('A valid Order ID is required.');
     }
+
+    const paymentList: PaymentEntryInput[] = (payments && payments.length > 0)
+      ? payments
+      : [{
+          amount: amount || 0,
+          method: paymentMethod || 'CASH',
+          reference,
+          notes,
+          paymentDate,
+        }];
+
+    const payAmount = Math.round(paymentList.reduce((sum, p) => sum + (Number(p.amount) || 0), 0) * 100) / 100;
 
     if (isNaN(payAmount) || payAmount <= 0) {
       throw new Error('Payment amount must be greater than Rs. 0.00.');
@@ -359,20 +385,25 @@ export class CustomerCreditService {
       const newPaidAmount = Math.round((currentlyPaid + payAmount) * 100) / 100;
       const isFullySettled = newPaidAmount >= total;
 
-      // 1. Create audit log entry with optional user-selected payment date
-      const resolvedDate = paymentDate && !isNaN(new Date(paymentDate).getTime()) ? new Date(paymentDate) : new Date();
-
       // Master Receipt creation for the settlement payment
+      const resolvedDate = paymentDate && !isNaN(new Date(paymentDate).getTime())
+        ? new Date(paymentDate)
+        : new Date();
+
       let customerReceiptId: number | undefined = undefined;
       let masterReceipt: any = null;
+
       if (order.customerId) {
         const receiptNumber = `REC-${Date.now().toString(36).toUpperCase()}`;
+        const distinctMethods = Array.from(new Set(paymentList.map((p) => (p.method || 'CASH').toUpperCase())));
+        const primaryMethod = distinctMethods.length === 1 ? distinctMethods[0] : 'SPLIT';
+
         masterReceipt = await tx.customerReceipt.create({
           data: {
             receiptNumber,
             customerId: order.customerId,
             totalAmount: payAmount,
-            paymentMethod: paymentMethod || 'CASH',
+            paymentMethod: primaryMethod,
             reference: reference?.trim() || notes?.trim() || `Invoice #${order.invoiceNumber || order.id} Due Settlement`,
             receiptDate: resolvedDate,
             notes: notes?.trim() || undefined,
@@ -381,16 +412,50 @@ export class CustomerCreditService {
         customerReceiptId = masterReceipt.id;
       }
 
-      const paymentLog = await tx.orderPayment.create({
-        data: {
-          orderId,
-          amount: payAmount,
-          method: paymentMethod || 'CASH',
-          reference: reference?.trim() || notes?.trim() || 'Invoice Due Settlement',
-          customerReceiptId,
-          createdAt: resolvedDate, // Records selected custom payment date
-        },
-      });
+      const paymentLogs = [];
+      for (const p of paymentList) {
+        const itemAmt = Math.round(Number(p.amount) * 100) / 100;
+        if (itemAmt <= 0) continue;
+        const pMethod = (p.method || 'CASH').toUpperCase();
+        const itemDate = p.paymentDate && !isNaN(new Date(p.paymentDate).getTime())
+          ? new Date(p.paymentDate)
+          : resolvedDate;
+
+        let ref = p.reference?.trim();
+        let chqDate: Date | undefined = undefined;
+        let chqStatus: ChequeStatus | undefined = undefined;
+
+        if (pMethod === 'CHEQUE') {
+          const chqNum = p.chequeNumber?.trim();
+          const bName = p.bankName?.trim();
+          if (!ref) {
+            ref = chqNum ? `Cheque #${chqNum}${bName ? ` (${bName})` : ''}` : 'Cheque';
+          }
+          if (p.chequeDate) {
+            const parsedChqDate = new Date(p.chequeDate);
+            if (!isNaN(parsedChqDate.getTime())) {
+              chqDate = parsedChqDate;
+            }
+          }
+          chqStatus = ChequeStatus.PENDING;
+        } else if (!ref) {
+          ref = p.notes?.trim() || reference?.trim() || notes?.trim() || 'Invoice Due Settlement';
+        }
+
+        const pLog = await tx.orderPayment.create({
+          data: {
+            orderId,
+            amount: itemAmt,
+            method: pMethod,
+            reference: ref,
+            chequeDate: chqDate,
+            chequeStatus: chqStatus,
+            customerReceiptId,
+            createdAt: itemDate,
+          },
+        });
+        paymentLogs.push(pLog);
+      }
 
       // 2. Update order paidAmount and status
       const updatedOrder = await tx.order.update({
@@ -423,7 +488,8 @@ export class CustomerCreditService {
       }
 
       return {
-        paymentLog,
+        paymentLog: paymentLogs[0] || null,
+        paymentLogs,
         updatedOrder,
         remainingBalance: Math.max(0, Math.round((total - newPaidAmount) * 100) / 100),
         receipt: masterReceipt,
