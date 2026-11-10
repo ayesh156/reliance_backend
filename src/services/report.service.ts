@@ -31,16 +31,15 @@ function parseBoundaryDate(raw?: string | null, isEnd: boolean = false): Date | 
   if (!raw || typeof raw !== 'string' || !raw.trim()) return null;
   const str = raw.trim();
 
-  // 1. Check for pure calendar date YYYY-MM-DD to avoid timezone off-by-one shifts
+  // 1. Check for pure calendar date YYYY-MM-DD in Sri Lanka timezone (+05:30) to avoid timezone shifts
   const ymdMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(str);
   if (ymdMatch) {
-    const year = parseInt(ymdMatch[1], 10);
-    const month = parseInt(ymdMatch[2], 10) - 1;
-    const day = parseInt(ymdMatch[3], 10);
-    if (isEnd) {
-      return new Date(year, month, day, 23, 59, 59, 999);
-    }
-    return new Date(year, month, day, 0, 0, 0, 0);
+    const yr = ymdMatch[1];
+    const mo = ymdMatch[2].padStart(2, '0');
+    const dy = ymdMatch[3].padStart(2, '0');
+    const time = isEnd ? '23:59:59.999' : '00:00:00.000';
+    const d = new Date(`${yr}-${mo}-${dy}T${time}+05:30`);
+    return isNaN(d.getTime()) ? null : d;
   }
 
   // 2. Parse general ISO or timestamp strings
@@ -206,13 +205,20 @@ export class ReportService {
       console.error('[ReportService.getSalesReport] Warning: reconcileMaturedCheques failed:', err);
     }
 
-    // Use strictly indexed createdAt & status filters (with optional repUserId filter)
+    // Use strictly indexed createdAt & status filters (with standardized repUserId filter matching created/assigned rep)
     const whereClause: any = {
       createdAt: { gte: startDate, lte: endDate },
       status: { not: OrderStatus.CANCELLED },
     };
-    if (repUserId) {
-      whereClause.userId = repUserId;
+    if (repUserId && !isNaN(Number(repUserId)) && Number(repUserId) > 0) {
+      const uId = Number(repUserId);
+      whereClause.AND = whereClause.AND || [];
+      whereClause.AND.push({
+        OR: [
+          { userId: uId },
+          { customer: { is: { repId: uId } } },
+        ],
+      });
     }
 
     const orders = await prisma.order.findMany({
@@ -947,17 +953,82 @@ export class ReportService {
 
   /**
    * 6. GARMENT PRODUCTION REPORT
-   * Batch statuses, total completed garment output, fabric consumption vs actual yield, and scrap variance.
+   * Comprehensive 6-stage production funnel evaluation using stage-specific timestamp aggregations.
+   * Multi-stage date filtering:
+   *  - Total Cut: Sum of quantityCut from MaterialCutLog where cutDate is within range
+   *  - Total Sewn: Sum of quantity from BatchActivityLog (action='SEWN' / 'LOG_SEWN') where timestamp is within range
+   *  - In Wash / Washed: Sum of quantity from BatchActivityLog (stage='WASHING' or wash action) where timestamp is within range
+   *  - Ironed & Packed / Finished: Sum of quantityFinished / quantity from GarmentFinishLog / FinishingLog where date is within range
+   *  - Trend Chart: Maps multi-stage throughput (Cut, Sewn, Wash, Finish) by their respective execution dates
    */
   async getProductionReport(dateFilter: DateFilterResult) {
     const { startDate, endDate } = dateFilter;
 
+    // 1. Stage-specific timestamp queries across the active date range
+    const [
+      periodCutLogs,
+      periodSewnLogs,
+      periodWashLogs,
+      periodGarmentFinishLogs,
+      periodFinishingLogs,
+    ] = await Promise.all([
+      // Total Cut: MaterialCutLog within range
+      prisma.materialCutLog.findMany({
+        where: { cutDate: { gte: startDate, lte: endDate } },
+        select: { id: true, quantityCut: true, cutDate: true, productionOrderId: true },
+      }),
+      // Total Sewn: BatchActivityLog (action='SEWN' / 'LOG_SEWN' or stage='LINE' with sewn action) within range
+      prisma.batchActivityLog.findMany({
+        where: {
+          timestamp: { gte: startDate, lte: endDate },
+          OR: [
+            { action: { in: ['SEWN', 'LOG_SEWN'] } },
+            { stage: 'LINE', action: { contains: 'SEWN' } },
+          ],
+        },
+        select: { id: true, quantity: true, timestamp: true, productionOrderId: true },
+      }),
+      // In Wash / Washed: BatchActivityLog (stage='WASHING' or wash action) within range
+      prisma.batchActivityLog.findMany({
+        where: {
+          timestamp: { gte: startDate, lte: endDate },
+          OR: [
+            { stage: 'WASHING' },
+            { action: { in: ['WASH', 'SEND_TO_WASH', 'WASH_COMPLETED', 'STOCK_SYNC'] } },
+          ],
+        },
+        select: { id: true, quantity: true, timestamp: true, productionOrderId: true, action: true, stage: true },
+      }),
+      // Finished: GarmentFinishLog within range
+      prisma.garmentFinishLog.findMany({
+        where: { finishDate: { gte: startDate, lte: endDate } },
+        select: { id: true, quantityFinished: true, finishDate: true, productionOrderId: true, isSyncedToStock: true, syncedAt: true },
+      }),
+      // Finished: FinishingLog (Iron / Pack) within range
+      prisma.finishingLog.findMany({
+        where: { date: { gte: startDate, lte: endDate } },
+        select: { id: true, quantity: true, date: true, actionType: true, productId: true },
+      }),
+    ]);
+
+    // Sum stage logs directly executed within the date range
+    const logCutTotal = periodCutLogs.reduce((acc, c) => acc + (Number(c.quantityCut) || 0), 0);
+    const logSewnTotal = periodSewnLogs.reduce((acc, s) => acc + (Number(s.quantity) || 0), 0);
+    const logWashTotal = periodWashLogs.reduce((acc, w) => acc + (Number(w.quantity) || 0), 0);
+    const logFinishTotal =
+      periodGarmentFinishLogs.reduce((acc, f) => acc + (Number(f.quantityFinished) || 0), 0) +
+      periodFinishingLogs.reduce((acc, f) => acc + (Number(f.quantity) || 0), 0);
+
+    // 2. Fetch all Production Orders active in the period (by order date, updates, or any stage logs)
     const productionOrders = await prisma.productionOrder.findMany({
       where: {
         OR: [
           { productionDate: { gte: startDate, lte: endDate } },
           { createdAt: { gte: startDate, lte: endDate } },
           { updatedAt: { gte: startDate, lte: endDate } },
+          { cutLogs: { some: { cutDate: { gte: startDate, lte: endDate } } } },
+          { activityLogs: { some: { timestamp: { gte: startDate, lte: endDate } } } },
+          { finishLogs: { some: { finishDate: { gte: startDate, lte: endDate } } } },
         ],
       },
       include: {
@@ -983,31 +1054,67 @@ export class ReportService {
         finishLogs: {
           orderBy: { finishDate: 'desc' },
         },
+        activityLogs: {
+          orderBy: { timestamp: 'desc' },
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
 
     let totalBatches = productionOrders.length;
     let targetQuantity = 0;
-    let completedQuantity = 0;
     let totalMaterialCost = 0;
     let scrapVariance = 0;
-    let totalMaterialsCut = 0;
-    let totalGarmentsFinished = 0;
-    let currentWip = 0;
     let pendingStockSync = 0;
     let syncedToInventory = 0;
 
-    // 6-Stage Production Funnel Accumulators
-    let totalCutPieces = 0;
-    let inSewingWip = 0;
-    let totalSewnOutput = 0;
-    let inWashTotal = 0;
-    let ironedAndPacked = 0;
-    let fullyFinishedSynced = 0;
+    // Batch-level accumulators (fallbacks when individual stage logs were not logged)
+    let batchCutPiecesTotal = 0;
+    let batchSewingWipTotal = 0;
+    let batchSewnOutputTotal = 0;
+    let batchWashGrandTotal = 0;
+    let batchIronedPackedTotal = 0;
+    let batchFullyFinishedSyncedTotal = 0;
 
+    // 3. Map dynamic Daily Trends grouping each stage by its actual execution date
     const dateTrendsMap: Record<string, { date: string; cutQty: number; sewnQty: number; washedQty: number; finishedQty: number; batchesCount: number }> = {};
 
+    const getOrInitTrend = (dStr: string) => {
+      if (!dateTrendsMap[dStr]) {
+        dateTrendsMap[dStr] = { date: dStr, cutQty: 0, sewnQty: 0, washedQty: 0, finishedQty: 0, batchesCount: 0 };
+      }
+      return dateTrendsMap[dStr];
+    };
+
+    // Stage 1: Cut Logs by cutDate
+    periodCutLogs.forEach((cl) => {
+      const dStr = new Date(cl.cutDate).toISOString().split('T')[0];
+      getOrInitTrend(dStr).cutQty += Number(cl.quantityCut) || 0;
+    });
+
+    // Stage 2 & 3: Sewn Output by timestamp
+    periodSewnLogs.forEach((sl) => {
+      const dStr = new Date(sl.timestamp).toISOString().split('T')[0];
+      getOrInitTrend(dStr).sewnQty += Number(sl.quantity) || 0;
+    });
+
+    // Stage 4: Wash Logs by timestamp
+    periodWashLogs.forEach((wl) => {
+      const dStr = new Date(wl.timestamp).toISOString().split('T')[0];
+      getOrInitTrend(dStr).washedQty += Number(wl.quantity) || 0;
+    });
+
+    // Stage 5: Finish Logs by finishDate or date
+    periodGarmentFinishLogs.forEach((fl) => {
+      const dStr = new Date(fl.finishDate).toISOString().split('T')[0];
+      getOrInitTrend(dStr).finishedQty += Number(fl.quantityFinished) || 0;
+    });
+    periodFinishingLogs.forEach((fl) => {
+      const dStr = new Date(fl.date).toISOString().split('T')[0];
+      getOrInitTrend(dStr).finishedQty += Number(fl.quantity) || 0;
+    });
+
+    // 4. Resolve Production Order Table Items
     const tableItems = productionOrders.map((batch) => {
       const target = Number(batch.targetQuantity || 0);
 
@@ -1027,36 +1134,37 @@ export class ReportService {
       // Stage 4: In Wash / Washed
       const batchWashTotal = Number(batch.sentToWashQty || 0) + Number(batch.washedQty || 0);
 
-      // Stage 5: Ironed & Packed (FinishingLog aggregate or completedQty)
+      // Stage 5: Ironed & Packed / Finished (FinishingLog aggregate or completedQty or washedQty)
       const loggedFinishedUnits = (batch.finishLogs || []).reduce((acc, f) => acc + (Number(f.quantityFinished) || 0), 0);
-      const batchFinishedUnits = Number(batch.washedQty > 0 ? batch.washedQty : (batch.completedQty || 0));
-      const batchIronedPacked = loggedFinishedUnits > 0 ? loggedFinishedUnits : (Number(batch.completedQty || 0) > 0 ? Number(batch.completedQty) : batchFinishedUnits);
+      const batchFinishedUnits = loggedFinishedUnits > 0
+        ? loggedFinishedUnits
+        : (Number(batch.completedQty || 0) > 0
+          ? Number(batch.completedQty)
+          : Number(batch.washedQty || 0));
+
+      const batchIronedPacked = batchFinishedUnits;
 
       // Stage 6: Fully Finished / Synced to Inventory
       const batchSynced = (batch.isStockSynced && batch.status !== 'CANCELLED')
         ? (Number(batch.completedQty || 0) > 0 ? Number(batch.completedQty) : batchFinishedUnits)
         : 0;
 
-      // Accumulate funnel metrics
-      totalCutPieces += batchCutUnits;
-      inSewingWip += batchSewingWip;
-      totalSewnOutput += batchSewnOutput;
-      inWashTotal += batchWashTotal;
-      ironedAndPacked += batchIronedPacked;
-      fullyFinishedSynced += batchSynced;
+      // Accumulate batch-level metrics
+      batchCutPiecesTotal += batchCutUnits;
+      batchSewingWipTotal += batchSewingWip;
+      batchSewnOutputTotal += batchSewnOutput;
+      batchWashGrandTotal += batchWashTotal;
+      batchIronedPackedTotal += batchIronedPacked;
+      batchFullyFinishedSyncedTotal += batchSynced;
 
       targetQuantity += target;
-      completedQuantity += batchFinishedUnits;
-      totalMaterialsCut += batchCutUnits;
-      totalGarmentsFinished += batchFinishedUnits;
 
       // Overall WIP across sewing & wash
       const batchWip = batch.status !== 'CANCELLED' && batch.status !== 'COMPLETED'
         ? Math.max(0, batchCutUnits - batchFinishedUnits)
         : 0;
-      currentWip += batchWip;
 
-      // Stage 4: Inventory Sync State
+      // Stage 6: Inventory Sync State
       if (batch.status !== 'CANCELLED') {
         if (batch.isStockSynced) {
           syncedToInventory += batchFinishedUnits;
@@ -1065,10 +1173,9 @@ export class ReportService {
         }
       }
 
+      // Material cost & scrap calculation
       let batchCost = 0;
       let batchReturned = 0;
-
-      // Scrap Returned: aggregate returnedScrap from related ProductionMaterialUsage records
       batch.materialUsages.forEach((u) => {
         const netConsumed = Number(u.netConsumedQty || 0);
         const cost = Number(u.unitCost || 0);
@@ -1077,37 +1184,29 @@ export class ReportService {
         batchReturned += scrap;
       });
 
+      if (batchReturned === 0 && Array.isArray(batch.activityLogs)) {
+        batchReturned = batch.activityLogs
+          .filter((a) => a.action === 'RETURNED_SCRAP' || a.action === 'RETURNED' || a.stage === 'SCRAP_RETURN')
+          .reduce((sum, a) => sum + (Number(a.quantity) || 0), 0);
+      }
+
       totalMaterialCost += batchCost;
       scrapVariance += batchReturned;
 
-      // Group into date trends (capturing Cut, Sewn, Washed, Finished)
+      // Record batch on productionDate trend if not already counted
       const pDate = new Date(batch.productionDate).toISOString().split('T')[0];
-      if (!dateTrendsMap[pDate]) {
-        dateTrendsMap[pDate] = { date: pDate, cutQty: 0, sewnQty: 0, washedQty: 0, finishedQty: 0, batchesCount: 0 };
-      }
-      dateTrendsMap[pDate].batchesCount++;
-      dateTrendsMap[pDate].sewnQty += batchSewnOutput;
-      dateTrendsMap[pDate].washedQty += Number(batch.washedQty || 0);
+      const trend = getOrInitTrend(pDate);
+      trend.batchesCount++;
 
-      (batch.cutLogs || []).forEach((cl) => {
-        const cDate = new Date(cl.cutDate).toISOString().split('T')[0];
-        if (!dateTrendsMap[cDate]) {
-          dateTrendsMap[cDate] = { date: cDate, cutQty: 0, sewnQty: 0, washedQty: 0, finishedQty: 0, batchesCount: 0 };
-        }
-        dateTrendsMap[cDate].cutQty += cl.quantityCut;
-      });
+      // If no granular logs were found for this batch, backfill trends so legacy batches display properly
+      if (periodCutLogs.length === 0 && batchCutUnits > 0) trend.cutQty += batchCutUnits;
+      if (periodSewnLogs.length === 0 && batchSewnOutput > 0) trend.sewnQty += batchSewnOutput;
+      if (periodWashLogs.length === 0 && Number(batch.washedQty || 0) > 0) trend.washedQty += Number(batch.washedQty);
+      if (periodGarmentFinishLogs.length === 0 && periodFinishingLogs.length === 0 && batchFinishedUnits > 0) trend.finishedQty += batchFinishedUnits;
 
-      (batch.finishLogs || []).forEach((fl) => {
-        const fDate = new Date(fl.finishDate).toISOString().split('T')[0];
-        if (!dateTrendsMap[fDate]) {
-          dateTrendsMap[fDate] = { date: fDate, cutQty: 0, sewnQty: 0, washedQty: 0, finishedQty: 0, batchesCount: 0 };
-        }
-        dateTrendsMap[fDate].finishedQty += fl.quantityFinished;
-      });
-
-      // Yield %: calculated as (finished / cutQty) * 100 with zero division safeguard
+      // Yield %: calculated as (finished / cutQty) * 100 with zero division safeguard, cleanly rounded to 2 decimals
       const divisor = batchCutUnits > 0 ? batchCutUnits : target;
-      const yieldPercentage = divisor > 0 ? Math.round((batchFinishedUnits / divisor) * 1000) / 10 : 0;
+      const yieldPercentage = divisor > 0 ? Math.round((batchFinishedUnits / divisor) * 10000) / 100 : 0;
       const vDesc = batch.variant
         ? [batch.variant.size, batch.variant.color].filter(Boolean).join(' / ')
         : 'All Sizes';
@@ -1148,12 +1247,22 @@ export class ReportService {
         materialUsages: batch.materialUsages,
         cutLogs: batch.cutLogs,
         finishLogs: batch.finishLogs,
+        activityLogs: batch.activityLogs,
       };
     });
 
-    const overallYieldDivisor = totalMaterialsCut > 0 ? totalMaterialsCut : targetQuantity;
-    const overallYieldPercentage =
-      overallYieldDivisor > 0 ? Math.round((completedQuantity / overallYieldDivisor) * 1000) / 10 : 0;
+    // 5. Compute true funnel totals using multi-stage date-filtered log quantities (with fallback to batch sums)
+    const finalTotalCut = logCutTotal > 0 ? Math.round(logCutTotal * 100) / 100 : Math.round(batchCutPiecesTotal * 100) / 100;
+    const finalTotalSewn = logSewnTotal > 0 ? Math.round(logSewnTotal * 100) / 100 : Math.round(batchSewnOutputTotal * 100) / 100;
+    const finalInWash = logWashTotal > 0 ? Math.round(logWashTotal * 100) / 100 : Math.round(batchWashGrandTotal * 100) / 100;
+    const finalIronedPacked = logFinishTotal > 0 ? Math.round(logFinishTotal * 100) / 100 : Math.round(batchIronedPackedTotal * 100) / 100;
+    const finalInSewingWip = Math.max(0, Math.round((batchSewingWipTotal > 0 ? batchSewingWipTotal : (finalTotalCut - finalTotalSewn)) * 100) / 100);
+    const finalFullyFinishedSynced = Math.round(batchFullyFinishedSyncedTotal * 100) / 100;
+
+    const overallYieldDivisor = finalTotalCut > 0 ? finalTotalCut : targetQuantity;
+    const overallYieldPercentage = overallYieldDivisor > 0
+      ? Math.round((finalIronedPacked / overallYieldDivisor) * 10000) / 100
+      : 0;
 
     const dailyTrends = Object.values(dateTrendsMap).sort((a, b) => b.date.localeCompare(a.date));
 
@@ -1163,24 +1272,24 @@ export class ReportService {
       summary: {
         totalBatches,
         targetQuantity,
-        completedQuantity,
+        completedQuantity: finalIronedPacked,
         overallYieldPercentage,
         totalMaterialCost: Math.round(totalMaterialCost * 100) / 100,
         scrapVariance: Math.round(scrapVariance * 100) / 100,
         totalScrapReturned: Math.round(scrapVariance * 100) / 100,
         // 6-Stage Production Funnel Metrics
-        totalCutPieces: Math.round(totalCutPieces * 100) / 100,
-        inSewingWip: Math.round(inSewingWip * 100) / 100,
-        totalSewnOutput: Math.round(totalSewnOutput * 100) / 100,
-        inWashTotal: Math.round(inWashTotal * 100) / 100,
-        ironedAndPacked: Math.round(ironedAndPacked * 100) / 100,
-        fullyFinishedSynced: Math.round(fullyFinishedSynced * 100) / 100,
+        totalCutPieces: finalTotalCut,
+        inSewingWip: finalInSewingWip,
+        totalSewnOutput: finalTotalSewn,
+        inWashTotal: finalInWash,
+        ironedAndPacked: finalIronedPacked,
+        fullyFinishedSynced: finalFullyFinishedSynced,
         // Legacy/backward compatibility keys
-        totalMaterialsCut: Math.round(totalCutPieces * 100) / 100,
-        totalGarmentsFinished: completedQuantity,
+        totalMaterialsCut: finalTotalCut,
+        totalGarmentsFinished: finalIronedPacked,
         pendingStockSync,
-        syncedToInventory: Math.round(fullyFinishedSynced * 100) / 100,
-        currentWip: Math.round(inSewingWip * 100) / 100,
+        syncedToInventory: finalFullyFinishedSynced,
+        currentWip: finalInSewingWip,
         dailyTrends,
       },
       tableItems,
@@ -1402,12 +1511,21 @@ export class ReportService {
       console.error('[ReportService.getChequesReport] Warning: reconcileMaturedCheques failed:', err);
     }
 
-    // Fetch all cheque payments linked to non-cancelled orders
+    // Fetch all cheque payments linked to non-cancelled orders matching created/assigned rep
+    const repCondition = repUserId && !isNaN(Number(repUserId)) && Number(repUserId) > 0
+      ? {
+          OR: [
+            { userId: Number(repUserId) },
+            { customer: { repId: Number(repUserId) } },
+          ],
+        }
+      : {};
+
     const whereClause: any = {
       method: 'CHEQUE',
       order: {
         status: { not: OrderStatus.CANCELLED },
-        ...(repUserId ? { userId: repUserId } : {}),
+        ...repCondition,
       },
       OR: [
         { chequeDate: { gte: startDate, lte: endDate } },

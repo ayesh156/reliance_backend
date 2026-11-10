@@ -22,6 +22,7 @@ const router = Router();
 // Modular Route Aggregation
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
+router.use('/sales-persons', userRoutes);
 router.use('/products', productRoutes);
 router.use('/settings', settingsRoutes);
 router.use('/attributes', attributeRoutes);

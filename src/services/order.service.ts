@@ -823,9 +823,19 @@ export class OrderService {
 
     const where: any = {};
 
-    // Role-Based Access Control (RBAC): Enforce strict scoping to the authoring user (REP role)
+    // Exclude cancelled invoices from active reporting and listings
+    where.status = { not: OrderStatus.CANCELLED };
+
+    // Role-Based Access Control (RBAC): Enforce strict scoping to authoring user or customer's assigned rep
     if (params.userId !== undefined && !isNaN(Number(params.userId)) && Number(params.userId) > 0) {
-      where.userId = Number(params.userId);
+      const uId = Number(params.userId);
+      where.AND = where.AND || [];
+      where.AND.push({
+        OR: [
+          { userId: uId },
+          { customer: { is: { repId: uId } } },
+        ],
+      });
     }
 
     if (params.source) {
@@ -969,7 +979,7 @@ export class OrderService {
       orderBy = [{ totalAmount: 'desc' }, { paidAmount: 'asc' }];
     }
 
-    const [total, orders] = await Promise.all([
+    const [total, orders, aggregates] = await Promise.all([
       prisma.order.count({ where }),
       prisma.order.findMany({
         where,
@@ -977,7 +987,7 @@ export class OrderService {
         take: limit,
         orderBy,
         include: {
-          customer: { select: { id: true, name: true, phone: true, address: true, city: true, type: true, outstandingBalance: true } },
+          customer: { select: { id: true, name: true, phone: true, address: true, city: true, type: true, outstandingBalance: true, repId: true } },
           items: {
             include: {
               variant: {
@@ -993,7 +1003,18 @@ export class OrderService {
           user: { select: { id: true, name: true, role: true } },
         },
       }),
+      prisma.order.aggregate({
+        where,
+        _sum: {
+          totalAmount: true,
+          paidAmount: true,
+        },
+      }),
     ]);
+
+    const totalRevenue = Math.round((aggregates._sum.totalAmount || 0) * 100) / 100;
+    const totalPaid = Math.round((aggregates._sum.paidAmount || 0) * 100) / 100;
+    const totalDue = Math.max(0, Math.round((totalRevenue - totalPaid) * 100) / 100);
 
     // Backfill customer relation or missing shippingAddress/city by looking up matching customers
     const ordersNeedingCustomer = orders.filter(
@@ -1107,6 +1128,12 @@ export class OrderService {
 
     return {
       data: resultOrders,
+      summary: {
+        totalRevenue,
+        totalPaid,
+        totalDue,
+        totalInvoices: total,
+      },
       pagination: {
         total: isOverdueOldest || isOverdueRecent ? resultOrders.length : total,
         page,

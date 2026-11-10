@@ -38,8 +38,10 @@ export async function getReportData(req: Request, res: Response): Promise<void> 
     endDate: req.query.endDate as string,
   });
 
-  const repUserId = userRole === 'REP' ? Number(req.user?.userId) : undefined;
-  const report = await reportService.getReportData(moduleParam, dateFilter, repUserId);
+  const queryRepId = req.query.repUserId || req.query.userId;
+  const cleanRepId = queryRepId && !isNaN(Number(queryRepId)) && Number(queryRepId) > 0 ? Number(queryRepId) : undefined;
+  const effectiveRepUserId = userRole === 'REP' ? Number(req.user?.userId) : cleanRepId;
+  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId);
 
   res.status(200).json({
     success: true,
@@ -69,8 +71,10 @@ export async function downloadReportPdf(req: Request, res: Response): Promise<vo
     endDate: req.query.endDate as string,
   });
 
-  const repUserId = userRole === 'REP' ? Number(req.user?.userId) : undefined;
-  const report = await reportService.getReportData(moduleParam, dateFilter, repUserId);
+  const queryRepId = req.query.repUserId || req.query.userId;
+  const cleanRepId = queryRepId && !isNaN(Number(queryRepId)) && Number(queryRepId) > 0 ? Number(queryRepId) : undefined;
+  const effectiveRepUserId = userRole === 'REP' ? Number(req.user?.userId) : cleanRepId;
+  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId);
   const pdfDoc = ReportPdfService.generate(moduleParam, report, req.user);
 
   const dateTag = dateFilter.startDate.toISOString().split('T')[0];

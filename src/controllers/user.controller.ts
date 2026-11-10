@@ -179,6 +179,39 @@ export class UserController {
       sendErrorFrom(res, error, 'Failed to override user credentials');
     }
   }
+
+  /**
+   * List staff, sales representatives, cashiers and admins for dropdown filters.
+   *
+   * @route GET /api/users or GET /api/sales-persons
+   * @access Protected by verifyToken
+   */
+  async getUsersList(_req: Request, res: Response): Promise<void> {
+    try {
+      // Exclude SUPER_ADMIN and administrative root account "Ayesh" from regular filter dropdowns
+      const users = await prisma.user.findMany({
+        where: {
+          active: true,
+          role: { not: 'SUPER_ADMIN' },
+          NOT: [
+            { name: { contains: 'Ayesh' } },
+            { email: { contains: 'ayesh' } },
+          ],
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+        },
+        orderBy: [{ role: 'asc' }, { name: 'asc' }],
+      });
+      res.status(200).json(users);
+    } catch (error) {
+      console.error('[UserController] getUsersList error:', error);
+      sendErrorFrom(res, error, 'Failed to fetch users list');
+    }
+  }
 }
 
 export const userController = new UserController();

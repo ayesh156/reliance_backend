@@ -44,7 +44,8 @@ export const verifyToken = (req: Request, res: Response, next: NextFunction): vo
  * Must be used AFTER verifyToken so `req.user` is populated.
  */
 /**
- * Require one of the specified roles and ensure authenticated context exists
+ * Require one of the specified roles and ensure authenticated context exists.
+ * If 'ADMIN' is among the required roles, 'SUPER_ADMIN' is implicitly granted universal access.
  */
 export const requireRole = (...roles: (string | string[])[]) => {
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -56,6 +57,16 @@ export const requireRole = (...roles: (string | string[])[]) => {
     const userRole = String(req.user.role).toUpperCase();
     const allowedRoles = roles.flat().map((r) => String(r).toUpperCase());
 
+    // If 'ADMIN' is in the allowed roles, implicitly grant access to 'SUPER_ADMIN' as well
+    if (allowedRoles.includes('ADMIN') && !allowedRoles.includes('SUPER_ADMIN')) {
+      allowedRoles.push('SUPER_ADMIN');
+    }
+
+    // Super Administrators automatically inherit full system access across all admin roles
+    if (userRole === 'SUPER_ADMIN' || allowedRoles.includes(userRole)) {
+      return next();
+    }
+
     if (!allowedRoles.includes(userRole)) {
       res.status(403).json({ error: `Access denied. Required role: ${allowedRoles.join(' or ')}` });
       return;
@@ -66,7 +77,7 @@ export const requireRole = (...roles: (string | string[])[]) => {
 
 /**
  * Require a specific module permission.
- * Administrators automatically bypass all permission checks (have full access).
+ * Super Administrators and Administrators automatically bypass all permission checks (have full access).
  */
 export const requirePermission = (permission: string) => {
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -75,8 +86,9 @@ export const requirePermission = (permission: string) => {
       return;
     }
 
-    // Administrators automatically bypass all permission checks
-    if (String(req.user.role).toUpperCase() === 'ADMIN') {
+    // Super Administrators and Administrators automatically bypass all permission checks
+    const userRole = String(req.user.role).toUpperCase();
+    if (userRole === 'ADMIN' || userRole === 'SUPER_ADMIN') {
       return next();
     }
 

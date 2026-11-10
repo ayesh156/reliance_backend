@@ -12,6 +12,7 @@ datasource db {
 // ----------------------------------------------------
 
 enum Role {
+  SUPER_ADMIN
   ADMIN
   STAFF
   CASHIER
