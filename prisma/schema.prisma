@@ -333,7 +333,7 @@ model OrderPayment {
   order        Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
   amount       Float
   method       String        // "CHEQUE", "CARD", "CASH"
-  reference    String?       // Cheque No / Card Transaction ID
+  reference    String?       @db.Text // Cheque No / Card Transaction ID
   chequeDate   DateTime?     // Cheque pass වෙන දිනය
   chequeStatus ChequeStatus? @default(PENDING)
   customerReceiptId Int?              @map("customer_receipt_id")
@@ -354,7 +354,7 @@ model CustomerReceipt {
   customer      Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
   totalAmount   Float          @map("total_amount")
   paymentMethod String         @map("payment_method") // "CASH", "CARD", "CHEQUE", "BANK_TRANSFER"
-  reference     String?        // Check number, bank transaction ref, notes
+  reference     String?        @db.Text // Check number, bank transaction ref, notes
   receiptDate   DateTime       @default(now()) @map("receipt_date")
   notes         String?        @db.Text
   payments      OrderPayment[]
@@ -649,7 +649,7 @@ model SupplierPayment {
   
   amount             Float            // Paid amount (Rs.)
   paymentMethod      String           @default("CASH") @map("payment_method") // CASH, CHEQUE, BANK_TRANSFER
-  reference          String?          // Cheque No / Bank Slip
+  reference          String?          @db.Text // Cheque No / Bank Slip
   paymentDate        DateTime         @default(now()) @map("payment_date")
   
   createdAt          DateTime         @default(now()) @map("created_at")
