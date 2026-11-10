@@ -998,57 +998,101 @@ export class ReportService {
     let pendingStockSync = 0;
     let syncedToInventory = 0;
 
-    const dateTrendsMap: Record<string, { date: string; cutQty: number; finishedQty: number; batchesCount: number }> = {};
+    // 6-Stage Production Funnel Accumulators
+    let totalCutPieces = 0;
+    let inSewingWip = 0;
+    let totalSewnOutput = 0;
+    let inWashTotal = 0;
+    let ironedAndPacked = 0;
+    let fullyFinishedSynced = 0;
+
+    const dateTrendsMap: Record<string, { date: string; cutQty: number; sewnQty: number; washedQty: number; finishedQty: number; batchesCount: number }> = {};
 
     const tableItems = productionOrders.map((batch) => {
       const target = Number(batch.targetQuantity || 0);
-      const completed = Number(batch.completedQty || 0);
-      targetQuantity += target;
-      completedQuantity += completed;
 
+      // Stage 1: Materials Cut / Total Intake - primary cutQty, falling back to cut logs or target
+      const loggedCutUnits = (batch.cutLogs || []).reduce((acc, c) => acc + (Number(c.quantityCut) || 0), 0);
+      const batchCutUnits = Number(batch.cutQty > 0 ? batch.cutQty : (loggedCutUnits > 0 ? loggedCutUnits : (target || 0)));
+
+      // Stage 2: In Sewing Line (WIP) -> cutQty - sewnQty
+      const sewnUnits = Number(batch.sewnQty || 0);
+      const batchSewingWip = batch.status !== 'CANCELLED' && batch.status !== 'COMPLETED'
+        ? Math.max(0, (batchCutUnits || Number(batch.lineSentQty || 0)) - sewnUnits)
+        : 0;
+
+      // Stage 3: Total Sewn Output
+      const batchSewnOutput = sewnUnits;
+
+      // Stage 4: In Wash / Washed
+      const batchWashTotal = Number(batch.sentToWashQty || 0) + Number(batch.washedQty || 0);
+
+      // Stage 5: Ironed & Packed (FinishingLog aggregate or completedQty)
+      const loggedFinishedUnits = (batch.finishLogs || []).reduce((acc, f) => acc + (Number(f.quantityFinished) || 0), 0);
+      const batchFinishedUnits = Number(batch.washedQty > 0 ? batch.washedQty : (batch.completedQty || 0));
+      const batchIronedPacked = loggedFinishedUnits > 0 ? loggedFinishedUnits : (Number(batch.completedQty || 0) > 0 ? Number(batch.completedQty) : batchFinishedUnits);
+
+      // Stage 6: Fully Finished / Synced to Inventory
+      const batchSynced = (batch.isStockSynced && batch.status !== 'CANCELLED')
+        ? (Number(batch.completedQty || 0) > 0 ? Number(batch.completedQty) : batchFinishedUnits)
+        : 0;
+
+      // Accumulate funnel metrics
+      totalCutPieces += batchCutUnits;
+      inSewingWip += batchSewingWip;
+      totalSewnOutput += batchSewnOutput;
+      inWashTotal += batchWashTotal;
+      ironedAndPacked += batchIronedPacked;
+      fullyFinishedSynced += batchSynced;
+
+      targetQuantity += target;
+      completedQuantity += batchFinishedUnits;
+      totalMaterialsCut += batchCutUnits;
+      totalGarmentsFinished += batchFinishedUnits;
+
+      // Overall WIP across sewing & wash
+      const batchWip = batch.status !== 'CANCELLED' && batch.status !== 'COMPLETED'
+        ? Math.max(0, batchCutUnits - batchFinishedUnits)
+        : 0;
+      currentWip += batchWip;
+
+      // Stage 4: Inventory Sync State
       if (batch.status !== 'CANCELLED') {
         if (batch.isStockSynced) {
-          syncedToInventory += completed;
-        } else if (completed > 0) {
-          pendingStockSync += completed;
+          syncedToInventory += batchFinishedUnits;
+        } else if (batchFinishedUnits > 0) {
+          pendingStockSync += batchFinishedUnits;
         }
       }
 
       let batchCost = 0;
       let batchReturned = 0;
 
+      // Scrap Returned: aggregate returnedScrap from related ProductionMaterialUsage records
       batch.materialUsages.forEach((u) => {
         const netConsumed = Number(u.netConsumedQty || 0);
         const cost = Number(u.unitCost || 0);
         batchCost += netConsumed * cost;
-        batchReturned += Number(u.returnedQty || 0);
+        const scrap = Number(u.returnedScrap ?? u.returnedQty ?? 0);
+        batchReturned += scrap;
       });
 
       totalMaterialCost += batchCost;
       scrapVariance += batchReturned;
 
-      // Calculate batch cut & finish logs
-      const batchCutUnits = (batch.cutLogs || []).reduce((acc, c) => acc + c.quantityCut, 0);
-      const batchFinishedUnits = (batch.finishLogs || []).reduce((acc, f) => acc + f.quantityFinished, 0) || completed;
-      totalMaterialsCut += batchCutUnits;
-      totalGarmentsFinished += batchFinishedUnits;
-
-      const batchWip = batch.status !== 'CANCELLED' && batch.status !== 'COMPLETED'
-        ? Math.max(0, target - completed)
-        : 0;
-      currentWip += batchWip;
-
-      // Group into date trends
+      // Group into date trends (capturing Cut, Sewn, Washed, Finished)
       const pDate = new Date(batch.productionDate).toISOString().split('T')[0];
       if (!dateTrendsMap[pDate]) {
-        dateTrendsMap[pDate] = { date: pDate, cutQty: 0, finishedQty: 0, batchesCount: 0 };
+        dateTrendsMap[pDate] = { date: pDate, cutQty: 0, sewnQty: 0, washedQty: 0, finishedQty: 0, batchesCount: 0 };
       }
       dateTrendsMap[pDate].batchesCount++;
+      dateTrendsMap[pDate].sewnQty += batchSewnOutput;
+      dateTrendsMap[pDate].washedQty += Number(batch.washedQty || 0);
 
       (batch.cutLogs || []).forEach((cl) => {
         const cDate = new Date(cl.cutDate).toISOString().split('T')[0];
         if (!dateTrendsMap[cDate]) {
-          dateTrendsMap[cDate] = { date: cDate, cutQty: 0, finishedQty: 0, batchesCount: 0 };
+          dateTrendsMap[cDate] = { date: cDate, cutQty: 0, sewnQty: 0, washedQty: 0, finishedQty: 0, batchesCount: 0 };
         }
         dateTrendsMap[cDate].cutQty += cl.quantityCut;
       });
@@ -1056,12 +1100,14 @@ export class ReportService {
       (batch.finishLogs || []).forEach((fl) => {
         const fDate = new Date(fl.finishDate).toISOString().split('T')[0];
         if (!dateTrendsMap[fDate]) {
-          dateTrendsMap[fDate] = { date: fDate, cutQty: 0, finishedQty: 0, batchesCount: 0 };
+          dateTrendsMap[fDate] = { date: fDate, cutQty: 0, sewnQty: 0, washedQty: 0, finishedQty: 0, batchesCount: 0 };
         }
         dateTrendsMap[fDate].finishedQty += fl.quantityFinished;
       });
 
-      const yieldPercentage = target > 0 ? Math.round((completed / target) * 1000) / 10 : 0;
+      // Yield %: calculated as (finished / cutQty) * 100 with zero division safeguard
+      const divisor = batchCutUnits > 0 ? batchCutUnits : target;
+      const yieldPercentage = divisor > 0 ? Math.round((batchFinishedUnits / divisor) * 1000) / 10 : 0;
       const vDesc = batch.variant
         ? [batch.variant.size, batch.variant.color].filter(Boolean).join(' / ')
         : 'All Sizes';
@@ -1074,7 +1120,14 @@ export class ReportService {
         productImage: batch.product?.images?.[0]?.imageUrl || null,
         variant: vDesc,
         targetQuantity: target,
-        completedQty: completed,
+        cutQty: batchCutUnits,
+        completedQty: batchFinishedUnits,
+        washedQty: Number(batch.washedQty || 0),
+        sentToWashQty: Number(batch.sentToWashQty || 0),
+        sewnQty: Number(batch.sewnQty || 0),
+        lineSentQty: Number(batch.lineSentQty || 0),
+        inSewingWip: batchSewingWip,
+        ironedAndPacked: batchIronedPacked,
         isStockSynced: batch.isStockSynced,
         stockSyncedAt: batch.stockSyncedAt ? batch.stockSyncedAt.toISOString() : null,
         stockSyncedByRole: batch.stockSyncedByRole,
@@ -1098,8 +1151,9 @@ export class ReportService {
       };
     });
 
+    const overallYieldDivisor = totalMaterialsCut > 0 ? totalMaterialsCut : targetQuantity;
     const overallYieldPercentage =
-      targetQuantity > 0 ? Math.round((completedQuantity / targetQuantity) * 1000) / 10 : 0;
+      overallYieldDivisor > 0 ? Math.round((completedQuantity / overallYieldDivisor) * 1000) / 10 : 0;
 
     const dailyTrends = Object.values(dateTrendsMap).sort((a, b) => b.date.localeCompare(a.date));
 
@@ -1114,11 +1168,19 @@ export class ReportService {
         totalMaterialCost: Math.round(totalMaterialCost * 100) / 100,
         scrapVariance: Math.round(scrapVariance * 100) / 100,
         totalScrapReturned: Math.round(scrapVariance * 100) / 100,
-        totalMaterialsCut: Math.round(totalMaterialsCut * 100) / 100,
+        // 6-Stage Production Funnel Metrics
+        totalCutPieces: Math.round(totalCutPieces * 100) / 100,
+        inSewingWip: Math.round(inSewingWip * 100) / 100,
+        totalSewnOutput: Math.round(totalSewnOutput * 100) / 100,
+        inWashTotal: Math.round(inWashTotal * 100) / 100,
+        ironedAndPacked: Math.round(ironedAndPacked * 100) / 100,
+        fullyFinishedSynced: Math.round(fullyFinishedSynced * 100) / 100,
+        // Legacy/backward compatibility keys
+        totalMaterialsCut: Math.round(totalCutPieces * 100) / 100,
         totalGarmentsFinished: completedQuantity,
         pendingStockSync,
-        syncedToInventory,
-        currentWip,
+        syncedToInventory: Math.round(fullyFinishedSynced * 100) / 100,
+        currentWip: Math.round(inSewingWip * 100) / 100,
         dailyTrends,
       },
       tableItems,

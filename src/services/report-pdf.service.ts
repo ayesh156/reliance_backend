@@ -20,6 +20,11 @@ function formatCurrency(val: number): string {
   return `Rs. ${Number(val || 0).toLocaleString('en-LK', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function formatAmountNum(val: number): string {
+  const num = Number(val || 0);
+  return num.toLocaleString('en-LK', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+
 interface ColumnDef {
   header: string;
   width: number;
@@ -111,14 +116,16 @@ function getModuleColumns(module: ReportModule): ColumnDef[] {
 
     case 'production':
       return [
-        { header: 'PROD NO', width: 75, key: 'productionNo' },
-        { header: 'GARMENT STYLE', width: 125, key: 'productName' },
-        { header: 'SIZE/COLOR', width: 65, key: 'variant' },
-        { header: 'TARGET', width: 45, align: 'center', key: 'targetQuantity' },
-        { header: 'DONE', width: 40, align: 'center', key: 'completedQty' },
-        { header: 'YIELD', width: 45, align: 'center', key: 'yieldPercentage', format: (v) => `${v}%` },
-        { header: 'MAT COST', width: 60, align: 'right', key: 'materialCost', format: (v) => formatCurrency(v).replace('Rs. ', '') },
-        { header: 'STATUS', width: 55.28, align: 'center', key: 'status' },
+        { header: 'PROD NO', width: 62, key: 'productionNo' },
+        { header: 'GARMENT STYLE', width: 105, key: 'productName' },
+        { header: 'SIZE/COLOR', width: 55, key: 'variant' },
+        { header: 'TARGET', width: 38, align: 'center', key: 'targetQuantity' },
+        { header: 'CUT QTY', width: 38, align: 'center', key: 'cutQty' },
+        { header: 'FINISHED', width: 40, align: 'center', key: 'completedQty' },
+        { header: 'WIP', width: 32, align: 'center', key: 'wipUnits' },
+        { header: 'YIELD', width: 38, align: 'center', key: 'yieldPercentage', format: (v) => `${v}%` },
+        { header: 'MAT COST', width: 52, align: 'right', key: 'materialCost', format: (v) => formatCurrency(v).replace('Rs. ', '') },
+        { header: 'STATUS', width: 50.28, align: 'center', key: 'status', format: (v, r) => (r && r.isStockSynced ? 'IN STOCK' : v) },
       ];
 
     case 'suppliers':
@@ -225,10 +232,12 @@ function getModuleKpiCards(module: ReportModule, sum: any): KpiCard[] {
     );
   } else if (module === 'production') {
     cards.push(
-      { label: 'PRODUCTION BATCHES', value: String(sum.totalBatches || 0) },
-      { label: 'TARGET UNITS', value: `${sum.targetQuantity || 0}` },
-      { label: 'COMPLETED OUTPUT', value: `${sum.completedQuantity || 0}` },
-      { label: 'OVERALL YIELD', value: `${sum.overallYieldPercentage || 0}%` }
+      { label: '1. TOTAL CUT PIECES', value: `${formatAmountNum(sum.totalCutPieces || sum.totalMaterialsCut || 0)} Units` },
+      { label: '2. IN SEWING LINE (WIP)', value: `${formatAmountNum(sum.inSewingWip || sum.currentWip || 0)} Pcs` },
+      { label: '3. TOTAL SEWN OUTPUT', value: `${formatAmountNum(sum.totalSewnOutput || 0)} Pcs` },
+      { label: '4. IN WASH / WASHED', value: `${formatAmountNum(sum.inWashTotal || 0)} Pcs` },
+      { label: '5. IRONED & PACKED', value: `${formatAmountNum(sum.ironedAndPacked || sum.completedQuantity || 0)} Pcs` },
+      { label: '6. FINISHED / SYNCED', value: `${formatAmountNum(sum.fullyFinishedSynced || sum.syncedToInventory || 0)} Pcs` }
     );
   } else if (module === 'suppliers') {
     cards.push(
@@ -352,25 +361,32 @@ export class ReportPdfService {
     const startX = this.startX;
     const pageWidth = this.pageWidth;
     const cardGap = 8;
-    const cardWidth = (pageWidth - (kpiCards.length - 1) * cardGap) / kpiCards.length;
-    const cardHeight = 38;
+    const cardHeight = 36;
+    const chunkSize = kpiCards.length > 4 ? 3 : kpiCards.length;
 
-    kpiCards.forEach((card, idx) => {
-      const cardX = startX + idx * (cardWidth + cardGap);
-      // Pure white card with clean 1px black border
-      doc.rect(cardX, curY, cardWidth, cardHeight)
-        .lineWidth(0.8)
-        .strokeColor('#000000')
-        .fillColor('#ffffff')
-        .fillAndStroke();
+    for (let i = 0; i < kpiCards.length; i += chunkSize) {
+      const chunk = kpiCards.slice(i, i + chunkSize);
+      const cardWidth = (pageWidth - (chunk.length - 1) * cardGap) / chunk.length;
 
-      // Bold black uppercase label
-      doc.fontSize(6.5).font('Helvetica-Bold').fillColor('#000000').text(card.label, cardX + 6, curY + 6, { width: cardWidth - 12 });
-      // Bold black metric value
-      doc.fontSize(9.5).font('Helvetica-Bold').fillColor('#000000').text(card.value, cardX + 6, curY + 18, { width: cardWidth - 12 });
-    });
+      chunk.forEach((card, idx) => {
+        const cardX = startX + idx * (cardWidth + cardGap);
+        // Pure white card with clean 1px black border
+        doc.rect(cardX, curY, cardWidth, cardHeight)
+          .lineWidth(0.8)
+          .strokeColor('#000000')
+          .fillColor('#ffffff')
+          .fillAndStroke();
 
-    return curY + cardHeight + 14;
+        // Bold black uppercase label
+        doc.fontSize(6.5).font('Helvetica-Bold').fillColor('#000000').text(card.label, cardX + 6, curY + 6, { width: cardWidth - 12 });
+        // Bold black metric value
+        doc.fontSize(9.5).font('Helvetica-Bold').fillColor('#000000').text(card.value, cardX + 6, curY + 18, { width: cardWidth - 12 });
+      });
+
+      curY += cardHeight + 8;
+    }
+
+    return curY + 6;
   }
 
   /**
