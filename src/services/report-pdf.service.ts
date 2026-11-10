@@ -59,7 +59,7 @@ function getModuleColumns(module: ReportModule): ColumnDef[] {
         { header: 'INV #', width: 62, key: 'invoiceNumber' },
         { header: 'DATE', width: 65, key: 'createdAt', format: (d) => String(d).split('T')[0] },
         { header: 'CUSTOMER', width: 95, key: 'customerName' },
-        { header: 'TYPE', width: 50, key: 'source', format: (s) => (s === 'POS_WHOLESALE' ? 'Wholesale' : 'Retail') },
+        { header: 'ROLE', width: 50, align: 'center', key: 'userRole', format: (r, row) => String(r || row?.role || row?.user?.role || 'SYSTEM').toUpperCase() },
         { header: 'SUBTOTAL', width: 60, align: 'right', key: 'subtotal', format: (v) => formatCurrency(v).replace('Rs. ', '') },
         { header: 'DISC', width: 45, align: 'right', key: 'discount', format: (v) => (v > 0 ? `-${v}` : '-') },
         { header: 'NET AMT', width: 65, align: 'right', key: 'totalAmount', format: (v) => formatCurrency(v).replace('Rs. ', '') },

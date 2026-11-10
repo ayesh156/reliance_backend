@@ -344,6 +344,8 @@ export class ReportService {
         paymentMethod: rawMethod,
         paymentMethods: paymentMethodsList,
         salesRep: order.user?.name || '-',
+        userRole: order.user?.role || 'SYSTEM',
+        role: order.user?.role || 'SYSTEM',
         status: order.status,
         itemCount,
       };
@@ -994,7 +996,7 @@ export class ReportService {
           timestamp: { gte: startDate, lte: endDate },
           OR: [
             { stage: 'WASHING' },
-            { action: { in: ['WASH', 'SEND_TO_WASH', 'WASH_COMPLETED', 'STOCK_SYNC'] } },
+            { action: { in: ['WASH', 'SEND_TO_WASH', 'WASH_COMPLETED'] } },
           ],
         },
         select: { id: true, quantity: true, timestamp: true, productionOrderId: true, action: true, stage: true },
@@ -1067,13 +1069,6 @@ export class ReportService {
     let scrapVariance = 0;
     let pendingStockSync = 0;
     let syncedToInventory = 0;
-
-    // Batch-level accumulators (fallbacks when individual stage logs were not logged)
-    let batchCutPiecesTotal = 0;
-    let batchSewingWipTotal = 0;
-    let batchSewnOutputTotal = 0;
-    let batchWashGrandTotal = 0;
-    let batchIronedPackedTotal = 0;
     let batchFullyFinishedSyncedTotal = 0;
 
     // 3. Map dynamic Daily Trends grouping each stage by its actual execution date
@@ -1149,12 +1144,7 @@ export class ReportService {
         ? (Number(batch.completedQty || 0) > 0 ? Number(batch.completedQty) : batchFinishedUnits)
         : 0;
 
-      // Accumulate batch-level metrics
-      batchCutPiecesTotal += batchCutUnits;
-      batchSewingWipTotal += batchSewingWip;
-      batchSewnOutputTotal += batchSewnOutput;
-      batchWashGrandTotal += batchWashTotal;
-      batchIronedPackedTotal += batchIronedPacked;
+      // Accumulate synced stock metrics for the active period
       batchFullyFinishedSyncedTotal += batchSynced;
 
       targetQuantity += target;
@@ -1197,12 +1187,6 @@ export class ReportService {
       const pDate = new Date(batch.productionDate).toISOString().split('T')[0];
       const trend = getOrInitTrend(pDate);
       trend.batchesCount++;
-
-      // If no granular logs were found for this batch, backfill trends so legacy batches display properly
-      if (periodCutLogs.length === 0 && batchCutUnits > 0) trend.cutQty += batchCutUnits;
-      if (periodSewnLogs.length === 0 && batchSewnOutput > 0) trend.sewnQty += batchSewnOutput;
-      if (periodWashLogs.length === 0 && Number(batch.washedQty || 0) > 0) trend.washedQty += Number(batch.washedQty);
-      if (periodGarmentFinishLogs.length === 0 && periodFinishingLogs.length === 0 && batchFinishedUnits > 0) trend.finishedQty += batchFinishedUnits;
 
       // Yield %: calculated as (finished / cutQty) * 100 with zero division safeguard, cleanly rounded to 2 decimals
       const divisor = batchCutUnits > 0 ? batchCutUnits : target;
@@ -1251,12 +1235,14 @@ export class ReportService {
       };
     });
 
-    // 5. Compute true funnel totals using multi-stage date-filtered log quantities (with fallback to batch sums)
-    const finalTotalCut = logCutTotal > 0 ? Math.round(logCutTotal * 100) / 100 : Math.round(batchCutPiecesTotal * 100) / 100;
-    const finalTotalSewn = logSewnTotal > 0 ? Math.round(logSewnTotal * 100) / 100 : Math.round(batchSewnOutputTotal * 100) / 100;
-    const finalInWash = logWashTotal > 0 ? Math.round(logWashTotal * 100) / 100 : Math.round(batchWashGrandTotal * 100) / 100;
-    const finalIronedPacked = logFinishTotal > 0 ? Math.round(logFinishTotal * 100) / 100 : Math.round(batchIronedPackedTotal * 100) / 100;
-    const finalInSewingWip = Math.max(0, Math.round((batchSewingWipTotal > 0 ? batchSewingWipTotal : (finalTotalCut - finalTotalSewn)) * 100) / 100);
+    // 5. Compute true funnel totals strictly from stage-specific log quantities executed within [startDate, endDate]
+    // Absolutely decoupled from root batch-level properties (zero fallback to batchSewnOutputTotal, batchWashGrandTotal, or batchIronedPackedTotal)
+    // to prevent cross-month contamination from the parent batch's createdAt/updatedAt timestamps.
+    const finalTotalCut = Math.round(logCutTotal * 100) / 100;
+    const finalTotalSewn = Math.round(logSewnTotal * 100) / 100;
+    const finalInWash = Math.round(logWashTotal * 100) / 100;
+    const finalIronedPacked = Math.round(logFinishTotal * 100) / 100;
+    const finalInSewingWip = Math.max(0, Math.round((finalTotalCut - finalTotalSewn) * 100) / 100);
     const finalFullyFinishedSynced = Math.round(batchFullyFinishedSyncedTotal * 100) / 100;
 
     const overallYieldDivisor = finalTotalCut > 0 ? finalTotalCut : targetQuantity;

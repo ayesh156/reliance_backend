@@ -1107,6 +1107,8 @@ export class OrderService {
       return {
         ...order,
         customer: resolvedCustomer,
+        userRole: order.user?.role || 'SYSTEM',
+        role: order.user?.role || 'SYSTEM',
         shippingAddress: resolvedShippingAddress,
         city: resolvedCity,
         returns: parsed.returns,
