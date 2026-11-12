@@ -1,5 +1,10 @@
 import { prisma } from '../lib/prisma.ts';
 import { ChequeStatus } from '@prisma/client';
+import {
+  extractCleanChequeNumber,
+  extractCleanBankName,
+  extractCleanMaturityDate,
+} from './customer-statement-pdf.service.ts';
 
 /**
  * Enterprise Secure Customer Credit & Bill Settlement Service
@@ -73,8 +78,8 @@ export class CustomerCreditService {
       },
     });
 
-    // හිඟ මුදල (dueAmount) ගණනය කර filter කිරීම
-    const bills = orders
+    // Extract all customer invoices (both settled and pending) with accurate due calculation
+    const allBills = orders
       .map((order) => {
         const total = Number(order.totalAmount) || 0;
         const paid = Number(order.paidAmount) || 0;
@@ -115,8 +120,9 @@ export class CustomerCreditService {
             createdAt: p.createdAt,
           })),
         };
-      })
-      .filter((bill) => bill.dueAmount > 0.01);
+      });
+
+    const bills = allBills.filter((bill) => bill.dueAmount > 0.01);
 
     const computedBillsDue = bills.reduce((acc, b) => acc + b.dueAmount, 0);
     const effectiveTotalDue = Math.round(computedBillsDue * 100) / 100;
@@ -178,32 +184,17 @@ export class CustomerCreditService {
       const rawStatus = String(cp.chequeStatus || 'PENDING').toUpperCase();
       // Only include uncleared / unrealized in-hand cheques (exclude CLEARED and BOUNCED)
       if (rawStatus !== 'CLEARED' && rawStatus !== 'BOUNCED') {
-        let chqNo = '-';
-        let bName = '-';
-        if (cp.reference) {
-          const chqMatch = /Cheque\s*#?([^\s(]+)/i.exec(cp.reference);
-          if (chqMatch) {
-            chqNo = chqMatch[1];
-          } else {
-            chqNo = cp.reference.replace(/\s*\[Edit:.*?\]$/, '').slice(0, 30);
-          }
-          const bankMatch = /\(([^)]+)\)/.exec(cp.reference);
-          if (bankMatch) {
-            bName = bankMatch[1];
-          }
-        }
-
-        const dateSource = cp.chequeDate || cp.createdAt || cp.order?.createdAt;
-        const formattedDate = dateSource
-          ? new Date(dateSource).toISOString().split('T')[0]
-          : new Date().toISOString().split('T')[0];
+        const chqNo = extractCleanChequeNumber((cp as any).chequeNumber, cp.reference);
+        const bName = extractCleanBankName((cp as any).bankName, cp.reference);
+        const dateSource = extractCleanMaturityDate(cp.chequeDate, cp.createdAt, cp.order?.createdAt);
+        const formattedDate = dateSource !== '-' ? dateSource : new Date().toISOString().split('T')[0];
 
         pendingCheques.push({
           id: cp.id,
           orderId: cp.orderId,
           invoiceNumber: cp.order?.invoiceNumber || `INV${cp.orderId}`,
-          chequeNumber: chqNo.replace(/^#/, '').trim() || '-',
-          bankName: bName.trim() || '-',
+          chequeNumber: chqNo,
+          bankName: bName,
           chequeDate: formattedDate,
           amount: Number(cp.amount) || 0,
           status: rawStatus,
@@ -229,22 +220,21 @@ export class CustomerCreditService {
             for (const c of combined) {
               const cStatus = String(c.status || c.chequeStatus || 'PENDING').toUpperCase();
               if (cStatus !== 'CLEARED' && cStatus !== 'REALIZED' && cStatus !== 'BOUNCED') {
-                const cNo = String(c.chequeNumber || c.reference || '').replace(/^#/, '').trim() || '-';
+                const cNo = extractCleanChequeNumber(c.chequeNumber, c.reference);
+                const cBnk = extractCleanBankName(c.bankName, c.bank);
                 const cAmt = Number(c.amount) || 0;
                 // Avoid duplicating cheques already captured via OrderPayment
                 const isDuplicate = pendingCheques.some(
                   (x) => x.orderId === o.id && (x.chequeNumber === cNo || Math.abs(x.amount - cAmt) < 0.01)
                 );
                 if (!isDuplicate && cAmt > 0) {
-                  const rawChqDate = c.chequeDate || c.date || o.createdAt;
+                  const rawChqDate = extractCleanMaturityDate(c.chequeDate, c.date, o.createdAt);
                   pendingCheques.push({
                     orderId: o.id,
                     invoiceNumber: o.invoiceNumber || `ORD-#${o.id}`,
                     chequeNumber: cNo,
-                    bankName: (c.bankName || c.bank || '-').trim(),
-                    chequeDate: rawChqDate
-                      ? new Date(rawChqDate).toISOString().split('T')[0]
-                      : new Date(o.createdAt).toISOString().split('T')[0],
+                    bankName: cBnk,
+                    chequeDate: rawChqDate !== '-' ? rawChqDate : new Date(o.createdAt).toISOString().split('T')[0],
                     amount: cAmt,
                     status: cStatus,
                   });
@@ -257,6 +247,69 @@ export class CustomerCreditService {
         }
       }
     }
+
+    // ---------------------------------------------------------------------------------
+    // Cheque Aggregation Logic:
+    // When multiple bills/payments are settled by the exact same raw numeric cheque number,
+    // consolidate them into a single row summing their amounts, with combined invoice numbers.
+    // ---------------------------------------------------------------------------------
+    const groupedChequesMap = new Map<string, {
+      id?: number;
+      orderId?: number;
+      invoiceNumbers: string[];
+      invoiceNumber: string;
+      chequeNumber: string;
+      bankName: string;
+      chequeDate: string;
+      amount: number;
+      status: string;
+    }>();
+
+    for (const chq of pendingCheques) {
+      const cleanChq = extractCleanChequeNumber(chq.chequeNumber);
+      const cleanBank = extractCleanBankName(chq.bankName);
+
+      let targetKey = (cleanChq && cleanChq !== '-')
+        ? `CHQ_${cleanChq.toUpperCase()}`
+        : `RAW_${chq.id || chq.orderId || Math.random()}`;
+
+      if (cleanChq && cleanChq !== '-') {
+        for (const [existingKey, existingVal] of groupedChequesMap.entries()) {
+          if (existingVal.chequeNumber.toUpperCase() === cleanChq.toUpperCase()) {
+            targetKey = existingKey;
+            break;
+          }
+        }
+      }
+
+      const existing = groupedChequesMap.get(targetKey);
+      if (existing) {
+        existing.amount = Math.round((existing.amount + chq.amount) * 100) / 100;
+        if (chq.invoiceNumber && !existing.invoiceNumbers.includes(chq.invoiceNumber)) {
+          existing.invoiceNumbers.push(chq.invoiceNumber);
+        }
+        existing.invoiceNumber = existing.invoiceNumbers.join(', ');
+        if ((!existing.bankName || existing.bankName === '-') && cleanBank !== '-') {
+          existing.bankName = cleanBank;
+        } else if (cleanBank !== '-' && cleanBank.length > existing.bankName.length) {
+          existing.bankName = cleanBank;
+        }
+        if ((!existing.chequeDate || existing.chequeDate === '-') && chq.chequeDate && chq.chequeDate !== '-') {
+          existing.chequeDate = chq.chequeDate;
+        }
+      } else {
+        const invNumbers = chq.invoiceNumber ? [chq.invoiceNumber] : [];
+        groupedChequesMap.set(targetKey, {
+          ...chq,
+          chequeNumber: cleanChq,
+          bankName: cleanBank,
+          invoiceNumbers: invNumbers,
+          invoiceNumber: invNumbers.join(', '),
+        });
+      }
+    }
+
+    const aggregatedPendingCheques = Array.from(groupedChequesMap.values());
 
     // Retrieve recent master receipts for settlement audit trails
     const recentReceipts = await prisma.customerReceipt.findMany({
@@ -320,7 +373,8 @@ export class CustomerCreditService {
         totalOutstandingDue: finalTotalDue,
       },
       bills,
-      pendingCheques,
+      allBills,
+      pendingCheques: aggregatedPendingCheques,
       recentReceipts,
       latestReceipt: recentReceipts[0] || null,
       returnBills,

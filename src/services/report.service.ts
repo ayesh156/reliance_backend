@@ -66,9 +66,13 @@ export function resolveDateFilter(params: {
   preset?: string;
   startDate?: string;
   endDate?: string;
+  from?: string;
+  to?: string;
 }): DateFilterResult {
   const now = new Date();
   const rawPreset = (params.preset || '').toLowerCase();
+  const rawStartDate = params.startDate || params.from;
+  const rawEndDate = params.endDate || params.to;
 
   if (rawPreset === 'daily') {
     const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
@@ -124,9 +128,9 @@ export function resolveDateFilter(params: {
     };
   }
 
-  if (rawPreset === 'custom' || params.startDate || params.endDate) {
-    let parsedStart = parseBoundaryDate(params.startDate, false);
-    let parsedEnd = parseBoundaryDate(params.endDate, true);
+  if (rawPreset === 'custom' || rawStartDate || rawEndDate) {
+    let parsedStart = parseBoundaryDate(rawStartDate, false);
+    let parsedEnd = parseBoundaryDate(rawEndDate, true);
 
     // Single-date selection handling: if only one boundary provided, set end = start or start = end
     if (parsedStart && !parsedEnd) {

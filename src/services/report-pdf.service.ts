@@ -116,13 +116,12 @@ function getModuleColumns(module: ReportModule): ColumnDef[] {
 
     case 'production':
       return [
-        { header: 'PROD NO', width: 62, key: 'productionNo' },
-        { header: 'GARMENT STYLE', width: 105, key: 'productName' },
-        { header: 'SIZE/COLOR', width: 55, key: 'variant' },
-        { header: 'TARGET', width: 38, align: 'center', key: 'targetQuantity' },
-        { header: 'CUT QTY', width: 38, align: 'center', key: 'cutQty' },
-        { header: 'FINISHED', width: 40, align: 'center', key: 'completedQty' },
-        { header: 'WIP', width: 32, align: 'center', key: 'wipUnits' },
+        { header: 'PROD NO', width: 65, key: 'productionNo' },
+        { header: 'GARMENT STYLE', width: 125, key: 'productName' },
+        { header: 'SIZE/COLOR', width: 65, key: 'variant' },
+        { header: 'CUT QTY', width: 40, align: 'center', key: 'cutQty' },
+        { header: 'FINISHED', width: 42, align: 'center', key: 'completedQty' },
+        { header: 'WIP', width: 33, align: 'center', key: 'wipUnits' },
         { header: 'YIELD', width: 38, align: 'center', key: 'yieldPercentage', format: (v) => `${v}%` },
         { header: 'MAT COST', width: 52, align: 'right', key: 'materialCost', format: (v) => formatCurrency(v).replace('Rs. ', '') },
         { header: 'STATUS', width: 50.28, align: 'center', key: 'status', format: (v, r) => (r && r.isStockSynced ? 'IN STOCK' : v) },

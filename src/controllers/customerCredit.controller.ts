@@ -26,11 +26,11 @@ export const downloadCustomerStatementPdf = async (req: Request, res: Response, 
       return res.status(404).json({ error: 'Customer not found' });
     }
 
-    // Retrieve active due bills list & pending in-hand cheques
+    // Retrieve active due bills list, all invoice history, & pending in-hand cheques
     const dueBillsData = await CustomerCreditService.getCustomerDueBills(customerId);
     const doc = CustomerStatementPdfService.generate(
       customer,
-      dueBillsData.bills || [],
+      dueBillsData.allBills && dueBillsData.allBills.length > 0 ? dueBillsData.allBills : (dueBillsData.bills || []),
       dueBillsData.pendingCheques || [],
       dueBillsData.latestReceipt || null,
       dueBillsData.returnBills || []

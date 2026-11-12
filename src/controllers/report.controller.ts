@@ -34,8 +34,10 @@ export async function getReportData(req: Request, res: Response): Promise<void> 
 
   const dateFilter = resolveDateFilter({
     preset: req.query.preset as string,
-    startDate: req.query.startDate as string,
-    endDate: req.query.endDate as string,
+    startDate: (req.query.startDate || req.query.from) as string,
+    endDate: (req.query.endDate || req.query.to) as string,
+    from: req.query.from as string,
+    to: req.query.to as string,
   });
 
   const queryRepId = req.query.repUserId || req.query.userId;
@@ -67,8 +69,10 @@ export async function downloadReportPdf(req: Request, res: Response): Promise<vo
 
   const dateFilter = resolveDateFilter({
     preset: req.query.preset as string,
-    startDate: req.query.startDate as string,
-    endDate: req.query.endDate as string,
+    startDate: (req.query.startDate || req.query.from) as string,
+    endDate: (req.query.endDate || req.query.to) as string,
+    from: req.query.from as string,
+    to: req.query.to as string,
   });
 
   const queryRepId = req.query.repUserId || req.query.userId;
@@ -94,8 +98,10 @@ export async function downloadReportPdf(req: Request, res: Response): Promise<vo
 export async function getConsolidatedReportData(req: Request, res: Response): Promise<void> {
   const dateFilter = resolveDateFilter({
     preset: req.query.preset as string,
-    startDate: req.query.startDate as string,
-    endDate: req.query.endDate as string,
+    startDate: (req.query.startDate || req.query.from) as string,
+    endDate: (req.query.endDate || req.query.to) as string,
+    from: req.query.from as string,
+    to: req.query.to as string,
   });
 
   const report = await reportService.getConsolidatedReportData(dateFilter);
@@ -112,8 +118,10 @@ export async function getConsolidatedReportData(req: Request, res: Response): Pr
 export async function downloadConsolidatedReportPdf(req: Request, res: Response): Promise<void> {
   const dateFilter = resolveDateFilter({
     preset: req.query.preset as string,
-    startDate: req.query.startDate as string,
-    endDate: req.query.endDate as string,
+    startDate: (req.query.startDate || req.query.from) as string,
+    endDate: (req.query.endDate || req.query.to) as string,
+    from: req.query.from as string,
+    to: req.query.to as string,
   });
 
   const consolidatedReport = await reportService.getConsolidatedReportData(dateFilter);
@@ -136,8 +144,8 @@ export async function downloadConsolidatedReportPdf(req: Request, res: Response)
 export async function getFinancialAuditData(req: Request, res: Response): Promise<void> {
   const auditData = await auditService.getFinancialAuditData({
     preset: req.query.preset as string,
-    startDate: req.query.startDate as string,
-    endDate: req.query.endDate as string,
+    startDate: (req.query.startDate || req.query.from) as string,
+    endDate: (req.query.endDate || req.query.to) as string,
   });
 
   res.status(200).json({
@@ -152,8 +160,8 @@ export async function getFinancialAuditData(req: Request, res: Response): Promis
 export async function downloadFinancialAuditPdf(req: Request, res: Response): Promise<void> {
   const auditData = await auditService.getFinancialAuditData({
     preset: req.query.preset as string,
-    startDate: req.query.startDate as string,
-    endDate: req.query.endDate as string,
+    startDate: (req.query.startDate || req.query.from) as string,
+    endDate: (req.query.endDate || req.query.to) as string,
   });
 
   const pdfDoc = auditService.generateMasterAuditPdf(auditData, req.user);
