@@ -134,10 +134,11 @@ export class AuthService {
       }
     }
 
+    // Trusted-Device Persistent Session: Issue long-lived 365d JWT for resilient staff/admin access
     const token = jwt.sign(
       { userId: user.id, role: user.role, name: user.name, permissions: resolvedPermissions },
       env.jwtSecret,
-      { expiresIn: env.accessTokenExpiry as jwt.SignOptions['expiresIn'], algorithm: 'HS256' }
+      { expiresIn: (env.accessTokenExpiry || '365d') as jwt.SignOptions['expiresIn'], algorithm: 'HS256' }
     );
 
     return {
@@ -166,9 +167,18 @@ export class AuthService {
     if (!user.active) {
       throw new HttpException(403, 'Account has been deactivated. Access revoked.');
     }
+    const resolvedPermissions = resolveUserPermissions(user.role, user.permissions);
+    // Silent token refresh: Provide fresh long-lived token on profile checks to maintain persistent trusted session
+    const refreshedToken = jwt.sign(
+      { userId: user.id, role: user.role, name: user.name, permissions: resolvedPermissions },
+      env.jwtSecret,
+      { expiresIn: (env.accessTokenExpiry || '365d') as jwt.SignOptions['expiresIn'], algorithm: 'HS256' }
+    );
+
     return {
       ...user,
-      permissions: resolveUserPermissions(user.role, user.permissions),
+      permissions: resolvedPermissions,
+      token: refreshedToken,
     };
   }
 

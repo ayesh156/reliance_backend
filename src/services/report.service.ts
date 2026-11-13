@@ -14,7 +14,8 @@ export type ReportModule =
   | 'production'
   | 'suppliers'
   | 'audit'
-  | 'cheques';
+  | 'cheques'
+  | 'expenses';
 
 export interface DateFilterResult {
   startDate: Date;
@@ -379,7 +380,7 @@ export class ReportService {
       });
     });
 
-    const [periodMaterialUsages, periodGrnPurchases] = await Promise.all([
+    const [periodMaterialUsages, periodGrnPurchases, periodExpenses] = await Promise.all([
       prisma.productionMaterialUsage.findMany({
         where: {
           productionOrder: {
@@ -407,6 +408,16 @@ export class ReportService {
           paidAmount: true,
         },
       }),
+      prisma.expense.findMany({
+        where: {
+          date: { gte: startDate, lte: endDate },
+        },
+        include: {
+          category: {
+            select: { id: true, name: true },
+          },
+        },
+      }),
     ]);
 
     const totalProductionCost = periodMaterialUsages.reduce(
@@ -424,14 +435,40 @@ export class ReportService {
     );
     const totalGrnLiabilities = Math.max(0, totalGrnExpenses - totalGrnPaid);
 
+    const totalExpenses = periodExpenses.reduce(
+      (sum, e) => sum + Number(e.amount || 0),
+      0
+    );
+
+    const expensesByCategoryMap: Record<string, { count: number; total: number; name: string }> = {};
+    for (const exp of periodExpenses) {
+      const catName = exp.category?.name || 'General';
+      if (!expensesByCategoryMap[catName]) {
+        expensesByCategoryMap[catName] = { count: 0, total: 0, name: catName };
+      }
+      expensesByCategoryMap[catName].count += 1;
+      expensesByCategoryMap[catName].total += Number(exp.amount || 0);
+    }
+    const expensesByCategory = Object.values(expensesByCategoryMap).sort((a, b) => b.total - a.total);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // CLIENT-MANDATED FINANCIAL ACCOUNTING FORMULA:
+    // 1. Sales = Net Sales Revenue
+    // 2. Cost of Sale (COGS) = Material & Product Cost of Goods Sold
+    // 3. Gross Profit = Sales - Cost of Sale
+    // 4. Operational Expenses = Period sum from Expense module
+    // 5. Net Profit = Gross Profit - Operational Expenses
+    // ══════════════════════════════════════════════════════════════════════
     const grossProfit = Math.round((netSales - totalCostOfGoodsSold) * 100) / 100;
     const grossProfitMargin =
       netSales > 0 ? Math.round(((netSales - totalCostOfGoodsSold) / netSales) * 10000) / 100 : 0;
-    // Net Operational Revenue: Collected Revenue (or Gross - Discounts - Customer Credits) less Production Costs and GRN Expenses
-    const netOperationalRevenue =
-      Math.round((totalPaid - totalProductionCost - totalGrnExpenses) * 100) / 100;
-    const netOperationalProfit =
-      Math.round((netSales - totalProductionCost - totalGrnExpenses) * 100) / 100;
+    const netProfit = Math.round((grossProfit - totalExpenses) * 100) / 100;
+    const netProfitMargin =
+      netSales > 0 ? Math.round((netProfit / netSales) * 10000) / 100 : 0;
+
+    // Legacy operational surplus aliases (preserved for backward compatibility)
+    const netOperationalRevenue = netProfit;
+    const netOperationalProfit = netProfit;
 
     return {
       module: 'sales',
@@ -447,8 +484,13 @@ export class ReportService {
         averageOrderValue,
         paymentSplit,
         totalCostOfGoodsSold: Math.round(totalCostOfGoodsSold * 100) / 100,
+        costOfGoodsSold: Math.round(totalCostOfGoodsSold * 100) / 100,
         grossProfit,
         grossProfitMargin,
+        totalExpenses: Math.round(totalExpenses * 100) / 100,
+        netProfit,
+        netProfitMargin,
+        expensesByCategory,
         totalProductionCost: Math.round(totalProductionCost * 100) / 100,
         totalGrnExpenses: Math.round(totalGrnExpenses * 100) / 100,
         totalGrnPaid: Math.round(totalGrnPaid * 100) / 100,
@@ -1689,12 +1731,83 @@ export class ReportService {
   }
 
   /**
+   * 10. EXPENSES & OPERATIONAL OUTFLOWS REPORT
+   * Aggregates period operational expenses, category breakdown, transaction count, and ledger items.
+   */
+  async getExpensesReport(dateFilter: DateFilterResult, categoryId?: number) {
+    const { startDate, endDate } = dateFilter;
+    const where: any = {
+      date: { gte: startDate, lte: endDate },
+    };
+    if (categoryId && !isNaN(Number(categoryId)) && Number(categoryId) > 0) {
+      where.categoryId = Number(categoryId);
+    }
+
+    const expenses = await prisma.expense.findMany({
+      where,
+      orderBy: { date: 'desc' },
+      include: {
+        category: {
+          select: { id: true, name: true },
+        },
+        createdBy: {
+          select: { id: true, name: true, role: true },
+        },
+      },
+    });
+
+    const totalExpenses = expenses.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const transactionCount = expenses.length;
+    const avgExpense = transactionCount > 0 ? Math.round((totalExpenses / transactionCount) * 100) / 100 : 0;
+
+    const categoryMap: Record<string, { count: number; total: number; name: string }> = {};
+    for (const exp of expenses) {
+      const catName = exp.category?.name || 'Uncategorized';
+      if (!categoryMap[catName]) {
+        categoryMap[catName] = { count: 0, total: 0, name: catName };
+      }
+      categoryMap[catName].count += 1;
+      categoryMap[catName].total += Number(exp.amount || 0);
+    }
+
+    const categoryBreakdown = Object.values(categoryMap).sort((a, b) => b.total - a.total);
+    const topCategory = categoryBreakdown[0]?.name || 'N/A';
+
+    const tableItems = expenses.map((exp) => ({
+      id: exp.id,
+      code: exp.code,
+      date: exp.date.toISOString(),
+      categoryId: exp.categoryId,
+      categoryName: exp.category?.name || '-',
+      description: exp.description,
+      amount: Math.round(Number(exp.amount || 0) * 100) / 100,
+      createdByName: exp.createdBy?.name || 'Staff',
+      createdByRole: exp.createdBy?.role || 'STAFF',
+      createdAt: exp.createdAt.toISOString(),
+    }));
+
+    return {
+      module: 'expenses' as const,
+      dateFilter,
+      summary: {
+        totalExpenses: Math.round(totalExpenses * 100) / 100,
+        transactionCount,
+        avgExpense,
+        categoryCount: categoryBreakdown.length,
+        topCategory,
+        categoryBreakdown,
+      },
+      tableItems,
+    };
+  }
+
+  /**
    * Master Consolidated Audit Compiler:
-   * Aggregates all domain modules (Sales, Returns, Inventory, Products, Materials, Production, GRN, Audit Edits)
+   * Aggregates all domain modules (Sales, Returns, Inventory, Products, Materials, Production, GRN, Audit Edits, Expenses)
    * into a single unified analytical report payload with master executive summary.
    */
   async getConsolidatedReportData(dateFilter: DateFilterResult) {
-    const [sales, returns, inventory, products, materials, production, suppliers, audit] = await Promise.all([
+    const [sales, returns, inventory, products, materials, production, suppliers, audit, expenses] = await Promise.all([
       this.getSalesReport(dateFilter),
       this.getReturnsReport(dateFilter),
       this.getInventoryReport(dateFilter),
@@ -1703,6 +1816,7 @@ export class ReportService {
       this.getProductionReport(dateFilter),
       this.getSuppliersReport(dateFilter),
       this.getAuditReport(dateFilter),
+      this.getExpensesReport(dateFilter),
     ]);
 
     const masterSummary = {
@@ -1724,31 +1838,20 @@ export class ReportService {
       auditedInvoices: audit.summary?.totalInvoicesInPeriod || 0,
       modifiedInvoices: audit.summary?.modifiedInvoicesCount || 0,
 
-      // Advanced Net Revenue & Operational Profit Analytics
+      // Advanced Accounting Formulas (Client-Mandated Standard)
       totalProductionCost: production.summary?.totalMaterialCost || sales.summary?.totalProductionCost || 0,
       costOfGoodsSold: sales.summary?.totalCostOfGoodsSold || 0,
       grossProfit: sales.summary?.grossProfit || 0,
       grossProfitMargin: sales.summary?.grossProfitMargin || 0,
+      totalExpenses: expenses.summary?.totalExpenses || sales.summary?.totalExpenses || 0,
+      netProfit: sales.summary?.netProfit ?? Math.round(((sales.summary?.grossProfit || 0) - (expenses.summary?.totalExpenses || 0)) * 100) / 100,
+      netProfitMargin: sales.summary?.netProfitMargin || 0,
       grnExpenses: suppliers.summary?.totalPurchases || sales.summary?.totalGrnExpenses || 0,
       grnLiabilities: suppliers.summary?.totalOutstandingPayables || sales.summary?.totalGrnLiabilities || 0,
       appliedDiscounts: sales.summary?.totalDiscount || 0,
       customerCredits: sales.summary?.totalDue || 0,
-      netOperationalRevenue:
-        sales.summary?.netOperationalRevenue ??
-        Math.round(
-          ((sales.summary?.totalPaid || 0) -
-            (production.summary?.totalMaterialCost || 0) -
-            (suppliers.summary?.totalPurchases || 0)) *
-            100
-        ) / 100,
-      netOperationalProfit:
-        sales.summary?.netOperationalProfit ??
-        Math.round(
-          ((sales.summary?.netSales || 0) -
-            (production.summary?.totalMaterialCost || 0) -
-            (suppliers.summary?.totalPurchases || 0)) *
-            100
-        ) / 100,
+      netOperationalRevenue: sales.summary?.netProfit || 0,
+      netOperationalProfit: sales.summary?.netProfit || 0,
     };
 
     return {
@@ -1764,6 +1867,7 @@ export class ReportService {
         production,
         suppliers,
         audit,
+        expenses,
       },
     };
   }
@@ -1771,7 +1875,7 @@ export class ReportService {
   /**
    * Router Dispatcher: Delegates to domain-specific analytical aggregation service
    */
-  async getReportData(module: ReportModule, filter: DateFilterResult, repUserId?: number) {
+  async getReportData(module: ReportModule, filter: DateFilterResult, repUserId?: number, categoryId?: number) {
     switch (module) {
       case 'sales':
         return this.getSalesReport(filter, repUserId);
@@ -1791,6 +1895,8 @@ export class ReportService {
         return this.getAuditReport(filter);
       case 'cheques':
         return this.getChequesReport(filter, repUserId);
+      case 'expenses':
+        return this.getExpensesReport(filter, categoryId);
       default:
         throw new HttpException(400, `Unsupported report domain module: ${module}`);
     }

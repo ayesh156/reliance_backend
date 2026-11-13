@@ -72,6 +72,7 @@ model User {
   assignedCustomers Customer[] @relation("RepCustomers")
   createdOrders     Order[]    @relation("UserOrders")
   createdSalesOrders SalesOrder[] @relation("UserSalesOrders")
+  expenses          Expense[]    @relation("UserExpenses")
 
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
@@ -844,4 +845,40 @@ model FinishingLog {
   @@index([actionType])
   @@index([date])
   @@map("finishing_logs")
+}
+
+// ----------------------------------------------------
+// EXPENSES & EXPENSE CATEGORIES
+// ----------------------------------------------------
+
+model ExpenseCategory {
+  id          Int       @id @default(autoincrement())
+  name        String    @unique
+  description String?   @db.Text
+  isActive    Boolean   @default(true) @map("is_active")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  expenses    Expense[]
+
+  @@map("expense_categories")
+}
+
+model Expense {
+  id          Int             @id @default(autoincrement())
+  code        String          @unique
+  date        DateTime        @default(now())
+  categoryId  Int             @map("category_id")
+  category    ExpenseCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  description String          @db.Text
+  amount      Float           @default(0)
+  createdById Int?            @map("created_by_id")
+  createdBy   User?           @relation("UserExpenses", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime        @default(now()) @map("created_at")
+  updatedAt   DateTime        @updatedAt @map("updated_at")
+
+  @@index([categoryId])
+  @@index([date])
+  @@index([createdById])
+  @@map("expenses")
 }

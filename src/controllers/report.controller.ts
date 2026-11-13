@@ -14,6 +14,7 @@ const VALID_MODULES: ReportModule[] = [
   'suppliers',
   'audit',
   'cheques',
+  'expenses',
 ];
 
 /**
@@ -43,7 +44,8 @@ export async function getReportData(req: Request, res: Response): Promise<void> 
   const queryRepId = req.query.repUserId || req.query.userId;
   const cleanRepId = queryRepId && !isNaN(Number(queryRepId)) && Number(queryRepId) > 0 ? Number(queryRepId) : undefined;
   const effectiveRepUserId = userRole === 'REP' ? Number(req.user?.userId) : cleanRepId;
-  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId);
+  const queryCategoryId = req.query.categoryId && req.query.categoryId !== 'all' ? Number(req.query.categoryId) : undefined;
+  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId, queryCategoryId);
 
   res.status(200).json({
     success: true,
@@ -78,7 +80,8 @@ export async function downloadReportPdf(req: Request, res: Response): Promise<vo
   const queryRepId = req.query.repUserId || req.query.userId;
   const cleanRepId = queryRepId && !isNaN(Number(queryRepId)) && Number(queryRepId) > 0 ? Number(queryRepId) : undefined;
   const effectiveRepUserId = userRole === 'REP' ? Number(req.user?.userId) : cleanRepId;
-  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId);
+  const queryCategoryId = req.query.categoryId && req.query.categoryId !== 'all' ? Number(req.query.categoryId) : undefined;
+  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId, queryCategoryId);
   const pdfDoc = ReportPdfService.generate(moduleParam, report, req.user);
 
   const dateTag = dateFilter.startDate.toISOString().split('T')[0];

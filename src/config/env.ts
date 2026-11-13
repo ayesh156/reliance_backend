@@ -40,8 +40,8 @@ export const env = {
   databaseUrl: process.env.DATABASE_URL || '',
   jwtSecret: process.env.JWT_SECRET || 'reliance-jwt-secret-change-in-production',
   jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || 'reliance-jwt-refresh-secret-change-in-production',
-  accessTokenExpiry: process.env.ACCESS_TOKEN_EXPIRY || '24h',
-  refreshTokenExpiry: process.env.REFRESH_TOKEN_EXPIRY || '7d',
+  accessTokenExpiry: process.env.ACCESS_TOKEN_EXPIRY || '365d',
+  refreshTokenExpiry: process.env.REFRESH_TOKEN_EXPIRY || '365d',
   isProduction: (process.env.NODE_ENV || 'development') === 'production',
   isDevelopment: (process.env.NODE_ENV || 'development') !== 'production',
 } as const;

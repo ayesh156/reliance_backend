@@ -49,6 +49,7 @@ const MODULE_TITLES: Record<ReportModule, string> = {
   suppliers: 'SUPPLIERS & GOODS RECEIVED NOTES',
   audit: 'INVOICE MODIFICATIONS & AUDIT',
   cheques: 'CHEQUE LEDGER & REALIZATION FORECAST',
+  expenses: 'EXPENSES & OPERATIONAL OUTFLOWS',
 };
 
 // Module column definitions for tables
@@ -186,6 +187,15 @@ function getModuleColumns(module: ReportModule): ColumnDef[] {
           },
         },
       ];
+
+    case 'expenses':
+      return [
+        { header: 'EXP #', width: 65, key: 'code' },
+        { header: 'DATE', width: 65, key: 'date', format: (d) => String(d).split('T')[0] },
+        { header: 'CATEGORY', width: 95, key: 'categoryName' },
+        { header: 'DESCRIPTION', width: 175.28, key: 'description' },
+        { header: 'AMOUNT', width: 110, align: 'right', key: 'amount', format: (v) => formatCurrency(v).replace('Rs. ', '') },
+      ];
   }
 }
 
@@ -196,10 +206,20 @@ function getModuleKpiCards(module: ReportModule, sum: any): KpiCard[] {
 
   if (module === 'sales') {
     cards.push(
-      { label: 'GROSS REVENUE', value: formatCurrency(sum.grossRevenue) },
       { label: 'NET SALES', value: formatCurrency(sum.netSales) },
+      { label: 'COST OF SALE (COGS)', value: formatCurrency(sum.totalCostOfGoodsSold || sum.costOfGoodsSold) },
+      { label: 'GROSS PROFIT', value: formatCurrency(sum.grossProfit) },
+      { label: 'EXPENSES', value: formatCurrency(sum.totalExpenses) },
+      { label: 'NET PROFIT', value: formatCurrency(sum.netProfit) },
       { label: 'TOTAL PAID', value: formatCurrency(sum.totalPaid) },
       { label: 'OUTSTANDING DUE', value: formatCurrency(sum.totalDue) }
+    );
+  } else if (module === 'expenses') {
+    cards.push(
+      { label: 'TOTAL EXPENSES', value: formatCurrency(sum.totalExpenses) },
+      { label: 'TRANSACTIONS', value: String(sum.transactionCount || 0) },
+      { label: 'CATEGORIES', value: String(sum.categoryCount || 0) },
+      { label: 'TOP CATEGORY', value: String(sum.topCategory || 'N/A') }
     );
   } else if (module === 'returns') {
     cards.push(
@@ -676,12 +696,12 @@ export class ReportPdfService {
     ];
     curY = this.drawKpiCards(doc, secondaryCards, curY);
 
-    // Master Tertiary 4 KPI Cards (Operational Net Revenue & Profit Formula)
+    // Master Tertiary KPI Cards (Client-Mandated Standard: Sales - COGS = Gross Profit, Gross Profit - Expenses = Net Profit)
     const profitCards: KpiCard[] = [
-      { label: 'NET OPERATIONAL REV.', value: formatCurrency(master.netOperationalRevenue) },
-      { label: 'OPERATIONAL PROFIT', value: formatCurrency(master.netOperationalProfit) },
-      { label: 'TOTAL PRODUCTION COST', value: formatCurrency(master.totalProductionCost) },
-      { label: 'GROSS PROFIT (COGS)', value: `${formatCurrency(master.grossProfit)}` },
+      { label: 'COST OF SALE (COGS)', value: formatCurrency(master.costOfGoodsSold) },
+      { label: 'GROSS PROFIT', value: formatCurrency(master.grossProfit) },
+      { label: 'OPERATIONAL EXPENSES', value: formatCurrency(master.totalExpenses) },
+      { label: 'NET PROFIT (BOTTOM LINE)', value: formatCurrency(master.netProfit) },
     ];
     curY = this.drawKpiCards(doc, profitCards, curY);
 
@@ -695,7 +715,7 @@ export class ReportPdfService {
     curY = this.drawKpiCards(doc, operationalCards, curY);
 
     // Table of Contents / Domain Audit Index Box
-    doc.rect(startX, curY, pageWidth, 120).lineWidth(0.8).strokeColor('#000000').fillColor('#ffffff').fillAndStroke();
+    doc.rect(startX, curY, pageWidth, 135).lineWidth(0.8).strokeColor('#000000').fillColor('#ffffff').fillAndStroke();
     doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#000000').text('TABLE OF CONTENTS & DOMAIN AUDIT INDEX', startX + 12, curY + 10);
 
     const tocItems = [
@@ -706,7 +726,8 @@ export class ReportPdfService {
       { section: 'SECTION 5', title: 'Raw Materials & Fabric Ledger', desc: 'Fabric rolls/yards, weighted average cost valuation, scrap & waste logs' },
       { section: 'SECTION 6', title: 'Garment Production & Yield', desc: 'Production batches, target vs completed output, efficiency yield rates' },
       { section: 'SECTION 7', title: 'Suppliers & Goods Received Notes', desc: 'Inward GRN purchase totals, vendor disbursements, outstanding debt' },
-      { section: 'SECTION 8', title: 'Invoice Modifications & Security Trail', desc: 'Audit trail of modified sales records, cashier revision frequency' },
+      { section: 'SECTION 8', title: 'Expenses & Operational Outflows', desc: 'Itemized operational expenditures, overheads, and category cash ledger' },
+      { section: 'SECTION 9', title: 'Invoice Modifications & Security Trail', desc: 'Audit trail of modified sales records, cashier revision frequency' },
     ];
 
     let tocY = curY + 26;
