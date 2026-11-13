@@ -234,8 +234,10 @@ export class ReportService {
         items: {
           select: {
             id: true,
+            variantId: true,
             quantity: true,
             price: true,
+            isReturn: true,
             variant: {
               select: {
                 id: true,
@@ -257,11 +259,68 @@ export class ReportService {
       },
     });
 
+    // ── 1. Accrual Returns & Adjustments Pre-scan ──
+    // Query orders that logged return activity during this date range (including returns against prior-period invoices)
+    const returnActivityOrders = await prisma.order.findMany({
+      where: {
+        notes: { contains: 'returns' },
+        updatedAt: { gte: startDate, lte: endDate },
+        status: { not: OrderStatus.CANCELLED },
+      },
+      select: {
+        id: true,
+        notes: true,
+        updatedAt: true,
+        createdAt: true,
+      },
+    });
+
+    // Track processed return events by ID to avoid duplicate counting across queries
+    const seenReturnIds = new Set<string>();
+    let periodReturnsTotal = 0;
+    const returnedUnitsByVariant: Record<number, number> = {};
+
+    const processReturnNotes = (orderId: number, notes?: string | null, fallbackDate?: Date) => {
+      if (!notes || !notes.includes('returns')) return;
+      const parsed = parseOrderStructuredNotes(notes);
+      if (Array.isArray(parsed.returns)) {
+        for (const ret of parsed.returns) {
+          const retId = ret.returnId || `${orderId}-${ret.returnDate}`;
+          if (seenReturnIds.has(retId)) continue;
+          const retDate = new Date(ret.returnDate || fallbackDate || new Date());
+          if (!isNaN(retDate.getTime()) && retDate >= startDate && retDate <= endDate) {
+            seenReturnIds.add(retId);
+            periodReturnsTotal += Number(ret.totalReturnRefund || 0);
+            for (const rit of (ret.returnedItems || [])) {
+              const vId = Number(rit.variantId);
+              const q = Number(rit.returnQty || 0);
+              if (vId && q > 0) {
+                returnedUnitsByVariant[vId] = (returnedUnitsByVariant[vId] || 0) + q;
+              }
+            }
+          }
+        }
+      }
+    };
+
+    // Scan returns from return activity orders and current period orders
+    for (const rOrder of returnActivityOrders) {
+      processReturnNotes(rOrder.id, rOrder.notes, rOrder.updatedAt || rOrder.createdAt);
+    }
+    for (const order of orders) {
+      processReturnNotes(order.id, order.notes, order.updatedAt || order.createdAt);
+    }
+
     let grossRevenue = 0;
     let totalDiscount = 0;
-    let netSales = 0;
+    let grossBilledSales = 0;
     let totalPaid = 0;
     let totalDue = 0;
+    let periodReturnBillsTotal = 0;
+
+    const variantGrossSoldUnits: Record<number, number> = {};
+    const variantUnitCostMap: Record<number, number> = {};
+
     const paymentSplit: Record<string, { count: number; amount: number }> = {
       CASH: { count: 0, amount: 0 },
       CARD: { count: 0, amount: 0 },
@@ -271,6 +330,7 @@ export class ReportService {
     };
 
     const tableItems = orders.map((order) => {
+      const isReturnBill = Boolean(order.isReturnBill || Number(order.totalAmount || 0) < 0);
       const sub = Number(order.subtotal || order.totalAmount + (order.discount || 0));
       const disc = Number(order.discount || 0);
       const total = Number(order.totalAmount || 0);
@@ -279,9 +339,40 @@ export class ReportService {
 
       grossRevenue += sub;
       totalDiscount += disc;
-      netSales += total;
       totalPaid += paid;
       totalDue += due;
+
+      if (isReturnBill) {
+        // Dedicated Return Bill / Credit Note created in this period
+        const returnVal = Math.abs(total);
+        periodReturnBillsTotal += returnVal;
+        for (const it of (order.items || [])) {
+          const vId = Number(it.variantId || it.variant?.id);
+          const q = Math.abs(Number(it.quantity || 0));
+          if (vId && q > 0) {
+            returnedUnitsByVariant[vId] = (returnedUnitsByVariant[vId] || 0) + q;
+          }
+        }
+      } else {
+        // Standard Billed Sales Order (Wholesale or Retail)
+        const parsed = parseOrderStructuredNotes(order.notes);
+        const originalBilled = parsed.originalTotalAmount !== undefined ? Number(parsed.originalTotalAmount) : total;
+        grossBilledSales += originalBilled;
+
+        // Tally sold units for COGS (excluding line items flagged as isReturn)
+        for (const it of (order.items || [])) {
+          const vId = Number(it.variantId || it.variant?.id);
+          const qty = Number(it.quantity || 0);
+          if (it.isReturn) {
+            returnedUnitsByVariant[vId] = (returnedUnitsByVariant[vId] || 0) + Math.abs(qty);
+          } else if (vId && qty > 0) {
+            variantGrossSoldUnits[vId] = (variantGrossSoldUnits[vId] || 0) + qty;
+            if (it.variant?.costPrice !== undefined) {
+              variantUnitCostMap[vId] = Number(it.variant.costPrice || 0);
+            }
+          }
+        }
+      }
 
       const rawMethod = (order.paymentMethod || (due > 0 ? 'CREDIT' : 'CASH')).toUpperCase();
       let normalizedMethod = 'OTHER';
@@ -296,7 +387,7 @@ export class ReportService {
       paymentSplit[normalizedMethod].count += 1;
       paymentSplit[normalizedMethod].amount += total;
 
-      const itemCount = order.items.reduce((s, it) => s + it.quantity, 0);
+      const itemCount = (order.items || []).reduce((s, it) => s + it.quantity, 0);
 
       const customerAddr = order.customer?.address || (order as any).shippingAddress || [order.customer?.address, order.customer?.city].filter(Boolean).join(', ') || '-';
 
@@ -357,28 +448,46 @@ export class ReportService {
     });
 
     const orderCount = orders.length;
+
+    // ── 2. Net Sales & Accrual Returns Reconciliation ──
+    // Invariant: Net Sales = Sum of Billed Invoices (Wholesale + Retail) - Sum of Customer Returns / Credit Notes
+    const totalReturns = Math.round((periodReturnsTotal + periodReturnBillsTotal) * 100) / 100;
+    const netSales = Math.max(0, Math.round((grossBilledSales - totalReturns) * 100) / 100);
     const averageOrderValue = orderCount > 0 ? Math.round((netSales / orderCount) * 100) / 100 : 0;
 
-    let totalReturns = 0;
-    for (const order of orders) {
-      if (order.notes && order.notes.includes('returns')) {
-        const parsed = parseOrderStructuredNotes(order.notes);
-        if (Array.isArray(parsed.returns)) {
-          for (const ret of parsed.returns) {
-            totalReturns += Number(ret.totalReturnRefund || 0);
-          }
-        }
+    // ── 3. Accrual Cost of Goods Sold (COGS) Calculation ──
+    // Invariant: COGS = Sum of (Sold Qty * Unit Cost) - Sum of (Returned Qty * Unit Cost)
+    // Direct production cost of actual goods sold, subtracting cost of returned goods recovered to stock
+    // Absolutely NO GRN or raw material bulk purchases leak into this calculation (Unsold inventory remains an asset)
+    const missingCostVariantIds = Object.keys(returnedUnitsByVariant)
+      .map(Number)
+      .filter((id) => id && variantUnitCostMap[id] === undefined);
+
+    if (missingCostVariantIds.length > 0) {
+      const missingVariants = await prisma.productVariant.findMany({
+        where: { id: { in: missingCostVariantIds } },
+        select: { id: true, costPrice: true },
+      });
+      for (const mv of missingVariants) {
+        variantUnitCostMap[mv.id] = Number(mv.costPrice || 0);
       }
     }
 
-    // ── Sold Products COGS & Operational Expenses Aggregation ──
-    let totalCostOfGoodsSold = 0;
-    orders.forEach((o) => {
-      (o.items || []).forEach((it: any) => {
-        const cost = Number(it.variant?.costPrice || 0);
-        totalCostOfGoodsSold += cost * Number(it.quantity || 0);
-      });
-    });
+    let grossSoldCost = 0;
+    for (const [vIdStr, soldQty] of Object.entries(variantGrossSoldUnits)) {
+      const vId = Number(vIdStr);
+      const unitCost = variantUnitCostMap[vId] || 0;
+      grossSoldCost += soldQty * unitCost;
+    }
+
+    let returnedCost = 0;
+    for (const [vIdStr, retQty] of Object.entries(returnedUnitsByVariant)) {
+      const vId = Number(vIdStr);
+      const unitCost = variantUnitCostMap[vId] || 0;
+      returnedCost += retQty * unitCost;
+    }
+
+    const totalCostOfGoodsSold = Math.max(0, Math.round((grossSoldCost - returnedCost) * 100) / 100);
 
     const [periodMaterialUsages, periodGrnPurchases, periodExpenses] = await Promise.all([
       prisma.productionMaterialUsage.findMany({
@@ -452,12 +561,12 @@ export class ReportService {
     const expensesByCategory = Object.values(expensesByCategoryMap).sort((a, b) => b.total - a.total);
 
     // ══════════════════════════════════════════════════════════════════════
-    // CLIENT-MANDATED FINANCIAL ACCOUNTING FORMULA:
-    // 1. Sales = Net Sales Revenue
-    // 2. Cost of Sale (COGS) = Material & Product Cost of Goods Sold
-    // 3. Gross Profit = Sales - Cost of Sale
-    // 4. Operational Expenses = Period sum from Expense module
-    // 5. Net Profit = Gross Profit - Operational Expenses
+    // CORE FINANCIAL ENGINE & ACCRUAL ACCOUNTING STANDARD (PERMANENT INVARIANTS):
+    // 1. Net Sales = Sum of Billed Invoices - Sum of Returns
+    // 2. Cost of Sale (COGS) = Sum of (Sold Qty * Unit Cost) - Sum of (Returned Qty * Unit Cost)
+    // 3. Gross Profit = Net Sales - Cost of Sale
+    // 4. Expenses = Period sum strictly from Expense table (Overheads)
+    // 5. Net Profit = Gross Profit - Expenses
     // ══════════════════════════════════════════════════════════════════════
     const grossProfit = Math.round((netSales - totalCostOfGoodsSold) * 100) / 100;
     const grossProfitMargin =
@@ -485,6 +594,8 @@ export class ReportService {
         paymentSplit,
         totalCostOfGoodsSold: Math.round(totalCostOfGoodsSold * 100) / 100,
         costOfGoodsSold: Math.round(totalCostOfGoodsSold * 100) / 100,
+        costOfSale: Math.round(totalCostOfGoodsSold * 100) / 100,
+        cogs: Math.round(totalCostOfGoodsSold * 100) / 100,
         grossProfit,
         grossProfitMargin,
         totalExpenses: Math.round(totalExpenses * 100) / 100,
@@ -1838,7 +1949,7 @@ export class ReportService {
       auditedInvoices: audit.summary?.totalInvoicesInPeriod || 0,
       modifiedInvoices: audit.summary?.modifiedInvoicesCount || 0,
 
-      // Advanced Accounting Formulas (Client-Mandated Standard)
+      // Core Financial Engine Standards (Permanent Invariants: Sales - COGS = GP | GP - Overheads = NP)
       totalProductionCost: production.summary?.totalMaterialCost || sales.summary?.totalProductionCost || 0,
       costOfGoodsSold: sales.summary?.totalCostOfGoodsSold || 0,
       grossProfit: sales.summary?.grossProfit || 0,
