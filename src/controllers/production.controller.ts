@@ -105,6 +105,7 @@ export class ProductionController {
       const today = req.query.today === 'true';
       const month = req.query.month === 'true' ? true : (req.query.month as string | undefined);
       const status = req.query.status as string | undefined;
+      const activityType = req.query.activityType as string | undefined;
       const page = req.query.page ? Number(req.query.page) : undefined;
       const limit = req.query.limit ? Number(req.query.limit) : undefined;
 
@@ -116,6 +117,7 @@ export class ProductionController {
         today,
         month,
         status,
+        activityType,
         page,
         limit,
       });

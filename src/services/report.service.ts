@@ -1126,7 +1126,9 @@ export class ReportService {
     // 1. Stage-specific timestamp queries across the active date range
     const [
       periodCutLogs,
+      periodLineIntakeLogs,
       periodSewnLogs,
+      periodWashDispatchLogs,
       periodWashLogs,
       periodGarmentFinishLogs,
       periodFinishingLogs,
@@ -1136,6 +1138,17 @@ export class ReportService {
         where: { cutDate: { gte: startDate, lte: endDate } },
         select: { id: true, quantityCut: true, cutDate: true, productionOrderId: true },
       }),
+      // Line Intake: BatchActivityLog (action='SEND_TO_LINE' / 'LINE_INTAKE') within range
+      prisma.batchActivityLog.findMany({
+        where: {
+          timestamp: { gte: startDate, lte: endDate },
+          OR: [
+            { action: { in: ['SEND_TO_LINE', 'LINE_INTAKE'] } },
+            { stage: 'LINE', action: { in: ['SEND_TO_LINE', 'LINE_INTAKE'] } },
+          ],
+        },
+        select: { id: true, quantity: true, timestamp: true, productionOrderId: true },
+      }),
       // Total Sewn: BatchActivityLog (action='SEWN' / 'LOG_SEWN' or stage='LINE' with sewn action) within range
       prisma.batchActivityLog.findMany({
         where: {
@@ -1143,6 +1156,17 @@ export class ReportService {
           OR: [
             { action: { in: ['SEWN', 'LOG_SEWN'] } },
             { stage: 'LINE', action: { contains: 'SEWN' } },
+          ],
+        },
+        select: { id: true, quantity: true, timestamp: true, productionOrderId: true },
+      }),
+      // Forwarded to Wash: BatchActivityLog (action='SEND_TO_WASH') within range
+      prisma.batchActivityLog.findMany({
+        where: {
+          timestamp: { gte: startDate, lte: endDate },
+          OR: [
+            { action: 'SEND_TO_WASH' },
+            { stage: 'WASHING', action: 'SEND_TO_WASH' },
           ],
         },
         select: { id: true, quantity: true, timestamp: true, productionOrderId: true },
@@ -1172,7 +1196,9 @@ export class ReportService {
 
     // Sum stage logs directly executed within the date range
     const logCutTotal = periodCutLogs.reduce((acc, c) => acc + (Number(c.quantityCut) || 0), 0);
+    const logLineIntakeTotal = periodLineIntakeLogs.reduce((acc, l) => acc + (Number(l.quantity) || 0), 0);
     const logSewnTotal = periodSewnLogs.reduce((acc, s) => acc + (Number(s.quantity) || 0), 0);
+    const logWashDispatchTotal = periodWashDispatchLogs.reduce((acc, w) => acc + (Number(w.quantity) || 0), 0);
     const logWashTotal = periodWashLogs.reduce((acc, w) => acc + (Number(w.quantity) || 0), 0);
     const logFinishTotal =
       periodGarmentFinishLogs.reduce((acc, f) => acc + (Number(f.quantityFinished) || 0), 0) +
@@ -1270,6 +1296,28 @@ export class ReportService {
     const tableItems = productionOrders.map((batch) => {
       const target = Number(batch.targetQuantity || 0);
 
+      // Calculate period-specific stage event totals using Asia/Colombo (+05:30) date boundaries
+      const batchSewnLogsInRange = (batch.activityLogs || []).filter((l: any) => {
+        const isSewn = l.action === 'SEWN' || l.action === 'LOG_SEWN' || (l.stage === 'LINE' && String(l.action || '').includes('SEWN'));
+        const t = new Date(l.timestamp).getTime();
+        return isSewn && t >= startDate.getTime() && t <= endDate.getTime();
+      });
+      const batchPeriodSewn = batchSewnLogsInRange.reduce((acc: number, l: any) => acc + (Number(l.quantity) || 0), 0);
+
+      const batchIntakeLogsInRange = (batch.activityLogs || []).filter((l: any) => {
+        const isIntake = l.action === 'SEND_TO_LINE' || l.action === 'LINE_INTAKE' || (l.stage === 'LINE' && l.action === 'SEND_TO_LINE');
+        const t = new Date(l.timestamp).getTime();
+        return isIntake && t >= startDate.getTime() && t <= endDate.getTime();
+      });
+      const batchPeriodIntake = batchIntakeLogsInRange.reduce((acc: number, l: any) => acc + (Number(l.quantity) || 0), 0);
+
+      const batchWashDispatchLogsInRange = (batch.activityLogs || []).filter((l: any) => {
+        const isWash = l.action === 'SEND_TO_WASH' || (l.stage === 'WASHING' && String(l.action || '').includes('SEND'));
+        const t = new Date(l.timestamp).getTime();
+        return isWash && t >= startDate.getTime() && t <= endDate.getTime();
+      });
+      const batchPeriodWashDispatch = batchWashDispatchLogsInRange.reduce((acc: number, l: any) => acc + (Number(l.quantity) || 0), 0);
+
       // Stage 1: Materials Cut / Total Intake - primary cutQty, falling back to cut logs or target
       const loggedCutUnits = (batch.cutLogs || []).reduce((acc, c) => acc + (Number(c.quantityCut) || 0), 0);
       const batchCutUnits = Number(batch.cutQty > 0 ? batch.cutQty : (loggedCutUnits > 0 ? loggedCutUnits : (target || 0)));
@@ -1366,6 +1414,9 @@ export class ReportService {
         sentToWashQty: Number(batch.sentToWashQty || 0),
         sewnQty: Number(batch.sewnQty || 0),
         lineSentQty: Number(batch.lineSentQty || 0),
+        periodSewnQty: batchPeriodSewn,
+        periodLineSentQty: batchPeriodIntake,
+        periodWashDispatchQty: batchPeriodWashDispatch,
         inSewingWip: batchSewingWip,
         ironedAndPacked: batchIronedPacked,
         isStockSynced: batch.isStockSynced,
@@ -1422,8 +1473,10 @@ export class ReportService {
         totalScrapReturned: Math.round(scrapVariance * 100) / 100,
         // 6-Stage Production Funnel Metrics
         totalCutPieces: finalTotalCut,
+        totalLineIntake: Math.round(logLineIntakeTotal * 100) / 100,
         inSewingWip: finalInSewingWip,
         totalSewnOutput: finalTotalSewn,
+        totalForwardedToWash: Math.round(logWashDispatchTotal * 100) / 100,
         inWashTotal: finalInWash,
         ironedAndPacked: finalIronedPacked,
         fullyFinishedSynced: finalFullyFinishedSynced,

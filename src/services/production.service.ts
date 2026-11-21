@@ -1552,6 +1552,7 @@ export class ProductionService {
     today?: boolean;
     month?: boolean | string;
     status?: string;
+    activityType?: string;
     page?: number;
     limit?: number;
   }) {
@@ -1577,12 +1578,13 @@ export class ProductionService {
       ];
     }
 
-    // Date range processing
+    // Date range processing with Asia/Colombo (+05:30) day boundary safety
     const now = new Date();
+    let dateFilterClause: { gte?: Date; lte?: Date } | null = null;
     if (filters.today) {
       const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
       const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-      where.productionDate = { gte: startOfDay, lte: endOfDay };
+      dateFilterClause = { gte: startOfDay, lte: endOfDay };
     } else if (filters.month) {
       let year = now.getFullYear();
       let month = now.getMonth();
@@ -1593,17 +1595,68 @@ export class ProductionService {
       }
       const startOfMonth = new Date(year, month, 1, 0, 0, 0, 0);
       const endOfMonth = new Date(year, month + 1, 0, 23, 59, 59, 999);
-      where.productionDate = { gte: startOfMonth, lte: endOfMonth };
+      dateFilterClause = { gte: startOfMonth, lte: endOfMonth };
     } else if (filters.startDate || filters.endDate) {
-      where.productionDate = {};
+      dateFilterClause = {};
       if (filters.startDate) {
-        where.productionDate.gte = new Date(filters.startDate);
+        const s = new Date(filters.startDate);
+        s.setHours(0, 0, 0, 0);
+        dateFilterClause.gte = s;
       }
       if (filters.endDate) {
         const end = new Date(filters.endDate);
         end.setHours(23, 59, 59, 999);
-        where.productionDate.lte = end;
+        dateFilterClause.lte = end;
       }
+    }
+
+    // Connect activityType directly to BatchActivityLog event timestamps
+    if (filters.activityType && filters.activityType !== 'all') {
+      const act = filters.activityType.toLowerCase();
+      const logCondition: any = {};
+      if (dateFilterClause) {
+        logCondition.timestamp = dateFilterClause;
+      }
+
+      if (act === 'sewn') {
+        where.activityLogs = {
+          some: {
+            ...logCondition,
+            OR: [
+              { action: { in: ['SEWN', 'LOG_SEWN'] } },
+              { stage: 'LINE', action: { contains: 'SEWN' } },
+            ],
+          },
+        };
+      } else if (act === 'wash') {
+        where.activityLogs = {
+          some: {
+            ...logCondition,
+            OR: [
+              { action: 'SEND_TO_WASH' },
+              { stage: 'WASHING', action: { contains: 'WASH' } },
+            ],
+          },
+        };
+      } else if (act === 'intake') {
+        where.OR = [
+          {
+            activityLogs: {
+              some: {
+                ...logCondition,
+                OR: [
+                  { action: { in: ['SEND_TO_LINE', 'LINE_INTAKE'] } },
+                  { stage: 'LINE', action: 'SEND_TO_LINE' },
+                ],
+              },
+            },
+          },
+          ...(dateFilterClause ? [{ productionDate: dateFilterClause }] : []),
+        ];
+      }
+    } else if (dateFilterClause) {
+      // Default date filtering applies to productionDate
+      where.productionDate = dateFilterClause;
     }
 
     const page = Math.max(1, Number(filters.page) || 1);
