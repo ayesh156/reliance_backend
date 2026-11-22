@@ -45,7 +45,8 @@ export async function getReportData(req: Request, res: Response): Promise<void> 
   const cleanRepId = queryRepId && !isNaN(Number(queryRepId)) && Number(queryRepId) > 0 ? Number(queryRepId) : undefined;
   const effectiveRepUserId = userRole === 'REP' ? Number(req.user?.userId) : cleanRepId;
   const queryCategoryId = req.query.categoryId && req.query.categoryId !== 'all' ? Number(req.query.categoryId) : undefined;
-  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId, queryCategoryId);
+  const querySubCategoryId = req.query.subCategoryId && req.query.subCategoryId !== 'all' ? Number(req.query.subCategoryId) : undefined;
+  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId, queryCategoryId, querySubCategoryId);
 
   res.status(200).json({
     success: true,
@@ -81,7 +82,8 @@ export async function downloadReportPdf(req: Request, res: Response): Promise<vo
   const cleanRepId = queryRepId && !isNaN(Number(queryRepId)) && Number(queryRepId) > 0 ? Number(queryRepId) : undefined;
   const effectiveRepUserId = userRole === 'REP' ? Number(req.user?.userId) : cleanRepId;
   const queryCategoryId = req.query.categoryId && req.query.categoryId !== 'all' ? Number(req.query.categoryId) : undefined;
-  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId, queryCategoryId);
+  const querySubCategoryId = req.query.subCategoryId && req.query.subCategoryId !== 'all' ? Number(req.query.subCategoryId) : undefined;
+  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId, queryCategoryId, querySubCategoryId);
   const pdfDoc = ReportPdfService.generate(moduleParam, report, req.user);
 
   const dateTag = dateFilter.startDate.toISOString().split('T')[0];

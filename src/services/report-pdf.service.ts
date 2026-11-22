@@ -190,11 +190,12 @@ function getModuleColumns(module: ReportModule): ColumnDef[] {
 
     case 'expenses':
       return [
-        { header: 'EXP #', width: 65, key: 'code' },
-        { header: 'DATE', width: 65, key: 'date', format: (d) => String(d).split('T')[0] },
-        { header: 'CATEGORY', width: 95, key: 'categoryName' },
-        { header: 'DESCRIPTION', width: 175.28, key: 'description' },
-        { header: 'AMOUNT', width: 110, align: 'right', key: 'amount', format: (v) => formatCurrency(v).replace('Rs. ', '') },
+        { header: 'EXP #', width: 60, key: 'code' },
+        { header: 'DATE', width: 60, key: 'date', format: (d) => String(d).split('T')[0] },
+        { header: 'PRIMARY CATEGORY', width: 85, key: 'categoryName' },
+        { header: 'SUB-CATEGORY', width: 80, key: 'subCategoryName', format: (v) => v || '-' },
+        { header: 'DESCRIPTION', width: 140.28, key: 'description', format: (v) => v || '-' },
+        { header: 'AMOUNT', width: 80, align: 'right', key: 'amount', format: (v) => formatCurrency(v).replace('Rs. ', '') },
       ];
   }
 }
@@ -590,7 +591,13 @@ export class ReportPdfService {
     });
 
     const reportTitle = MODULE_TITLES[module] || 'EXECUTIVE BUSINESS REPORT';
-    const dateLabel = reportData.dateFilter?.presetLabel || 'All Recorded History';
+    let dateLabel = reportData.dateFilter?.presetLabel || 'All Recorded History';
+    if (module === 'expenses' && (reportData.filterCategoryName || reportData.filterSubCategoryName)) {
+      const scopeParts: string[] = [];
+      if (reportData.filterCategoryName) scopeParts.push(`Primary: ${reportData.filterCategoryName}`);
+      if (reportData.filterSubCategoryName) scopeParts.push(`Sub: ${reportData.filterSubCategoryName}`);
+      dateLabel = `${dateLabel} | Scope: ${scopeParts.join(' › ')}`;
+    }
     const generatedTimestamp = formatReportTimestamp();
     const generatedBy = user?.name ? `${user.name} (${user.role || 'Staff'})` : 'System Administrator';
 

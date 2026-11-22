@@ -1896,15 +1896,34 @@ export class ReportService {
 
   /**
    * 10. EXPENSES & OPERATIONAL OUTFLOWS REPORT
-   * Aggregates period operational expenses, category breakdown, transaction count, and ledger items.
+   * Aggregates period operational expenses, 2-level category breakdown (Primary and Sub),
+   * transaction count, and ledger items.
    */
-  async getExpensesReport(dateFilter: DateFilterResult, categoryId?: number) {
+  async getExpensesReport(dateFilter: DateFilterResult, categoryId?: number, subCategoryId?: number) {
     const { startDate, endDate } = dateFilter;
     const where: any = {
       date: { gte: startDate, lte: endDate },
     };
+
+    let filterCategoryName: string | null = null;
+    let filterSubCategoryName: string | null = null;
+
     if (categoryId && !isNaN(Number(categoryId)) && Number(categoryId) > 0) {
       where.categoryId = Number(categoryId);
+      const cat = await prisma.expenseCategory.findUnique({
+        where: { id: Number(categoryId) },
+        select: { name: true },
+      });
+      if (cat) filterCategoryName = cat.name;
+    }
+
+    if (subCategoryId && !isNaN(Number(subCategoryId)) && Number(subCategoryId) > 0) {
+      where.subCategoryId = Number(subCategoryId);
+      const subCat = await prisma.expenseCategory.findUnique({
+        where: { id: Number(subCategoryId) },
+        select: { name: true },
+      });
+      if (subCat) filterSubCategoryName = subCat.name;
     }
 
     const expenses = await prisma.expense.findMany({
@@ -1912,6 +1931,9 @@ export class ReportService {
       orderBy: { date: 'desc' },
       include: {
         category: {
+          select: { id: true, name: true },
+        },
+        subCategory: {
           select: { id: true, name: true },
         },
         createdBy: {
@@ -1924,7 +1946,11 @@ export class ReportService {
     const transactionCount = expenses.length;
     const avgExpense = transactionCount > 0 ? Math.round((totalExpenses / transactionCount) * 100) / 100 : 0;
 
+    // Primary Category Breakdown
     const categoryMap: Record<string, { count: number; total: number; name: string }> = {};
+    // Sub-Category Breakdown
+    const subCategoryMap: Record<string, { count: number; total: number; name: string; parentName: string }> = {};
+
     for (const exp of expenses) {
       const catName = exp.category?.name || 'Uncategorized';
       if (!categoryMap[catName]) {
@@ -1932,9 +1958,20 @@ export class ReportService {
       }
       categoryMap[catName].count += 1;
       categoryMap[catName].total += Number(exp.amount || 0);
+
+      const subName = exp.subCategory?.name;
+      if (subName) {
+        const subKey = `${catName} › ${subName}`;
+        if (!subCategoryMap[subKey]) {
+          subCategoryMap[subKey] = { count: 0, total: 0, name: subName, parentName: catName };
+        }
+        subCategoryMap[subKey].count += 1;
+        subCategoryMap[subKey].total += Number(exp.amount || 0);
+      }
     }
 
     const categoryBreakdown = Object.values(categoryMap).sort((a, b) => b.total - a.total);
+    const subCategoryBreakdown = Object.values(subCategoryMap).sort((a, b) => b.total - a.total);
     const topCategory = categoryBreakdown[0]?.name || 'N/A';
 
     const tableItems = expenses.map((exp) => ({
@@ -1943,7 +1980,9 @@ export class ReportService {
       date: exp.date.toISOString(),
       categoryId: exp.categoryId,
       categoryName: exp.category?.name || '-',
-      description: exp.description,
+      subCategoryId: exp.subCategoryId || null,
+      subCategoryName: exp.subCategory?.name || '-',
+      description: exp.description || '',
       amount: Math.round(Number(exp.amount || 0) * 100) / 100,
       createdByName: exp.createdBy?.name || 'Staff',
       createdByRole: exp.createdBy?.role || 'STAFF',
@@ -1953,13 +1992,17 @@ export class ReportService {
     return {
       module: 'expenses' as const,
       dateFilter,
+      filterCategoryName,
+      filterSubCategoryName,
       summary: {
         totalExpenses: Math.round(totalExpenses * 100) / 100,
         transactionCount,
         avgExpense,
         categoryCount: categoryBreakdown.length,
+        subCategoryCount: subCategoryBreakdown.length,
         topCategory,
         categoryBreakdown,
+        subCategoryBreakdown,
       },
       tableItems,
     };
@@ -2039,7 +2082,13 @@ export class ReportService {
   /**
    * Router Dispatcher: Delegates to domain-specific analytical aggregation service
    */
-  async getReportData(module: ReportModule, filter: DateFilterResult, repUserId?: number, categoryId?: number) {
+  async getReportData(
+    module: ReportModule,
+    filter: DateFilterResult,
+    repUserId?: number,
+    categoryId?: number,
+    subCategoryId?: number
+  ) {
     switch (module) {
       case 'sales':
         return this.getSalesReport(filter, repUserId);
@@ -2060,7 +2109,7 @@ export class ReportService {
       case 'cheques':
         return this.getChequesReport(filter, repUserId);
       case 'expenses':
-        return this.getExpensesReport(filter, categoryId);
+        return this.getExpensesReport(filter, categoryId, subCategoryId);
       default:
         throw new HttpException(400, `Unsupported report domain module: ${module}`);
     }

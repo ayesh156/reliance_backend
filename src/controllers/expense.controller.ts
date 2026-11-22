@@ -9,16 +9,39 @@ import { sendSuccess, sendError, sendErrorFrom } from '../utils/response.ts';
 export class ExpenseController {
   /**
    * GET /api/expenses/categories
-   * List all expense categories sorted alphabetically.
+   * List expense categories with nested 2-level hierarchy (Primary Categories + Sub-Categories).
+   * Supports ?flat=true for flat listing or returns Primary Categories with nested subCategories by default.
    */
-  async getCategories(_req: Request, res: Response, next: NextFunction) {
+  async getCategories(req: Request, res: Response, next: NextFunction) {
     try {
+      const { flat } = req.query;
+
+      const where: any = { isActive: true };
+      if (flat !== 'true') {
+        where.parentId = null;
+      }
+
       const categories = await prisma.expenseCategory.findMany({
-        where: { isActive: true },
+        where,
         orderBy: { name: 'asc' },
         include: {
+          parent: {
+            select: { id: true, name: true },
+          },
+          subCategories: {
+            where: { isActive: true },
+            orderBy: { name: 'asc' },
+            include: {
+              parent: {
+                select: { id: true, name: true },
+              },
+              _count: {
+                select: { expenses: true, subExpenses: true },
+              },
+            },
+          },
           _count: {
-            select: { expenses: true },
+            select: { expenses: true, subExpenses: true, subCategories: true },
           },
         },
       });
@@ -30,39 +53,107 @@ export class ExpenseController {
 
   /**
    * POST /api/expenses/categories
-   * Create a new expense category.
+   * Create a new Primary Category or Sub-Category with scoped uniqueness validation.
    */
-  async createCategory(req: Request, res: Response, next: NextFunction) {
+  async createCategory(req: Request, res: Response, _next: NextFunction) {
     try {
-      const { name, description } = req.body;
+      const { name, parentId, description, level } = req.body;
       const cleanName = typeof name === 'string' ? name.trim() : '';
 
       if (!cleanName) {
         return sendError(res, 'Category name is required', 400);
       }
 
-      // Check if existing category with same name exists (case-insensitive)
+      let parsedParentId: number | null = null;
+      if (parentId !== undefined && parentId !== null && parentId !== '' && parentId !== 'none' && parentId !== 0 && parentId !== '0') {
+        parsedParentId = parseInt(String(parentId), 10);
+        if (isNaN(parsedParentId) || parsedParentId <= 0) {
+          return sendError(res, 'Valid parent category ID is required', 400);
+        }
+
+        // Verify parent exists and is itself a Primary Category (parentId === null)
+        const parentCategory = await prisma.expenseCategory.findUnique({
+          where: { id: parsedParentId },
+        });
+
+        if (!parentCategory) {
+          return sendError(res, 'Parent category not found', 404);
+        }
+
+        if (parentCategory.parentId !== null) {
+          return sendError(res, 'Cannot nest sub-categories more than 2 levels deep', 400);
+        }
+      }
+
+      // Explicit level validation guardrail
+      if (level === 'sub' && (!parsedParentId || parsedParentId <= 0)) {
+        return sendError(res, 'Parent Primary Category is required for a sub-category', 400);
+      }
+      if (level === 'primary') {
+        parsedParentId = null;
+      }
+
+      // Check scoped uniqueness (case-insensitive) within the same parent scope
       const existing = await prisma.expenseCategory.findFirst({
-        where: { name: cleanName },
+        where: {
+          name: cleanName,
+          parentId: parsedParentId,
+        },
       });
+
+      const cleanDescription = typeof description === 'string' ? description.trim() : null;
 
       if (existing) {
         if (!existing.isActive) {
-          // Re-activate if was deactivated
+          // Re-activate previously deactivated category
           const reactivated = await prisma.expenseCategory.update({
             where: { id: existing.id },
-            data: { isActive: true, description: description?.trim() || existing.description },
+            data: {
+              isActive: true,
+              description: cleanDescription !== null ? cleanDescription : existing.description,
+            },
+            include: {
+              parent: {
+                select: { id: true, name: true },
+              },
+              subCategories: {
+                where: { isActive: true },
+                orderBy: { name: 'asc' },
+              },
+              _count: {
+                select: { expenses: true, subExpenses: true },
+              },
+            },
           });
           return sendSuccess(res, reactivated, 200);
         }
-        return sendError(res, `Expense category '${cleanName}' already exists`, 409);
+        return sendError(
+          res,
+          parsedParentId
+            ? `Sub-category '${cleanName}' already exists under this primary category`
+            : `Primary category '${cleanName}' already exists`,
+          409
+        );
       }
 
       const category = await prisma.expenseCategory.create({
         data: {
           name: cleanName,
-          description: typeof description === 'string' ? description.trim() : null,
+          parentId: parsedParentId,
+          description: cleanDescription,
           isActive: true,
+        },
+        include: {
+          parent: {
+            select: { id: true, name: true },
+          },
+          subCategories: {
+            where: { isActive: true },
+            orderBy: { name: 'asc' },
+          },
+          _count: {
+            select: { expenses: true, subExpenses: true },
+          },
         },
       });
 
@@ -73,12 +164,154 @@ export class ExpenseController {
   }
 
   /**
+   * PUT / PATCH /api/expenses/categories/:id
+   * Update category name, description (optional), and parent hierarchy.
+   */
+  async updateCategory(req: Request, res: Response, _next: NextFunction) {
+    try {
+      const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const id = parseInt(String(rawId), 10);
+      if (!id || isNaN(id) || id <= 0) {
+        return sendError(res, 'Valid category ID is required', 400);
+      }
+
+      const existing = await prisma.expenseCategory.findUnique({
+        where: { id },
+        include: {
+          subCategories: { where: { isActive: true } },
+        },
+      });
+
+      if (!existing) {
+        return sendError(res, 'Expense category not found', 404);
+      }
+
+      const { name, description, parentId, level } = req.body;
+      const updateData: any = {};
+
+      let targetParentId = existing.parentId;
+
+      // Handle parentId changes
+      if (parentId !== undefined) {
+        if (parentId === null || parentId === '' || parentId === 'none' || parentId === 0 || parentId === '0') {
+          targetParentId = null;
+        } else {
+          const parsedParentId = parseInt(String(parentId), 10);
+          if (isNaN(parsedParentId) || parsedParentId <= 0) {
+            return sendError(res, 'Valid parent category ID is required', 400);
+          }
+
+          // Prevent circular reference
+          if (parsedParentId === id) {
+            return sendError(res, 'A category cannot be its own parent category', 400);
+          }
+
+          // Prevent demoting a Primary Category that already owns child Sub-Categories
+          if (existing.parentId === null && existing.subCategories.length > 0) {
+            return sendError(
+              res,
+              'Cannot convert a primary category with active sub-categories into a sub-category. Remove or reassign its sub-categories first.',
+              400
+            );
+          }
+
+          // Verify target parent exists and is a Primary Category (parentId === null)
+          const targetParent = await prisma.expenseCategory.findUnique({
+            where: { id: parsedParentId },
+          });
+
+          if (!targetParent) {
+            return sendError(res, 'Parent category not found', 404);
+          }
+
+          if (targetParent.parentId !== null) {
+            return sendError(res, 'Cannot nest sub-categories more than 2 levels deep', 400);
+          }
+
+          targetParentId = parsedParentId;
+        }
+        updateData.parentId = targetParentId;
+      }
+
+      // Explicit level validation guardrail
+      if (level === 'sub') {
+        if (!targetParentId || targetParentId <= 0) {
+          return sendError(res, 'Parent Primary Category is required for a sub-category', 400);
+        }
+        updateData.parentId = targetParentId;
+      } else if (level === 'primary') {
+        targetParentId = null;
+        updateData.parentId = null;
+      }
+
+      // Handle name update
+      let targetName = existing.name;
+      if (name !== undefined) {
+        const cleanName = typeof name === 'string' ? name.trim() : '';
+        if (!cleanName) {
+          return sendError(res, 'Category name is required', 400);
+        }
+        targetName = cleanName;
+        updateData.name = cleanName;
+      }
+
+      // Check scoped uniqueness if name or parent changed
+      if (targetName !== existing.name || targetParentId !== existing.parentId) {
+        const duplicate = await prisma.expenseCategory.findFirst({
+          where: {
+            id: { not: id },
+            name: targetName,
+            parentId: targetParentId,
+            isActive: true,
+          },
+        });
+
+        if (duplicate) {
+          return sendError(
+            res,
+            targetParentId
+              ? `Sub-category '${targetName}' already exists under this primary category`
+              : `Primary category '${targetName}' already exists`,
+            409
+          );
+        }
+      }
+
+      // Handle description update (strictly optional)
+      if (description !== undefined) {
+        updateData.description = typeof description === 'string' && description.trim() ? description.trim() : null;
+      }
+
+      const updated = await prisma.expenseCategory.update({
+        where: { id },
+        data: updateData,
+        include: {
+          parent: {
+            select: { id: true, name: true },
+          },
+          subCategories: {
+            where: { isActive: true },
+            orderBy: { name: 'asc' },
+          },
+          _count: {
+            select: { expenses: true, subExpenses: true },
+          },
+        },
+      });
+
+      return sendSuccess(res, updated);
+    } catch (err) {
+      sendErrorFrom(res, err, 'Failed to update expense category');
+    }
+  }
+
+  /**
    * GET /api/expenses
-   * List expenses with optional date range, categoryId, and search filtering.
+   * List expenses with optional date range, primary categoryId, subCategoryId, and search filtering.
    */
   async getExpenses(req: Request, res: Response, next: NextFunction) {
     try {
-      const { startDate, endDate, categoryId, search } = req.query;
+      const { startDate, endDate, categoryId, subCategoryId, search } = req.query;
 
       const where: any = {};
 
@@ -101,7 +334,7 @@ export class ExpenseController {
         }
       }
 
-      // Category filter
+      // Primary Category filter
       if (categoryId && categoryId !== 'all') {
         const catId = parseInt(String(categoryId), 10);
         if (!isNaN(catId) && catId > 0) {
@@ -109,13 +342,22 @@ export class ExpenseController {
         }
       }
 
-      // Search filter across code, description, or category name
+      // Sub-Category filter
+      if (subCategoryId && subCategoryId !== 'all') {
+        const subId = parseInt(String(subCategoryId), 10);
+        if (!isNaN(subId) && subId > 0) {
+          where.subCategoryId = subId;
+        }
+      }
+
+      // Search filter across code, description, primary category name, or sub-category name
       if (typeof search === 'string' && search.trim()) {
         const term = search.trim();
         where.OR = [
           { code: { contains: term } },
           { description: { contains: term } },
           { category: { name: { contains: term } } },
+          { subCategory: { name: { contains: term } } },
         ];
       }
 
@@ -124,6 +366,9 @@ export class ExpenseController {
         orderBy: { date: 'desc' },
         include: {
           category: {
+            select: { id: true, name: true },
+          },
+          subCategory: {
             select: { id: true, name: true },
           },
           createdBy: {
@@ -188,33 +433,56 @@ export class ExpenseController {
 
   /**
    * POST /api/expenses
-   * Create a new expense record with auto-generated sequential code.
+   * Create a new expense record with auto-generated sequential code,
+   * validated primary/sub-category hierarchy, and optional description.
    */
   async createExpense(req: Request, res: Response, _next: NextFunction) {
     try {
-      const { code, date, categoryId, description, amount } = req.body;
+      const { code, date, categoryId, subCategoryId, description, amount } = req.body;
 
       const catId = parseInt(String(categoryId), 10);
       if (!catId || isNaN(catId) || catId <= 0) {
-        return sendError(res, 'Valid expense category is required', 400);
+        return sendError(res, 'Valid primary expense category is required', 400);
       }
 
       const cleanDescription = typeof description === 'string' ? description.trim() : '';
-      if (!cleanDescription) {
-        return sendError(res, 'Expense description is required', 400);
-      }
 
       const numAmount = parseFloat(String(amount));
       if (isNaN(numAmount) || numAmount <= 0) {
         return sendError(res, 'Expense amount must be a positive number', 400);
       }
 
-      // Verify category existence
+      // Verify primary category existence
       const category = await prisma.expenseCategory.findUnique({
         where: { id: catId },
       });
       if (!category) {
-        return sendError(res, 'Selected expense category not found', 404);
+        return sendError(res, 'Selected primary expense category not found', 404);
+      }
+
+      // Validate sub-category if provided
+      let validSubCategoryId: number | null = null;
+      if (
+        subCategoryId !== undefined &&
+        subCategoryId !== null &&
+        subCategoryId !== '' &&
+        subCategoryId !== 'none' &&
+        subCategoryId !== 0
+      ) {
+        const subId = parseInt(String(subCategoryId), 10);
+        if (isNaN(subId) || subId <= 0) {
+          return sendError(res, 'Valid sub-category ID is required', 400);
+        }
+        const subCategory = await prisma.expenseCategory.findUnique({
+          where: { id: subId },
+        });
+        if (!subCategory) {
+          return sendError(res, 'Selected sub-category not found', 404);
+        }
+        if (subCategory.parentId !== catId) {
+          return sendError(res, 'The selected sub-category does not belong to the selected primary category', 400);
+        }
+        validSubCategoryId = subId;
       }
 
       // Generate or validate expense code
@@ -246,12 +514,16 @@ export class ExpenseController {
           code: finalCode,
           date: expenseDate,
           categoryId: catId,
+          subCategoryId: validSubCategoryId,
           description: cleanDescription,
           amount: Math.round(numAmount * 100) / 100,
           createdById,
         },
         include: {
           category: {
+            select: { id: true, name: true },
+          },
+          subCategory: {
             select: { id: true, name: true },
           },
           createdBy: {
@@ -267,8 +539,8 @@ export class ExpenseController {
   }
 
   /**
-   * PUT /api/expenses/:id
-   * Update an existing expense record.
+   * PUT / PATCH /api/expenses/:id
+   * Update an existing expense record with optional description and validated sub-category.
    */
   async updateExpense(req: Request, res: Response, _next: NextFunction) {
     try {
@@ -278,7 +550,7 @@ export class ExpenseController {
         return sendError(res, 'Valid expense ID is required', 400);
       }
 
-      const { code, date, categoryId, description, amount } = req.body;
+      const { code, date, categoryId, subCategoryId, description, amount } = req.body;
 
       const existing = await prisma.expense.findUnique({
         where: { id },
@@ -288,6 +560,7 @@ export class ExpenseController {
       }
 
       const updateData: any = {};
+      let targetCategoryId = existing.categoryId;
 
       if (categoryId !== undefined) {
         const catId = parseInt(String(categoryId), 10);
@@ -298,15 +571,48 @@ export class ExpenseController {
         if (!category) {
           return sendError(res, 'Expense category not found', 404);
         }
+        targetCategoryId = catId;
         updateData.categoryId = catId;
       }
 
-      if (description !== undefined) {
-        const cleanDesc = typeof description === 'string' ? description.trim() : '';
-        if (!cleanDesc) {
-          return sendError(res, 'Expense description cannot be empty', 400);
+      // Handle sub-category assignment
+      if (subCategoryId !== undefined) {
+        if (
+          subCategoryId === null ||
+          subCategoryId === '' ||
+          subCategoryId === 'none' ||
+          subCategoryId === 0
+        ) {
+          updateData.subCategoryId = null;
+        } else {
+          const subId = parseInt(String(subCategoryId), 10);
+          if (isNaN(subId) || subId <= 0) {
+            return sendError(res, 'Valid sub-category ID is required', 400);
+          }
+          const subCategory = await prisma.expenseCategory.findUnique({
+            where: { id: subId },
+          });
+          if (!subCategory) {
+            return sendError(res, 'Selected sub-category not found', 404);
+          }
+          if (subCategory.parentId !== targetCategoryId) {
+            return sendError(res, 'The selected sub-category does not belong to the selected primary category', 400);
+          }
+          updateData.subCategoryId = subId;
         }
-        updateData.description = cleanDesc;
+      } else if (categoryId !== undefined && existing.subCategoryId) {
+        // If category changed without passing subCategoryId, ensure old subCategory still matches
+        const existingSub = await prisma.expenseCategory.findUnique({
+          where: { id: existing.subCategoryId },
+        });
+        if (!existingSub || existingSub.parentId !== targetCategoryId) {
+          updateData.subCategoryId = null;
+        }
+      }
+
+      // Description is strictly optional
+      if (description !== undefined) {
+        updateData.description = typeof description === 'string' ? description.trim() : '';
       }
 
       if (amount !== undefined) {
@@ -341,6 +647,9 @@ export class ExpenseController {
         data: updateData,
         include: {
           category: {
+            select: { id: true, name: true },
+          },
+          subCategory: {
             select: { id: true, name: true },
           },
           createdBy: {

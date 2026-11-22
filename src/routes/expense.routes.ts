@@ -11,6 +11,12 @@ router.get('/categories', verifyToken, expenseController.getCategories.bind(expe
 // POST /api/expenses/categories — Create new expense category (Admin & Staff)
 router.post('/categories', verifyToken, requireRole('ADMIN', 'STAFF'), expenseController.createCategory.bind(expenseController));
 
+// PUT /api/expenses/categories/:id — Update expense category (Admin & Staff)
+router.put('/categories/:id', verifyToken, requireRole('ADMIN', 'STAFF'), expenseController.updateCategory.bind(expenseController));
+
+// PATCH /api/expenses/categories/:id — Partial update expense category (Admin & Staff)
+router.patch('/categories/:id', verifyToken, requireRole('ADMIN', 'STAFF'), expenseController.updateCategory.bind(expenseController));
+
 // ── Expense Transactions ──
 // GET /api/expenses — List & filter expenses with summary KPI analytics
 router.get('/', verifyToken, expenseController.getExpenses.bind(expenseController));
@@ -20,6 +26,9 @@ router.post('/', verifyToken, requireRole('ADMIN', 'STAFF'), expenseController.c
 
 // PUT /api/expenses/:id — Update existing expense (Admin & Staff)
 router.put('/:id', verifyToken, requireRole('ADMIN', 'STAFF'), expenseController.updateExpense.bind(expenseController));
+
+// PATCH /api/expenses/:id — Partial update existing expense (Admin & Staff)
+router.patch('/:id', verifyToken, requireRole('ADMIN', 'STAFF'), expenseController.updateExpense.bind(expenseController));
 
 // DELETE /api/expenses/:id — Delete expense entry (Admin only)
 router.delete('/:id', verifyToken, requireRole('ADMIN'), expenseController.deleteExpense.bind(expenseController));
