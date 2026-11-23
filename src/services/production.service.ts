@@ -43,6 +43,168 @@ export function parseTargetProducts(data: any): any[] {
   return [];
 }
 
+/**
+ * Safely parses input date strings in Sri Lanka timezone (+05:30) to avoid timezone boundary shifts.
+ * Normalizes start boundary to 00:00:00.000 and end boundary to 23:59:59.999.
+ */
+export function parseDateBoundaryLK(raw?: string | null, isEnd: boolean = false): Date | null {
+  if (!raw || typeof raw !== 'string' || !raw.trim()) return null;
+  const str = raw.trim();
+
+  // 1. Check for pure calendar date YYYY-MM-DD in Sri Lanka (+05:30)
+  const ymdMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(str);
+  if (ymdMatch) {
+    const yr = ymdMatch[1];
+    const mo = ymdMatch[2].padStart(2, '0');
+    const dy = ymdMatch[3].padStart(2, '0');
+    const time = isEnd ? '23:59:59.999' : '00:00:00.000';
+    const d = new Date(`${yr}-${mo}-${dy}T${time}+05:30`);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // 2. Parse general ISO or timestamp strings
+  const parsed = new Date(str);
+  if (isNaN(parsed.getTime())) return null;
+
+  if (isEnd) {
+    parsed.setHours(23, 59, 59, 999);
+  } else {
+    parsed.setHours(0, 0, 0, 0);
+  }
+  return parsed;
+}
+
+/**
+ * Ensures production orders always include explicit fabric quantity (allocatedYards, fabricYards)
+ * and roll count (rolls, rollCount), and nested raw material usage lines with all alias properties.
+ * If materialUsages is empty, extracts data from cutLogs or activityLogs audit trail notes
+ * (e.g., "Cut 625 YARDS of Twill - Normal (8 Rolls)") as a defensive fallback.
+ */
+export function enrichProductionOrderWithMaterialDetails(order: any): any {
+  if (!order) return order;
+
+  let totalYards = Number(order.yaraAllocated || 0);
+  let totalRolls = 0;
+  let rawUsages = Array.isArray(order.materialUsages) ? [...order.materialUsages] : [];
+
+  // Tally from existing usages
+  rawUsages.forEach((u: any) => {
+    const r = Number(u.piecesCount ?? u.pieces ?? u.rolls ?? u.rollCount ?? 0);
+    if (r > 0) totalRolls += r;
+    if (!totalYards && (u.issuedQty || u.cuttingQty)) {
+      totalYards += Number(u.issuedQty ?? u.cuttingQty ?? 0);
+    }
+  });
+
+  // If rolls is 0 or yards is 0, inspect activityLogs audit trail notes as fallback
+  let parsedYardsFromLog = 0;
+  let parsedRollsFromLog = 0;
+  let parsedMaterialNameFromLog = '';
+
+  if (Array.isArray(order.activityLogs)) {
+    for (const log of order.activityLogs) {
+      if (log.notes) {
+        const rollMatch = log.notes.match(/(\d+(?:\.\d+)?)\s*Rolls?/i);
+        if (rollMatch && !totalRolls && !parsedRollsFromLog) {
+          parsedRollsFromLog = parseFloat(rollMatch[1]);
+        }
+        const yardMatch = log.notes.match(/Cut\s+([\d.]+)\s*(?:YARDS|Meters|units|yds)?\s+of\s+([^(]+)/i);
+        if (yardMatch) {
+          if (!totalYards && !parsedYardsFromLog) parsedYardsFromLog = parseFloat(yardMatch[1]);
+          if (!parsedMaterialNameFromLog) parsedMaterialNameFromLog = yardMatch[2].trim();
+        }
+      }
+    }
+  }
+
+  if (!totalRolls && parsedRollsFromLog > 0) {
+    totalRolls = parsedRollsFromLog;
+  }
+  if (!totalYards && parsedYardsFromLog > 0) {
+    totalYards = parsedYardsFromLog;
+  }
+  if (!totalYards && Array.isArray(order.cutLogs)) {
+    order.cutLogs.forEach((cl: any) => {
+      totalYards += Number(cl.quantityCut || 0);
+    });
+  }
+
+  // Synthesize fallback usage line if rawUsages is empty
+  if (rawUsages.length === 0 && (totalYards > 0 || totalRolls > 0 || (order.cutLogs && order.cutLogs.length > 0))) {
+    const firstCutLog = Array.isArray(order.cutLogs) && order.cutLogs.length > 0 ? order.cutLogs[0] : null;
+    const rawMaterialId = firstCutLog?.rawMaterialId || firstCutLog?.rawMaterial?.id || 0;
+    const resolvedRawMaterial = firstCutLog?.rawMaterial || (parsedMaterialNameFromLog ? { id: rawMaterialId, name: parsedMaterialNameFromLog, unit: 'YARDS' } : null);
+
+    rawUsages = [{
+      id: 0,
+      productionOrderId: order.id,
+      rawMaterialId,
+      rawMaterial: resolvedRawMaterial,
+      issuedQty: totalYards,
+      returnedQty: 0,
+      returnedScrap: 0,
+      netConsumedQty: totalYards,
+      unitCost: 0,
+      piecesCount: totalRolls > 0 ? totalRolls : 1,
+      targetProducts: order.targetProducts || null,
+    }];
+  }
+
+  // Standardize each usage row
+  const enrichedUsages = rawUsages.map((u: any) => {
+    const pCount = Number(u.piecesCount ?? u.pieces ?? u.rolls ?? u.rollCount ?? (totalRolls > 0 ? totalRolls : 1));
+    const issued = Number(u.issuedQty ?? u.cuttingQty ?? u.qty ?? u.quantity ?? (totalYards > 0 ? totalYards : 0));
+    return {
+      ...u,
+      piecesCount: pCount,
+      pieces: pCount,
+      rolls: pCount,
+      rollCount: pCount,
+      issuedQty: issued,
+      qty: issued,
+      quantity: issued,
+      allocatedYards: issued,
+      fabricYards: issued,
+    };
+  });
+
+  const finalRolls = totalRolls > 0 ? totalRolls : (enrichedUsages.length > 0 ? enrichedUsages[0].piecesCount : 1);
+
+  // Compute exact Sewing Line intake timestamp (lineIntakeAt)
+  let lineIntakeAt: string | Date | null = null;
+  if (Array.isArray(order.activityLogs) && order.activityLogs.length > 0) {
+    const intakeLog = order.activityLogs.find((l: any) => {
+      const act = String(l?.action || '').toUpperCase();
+      const stg = String(l?.stage || '').toUpperCase();
+      return act === 'SEND_TO_LINE' || act === 'LINE_INTAKE' || (stg === 'LINE' && act === 'SEND_TO_LINE');
+    });
+    if (intakeLog?.timestamp) {
+      lineIntakeAt = intakeLog.timestamp;
+    } else {
+      const earliestLineLog = order.activityLogs.find((l: any) => String(l?.stage || '').toUpperCase() === 'LINE');
+      if (earliestLineLog?.timestamp) {
+        lineIntakeAt = earliestLineLog.timestamp;
+      }
+    }
+  }
+  if (!lineIntakeAt) {
+    lineIntakeAt = order.productionDate || order.createdAt || null;
+  }
+
+  return {
+    ...order,
+    lineIntakeAt: lineIntakeAt ? (typeof lineIntakeAt === 'string' ? lineIntakeAt : lineIntakeAt.toISOString()) : null,
+    allocatedYards: totalYards,
+    fabricYards: totalYards,
+    quantityUsed: totalYards,
+    rolls: finalRolls,
+    rollCount: finalRolls,
+    rollsUsed: finalRolls,
+    materialUsages: enrichedUsages,
+    materials: enrichedUsages,
+  };
+}
+
 export interface ProductionMaterialInput {
   id?: number;
   rawMaterialId?: number;
@@ -1553,37 +1715,44 @@ export class ProductionService {
     month?: boolean | string;
     status?: string;
     activityType?: string;
+    stage?: string;
     page?: number;
     limit?: number;
   }) {
-    const where: any = {};
+    const andConditions: any[] = [];
 
     if (filters.productId) {
-      where.productId = Number(filters.productId);
+      andConditions.push({ productId: Number(filters.productId) });
     }
 
     if (filters.status && filters.status !== 'ALL') {
       if (typeof filters.status === 'string' && filters.status.includes(',')) {
-        where.status = { in: filters.status.split(',').map((s) => s.trim()) };
+        andConditions.push({ status: { in: filters.status.split(',').map((s) => s.trim()) } });
       } else {
-        where.status = filters.status;
+        andConditions.push({ status: filters.status });
       }
     }
 
-    if (filters.search) {
-      where.OR = [
-        { productionNo: { contains: filters.search } },
-        { reason: { contains: filters.search } },
-        { product: { name: { contains: filters.search } } },
-      ];
+    if (filters.search && filters.search.trim()) {
+      const q = filters.search.trim();
+      andConditions.push({
+        OR: [
+          { productionNo: { contains: q } },
+          { reason: { contains: q } },
+          { notes: { contains: q } },
+          { product: { name: { contains: q } } },
+          { variant: { sku: { contains: q } } },
+        ],
+      });
     }
 
     // Date range processing with Asia/Colombo (+05:30) day boundary safety
     const now = new Date();
     let dateFilterClause: { gte?: Date; lte?: Date } | null = null;
     if (filters.today) {
-      const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-      const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+      const todayYmd = now.toISOString().split('T')[0];
+      const startOfDay = parseDateBoundaryLK(todayYmd, false)!;
+      const endOfDay = parseDateBoundaryLK(todayYmd, true)!;
       dateFilterClause = { gte: startOfDay, lte: endOfDay };
     } else if (filters.month) {
       let year = now.getFullYear();
@@ -1593,24 +1762,45 @@ export class ProductionService {
         year = parseInt(parts[0], 10);
         month = parseInt(parts[1], 10) - 1;
       }
-      const startOfMonth = new Date(year, month, 1, 0, 0, 0, 0);
-      const endOfMonth = new Date(year, month + 1, 0, 23, 59, 59, 999);
-      dateFilterClause = { gte: startOfMonth, lte: endOfMonth };
+      const startStr = `${year}-${String(month + 1).padStart(2, '0')}-01T00:00:00.000+05:30`;
+      const lastDay = new Date(year, month + 1, 0).getDate();
+      const endStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}T23:59:59.999+05:30`;
+      dateFilterClause = { gte: new Date(startStr), lte: new Date(endStr) };
     } else if (filters.startDate || filters.endDate) {
       dateFilterClause = {};
       if (filters.startDate) {
-        const s = new Date(filters.startDate);
-        s.setHours(0, 0, 0, 0);
-        dateFilterClause.gte = s;
+        const s = parseDateBoundaryLK(filters.startDate, false);
+        if (s) dateFilterClause.gte = s;
       }
       if (filters.endDate) {
-        const end = new Date(filters.endDate);
-        end.setHours(23, 59, 59, 999);
-        dateFilterClause.lte = end;
+        const end = parseDateBoundaryLK(filters.endDate, true);
+        if (end) dateFilterClause.lte = end;
       }
     }
 
-    // Connect activityType directly to BatchActivityLog event timestamps
+    const isLineStage = filters.stage === 'line' || filters.activityType !== undefined;
+    if (filters.stage === 'line') {
+      // Ensure all batches that have ever entered the Sewing Line floor are discoverable (LINE, WASHING, FINISHING, COMPLETED)
+      andConditions.push({
+        OR: [
+          { lineSentQty: { gt: 0 } },
+          { status: 'LINE' },
+          {
+            activityLogs: {
+              some: {
+                OR: [
+                  { stage: 'LINE' },
+                  { action: { in: ['SEND_TO_LINE', 'LINE_INTAKE', 'LOG_SEWN', 'SEWN', 'SEND_TO_WASH'] } },
+                  { stage: 'WASHING', action: 'SEND_TO_WASH' },
+                ],
+              },
+            },
+          },
+        ],
+      });
+    }
+
+    // Connect activityType directly to BatchActivityLog event timestamps without overwriting search where.OR
     if (filters.activityType && filters.activityType !== 'all') {
       const act = filters.activityType.toLowerCase();
       const logCondition: any = {};
@@ -1619,48 +1809,97 @@ export class ProductionService {
       }
 
       if (act === 'sewn') {
-        where.activityLogs = {
-          some: {
-            ...logCondition,
-            OR: [
-              { action: { in: ['SEWN', 'LOG_SEWN'] } },
-              { stage: 'LINE', action: { contains: 'SEWN' } },
-            ],
-          },
-        };
-      } else if (act === 'wash') {
-        where.activityLogs = {
-          some: {
-            ...logCondition,
-            OR: [
-              { action: 'SEND_TO_WASH' },
-              { stage: 'WASHING', action: { contains: 'WASH' } },
-            ],
-          },
-        };
-      } else if (act === 'intake') {
-        where.OR = [
-          {
-            activityLogs: {
-              some: {
-                ...logCondition,
-                OR: [
-                  { action: { in: ['SEND_TO_LINE', 'LINE_INTAKE'] } },
-                  { stage: 'LINE', action: 'SEND_TO_LINE' },
-                ],
-              },
+        andConditions.push({
+          activityLogs: {
+            some: {
+              ...logCondition,
+              OR: [
+                { action: { in: ['SEWN', 'LOG_SEWN'] } },
+                { stage: 'LINE', action: { contains: 'SEWN' } },
+              ],
             },
           },
-          ...(dateFilterClause ? [{ productionDate: dateFilterClause }] : []),
-        ];
+        });
+      } else if (act === 'wash') {
+        andConditions.push({
+          activityLogs: {
+            some: {
+              ...logCondition,
+              OR: [
+                { action: 'SEND_TO_WASH' },
+                { stage: 'WASHING', action: { in: ['SEND_TO_WASH', 'WASH_DISPATCH'] } },
+              ],
+            },
+          },
+        });
+      } else if (act === 'intake') {
+        andConditions.push({
+          OR: [
+            {
+              activityLogs: {
+                some: {
+                  ...logCondition,
+                  OR: [
+                    { action: { in: ['SEND_TO_LINE', 'LINE_INTAKE'] } },
+                    { stage: 'LINE', action: 'SEND_TO_LINE' },
+                  ],
+                },
+              },
+            },
+            ...(dateFilterClause
+              ? [
+                  {
+                    productionDate: dateFilterClause,
+                    lineSentQty: { gt: 0 },
+                    activityLogs: {
+                      none: {
+                        action: { in: ['SEND_TO_LINE', 'LINE_INTAKE'] },
+                      },
+                    },
+                  },
+                ]
+              : []),
+          ],
+        });
       }
     } else if (dateFilterClause) {
-      // Default date filtering applies to productionDate
-      where.productionDate = dateFilterClause;
+      if (isLineStage) {
+        // On Sewing Line Floor with 'all' activities: match if ANY line activity log occurred within range,
+        // or (for legacy batches with zero SEND_TO_LINE logs) if productionDate in range
+        andConditions.push({
+          OR: [
+            {
+              activityLogs: {
+                some: {
+                  timestamp: dateFilterClause,
+                  OR: [
+                    { stage: 'LINE' },
+                    { action: { in: ['SEND_TO_LINE', 'LINE_INTAKE', 'LOG_SEWN', 'SEWN', 'SEND_TO_WASH'] } },
+                    { stage: 'WASHING', action: 'SEND_TO_WASH' },
+                  ],
+                },
+              },
+            },
+            {
+              productionDate: dateFilterClause,
+              activityLogs: {
+                none: {
+                  action: { in: ['SEND_TO_LINE', 'LINE_INTAKE'] },
+                },
+              },
+            },
+          ],
+        });
+      } else {
+        // Default date filtering applies to productionDate
+        andConditions.push({ productionDate: dateFilterClause });
+      }
     }
 
+    const where: any = andConditions.length > 0 ? { AND: andConditions } : {};
+
     const page = Math.max(1, Number(filters.page) || 1);
-    const limit = Math.max(1, Math.min(100, Number(filters.limit) || 50));
+    const limit = Math.max(1, Math.min(500, Number(filters.limit) || 50));
     const skip = (page - 1) * limit;
 
     const [total, items] = await Promise.all([
@@ -1741,7 +1980,7 @@ export class ProductionService {
     });
 
     return {
-      items: itemsWithScrap,
+      items: itemsWithScrap.map(enrichProductionOrderWithMaterialDetails),
       meta: {
         total,
         page,
@@ -1783,12 +2022,12 @@ export class ProductionService {
     } else if (filters.startDate || filters.endDate) {
       filteredWhere.productionDate = {};
       if (filters.startDate) {
-        filteredWhere.productionDate.gte = new Date(filters.startDate);
+        const s = parseDateBoundaryLK(filters.startDate, false);
+        if (s) filteredWhere.productionDate.gte = s;
       }
       if (filters.endDate) {
-        const end = new Date(filters.endDate);
-        end.setHours(23, 59, 59, 999);
-        filteredWhere.productionDate.lte = end;
+        const end = parseDateBoundaryLK(filters.endDate, true);
+        if (end) filteredWhere.productionDate.lte = end;
       }
     }
 
@@ -2043,7 +2282,7 @@ export class ProductionService {
       },
       materialBreakdown: Object.values(materialBreakdown),
       dailyOutputTrends,
-      records: filteredOrdersWithScrap,
+      records: filteredOrdersWithScrap.map(enrichProductionOrderWithMaterialDetails),
     };
   }
 
@@ -2117,7 +2356,7 @@ export class ProductionService {
         }));
     }
 
-    return {
+    const orderWithScrap = {
       ...order,
       targetProducts: parseTargetProducts(order.targetProducts),
       materialUsages: order.materialUsages?.map((u: any) => ({
@@ -2126,6 +2365,8 @@ export class ProductionService {
       })),
       scrapReturns,
     };
+
+    return enrichProductionOrderWithMaterialDetails(orderWithScrap);
   }
 
   /**
