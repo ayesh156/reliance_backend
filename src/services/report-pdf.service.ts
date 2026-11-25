@@ -45,15 +45,102 @@ const MODULE_TITLES: Record<ReportModule, string> = {
   inventory: 'INVENTORY & STOCK VALUATION',
   products: 'PRODUCTS & SALES VELOCITY',
   materials: 'RAW MATERIALS & FABRIC LEDGER',
-  production: 'GARMENT PRODUCTION & YIELD',
+  production: 'GARMENT PRODUCTION & PIPELINE AUDIT',
   suppliers: 'SUPPLIERS & GOODS RECEIVED NOTES',
   audit: 'INVOICE MODIFICATIONS & AUDIT',
   cheques: 'CHEQUE LEDGER & REALIZATION FORECAST',
   expenses: 'EXPENSES & OPERATIONAL OUTFLOWS',
 };
 
+/**
+ * Resolves stage-specific columns for the Garment Production PDF report.
+ * Every stage configuration sums cleanly to 510.28pt (printable A4 width).
+ */
+function getProductionStageColumns(stageFilter?: string): (ColumnDef & { sumKey?: string })[] {
+  const norm = String(stageFilter || 'ALL STAGES').toUpperCase();
+  const fmtDate = (d: any) => (d ? String(d).split('T')[0] : '-');
+  const fmtNum = (v: any) => formatAmountNum(Number(v || 0));
+  const fmtStatus = (v: any, r: any) => (r && r.isStockSynced ? 'IN STOCK' : (v || '-'));
+
+  if (norm === 'CUTTING') {
+    return [
+      { header: 'CUTTING NO', width: 60, key: 'cuttingNo' },
+      { header: 'CUT DATE', width: 55, key: 'stageDate', format: fmtDate },
+      { header: 'GARMENT / STYLE', width: 120.28, key: 'productName' },
+      { header: 'RAW MATERIAL', width: 95, key: 'rawMaterialName' },
+      { header: 'ROLLS', width: 35, align: 'center', key: 'rolls', format: fmtNum, sumKey: 'rolls' },
+      { header: 'CUT (YARD)', width: 50, align: 'center', key: 'cutQtyYards', format: fmtNum, sumKey: 'cutQtyYards' },
+      { header: 'SENT LINE', width: 45, align: 'center', key: 'lineIntakeQty', format: fmtNum, sumKey: 'lineIntakeQty' },
+      { header: 'STATUS', width: 50, align: 'center', key: 'status', format: fmtStatus },
+    ];
+  }
+
+  if (norm === 'SEWING LINE' || norm === 'SEWING' || norm === 'LINE') {
+    return [
+      { header: 'CUTTING NO', width: 60, key: 'cuttingNo' },
+      { header: 'ACT DATE', width: 55, key: 'stageDate', format: fmtDate },
+      { header: 'GARMENT / STYLE', width: 140.28, key: 'productName' },
+      { header: 'LINE INTAKE', width: 52, align: 'center', key: 'lineIntakeQty', format: fmtNum, sumKey: 'lineIntakeQty' },
+      { header: 'SEWN OUT', width: 52, align: 'center', key: 'sewnQty', format: fmtNum, sumKey: 'sewnQty' },
+      { header: 'SENT WASH', width: 50, align: 'center', key: 'sentToWashQty', format: fmtNum, sumKey: 'sentToWashQty' },
+      { header: 'REM SEW', width: 51, align: 'center', key: 'remainingToSew', format: fmtNum, sumKey: 'remainingToSew' },
+      { header: 'STATUS', width: 50, align: 'center', key: 'status', format: fmtStatus },
+    ];
+  }
+
+  if (norm === 'WASHING' || norm === 'WASH') {
+    return [
+      { header: 'CUTTING NO', width: 65, key: 'cuttingNo' },
+      { header: 'WASH DATE', width: 60, key: 'stageDate', format: fmtDate },
+      { header: 'GARMENT / STYLE', width: 165.28, key: 'productName' },
+      { header: 'SENT WASH', width: 58, align: 'center', key: 'sentToWashQty', format: fmtNum, sumKey: 'sentToWashQty' },
+      { header: 'WASHED', width: 56, align: 'center', key: 'washedQty', format: fmtNum, sumKey: 'washedQty' },
+      { header: 'PENDING', width: 56, align: 'center', key: 'pendingAtWash', format: fmtNum, sumKey: 'pendingAtWash' },
+      { header: 'STATUS', width: 50, align: 'center', key: 'status', format: fmtStatus },
+    ];
+  }
+
+  if (norm === 'FINISHING / PACKING' || norm === 'FINISHING' || norm === 'PACKING') {
+    return [
+      { header: 'CUTTING NO', width: 60, key: 'cuttingNo' },
+      { header: 'FIN DATE', width: 55, key: 'stageDate', format: fmtDate },
+      { header: 'GARMENT / STYLE', width: 140.28, key: 'productName' },
+      { header: 'RECEIVED', width: 52, align: 'center', key: 'receivedForFinishingQty', format: fmtNum, sumKey: 'receivedForFinishingQty' },
+      { header: 'PACKED', width: 52, align: 'center', key: 'finishedQty', format: fmtNum, sumKey: 'finishedQty' },
+      { header: 'SYNCED', width: 50, align: 'center', key: 'syncedToStockQty', format: fmtNum, sumKey: 'syncedToStockQty' },
+      { header: 'PEND SYNC', width: 51, align: 'center', key: 'pendingSyncQty', format: fmtNum, sumKey: 'pendingSyncQty' },
+      { header: 'STATUS', width: 50, align: 'center', key: 'status', format: fmtStatus },
+    ];
+  }
+
+  if (norm === 'IN STOCK / COMPLETED' || norm === 'COMPLETED' || norm === 'IN STOCK') {
+    return [
+      { header: 'CUTTING NO', width: 65, key: 'cuttingNo' },
+      { header: 'COMP DATE', width: 60, key: 'stageDate', format: fmtDate },
+      { header: 'GARMENT / STYLE', width: 165.28, key: 'productName' },
+      { header: 'CUT (YARD)', width: 58, align: 'center', key: 'cutQtyYards', format: fmtNum, sumKey: 'cutQtyYards' },
+      { header: 'FINISHED', width: 56, align: 'center', key: 'finishedQty', format: fmtNum, sumKey: 'finishedQty' },
+      { header: 'SYNCED', width: 56, align: 'center', key: 'syncedToStockQty', format: fmtNum, sumKey: 'syncedToStockQty' },
+      { header: 'STATUS', width: 50, align: 'center', key: 'status', format: fmtStatus },
+    ];
+  }
+
+  // Default: ALL STAGES
+  return [
+    { header: 'CUTTING NO', width: 55, key: 'cuttingNo' },
+    { header: 'DATE', width: 52, key: 'stageDate', format: fmtDate },
+    { header: 'GARMENT / STYLE', width: 113.28, key: 'productName' },
+    { header: 'CUT (YARD)', width: 48, align: 'center', key: 'cutQtyYards', format: fmtNum, sumKey: 'cutQtyYards' },
+    { header: 'LINE IN', width: 48, align: 'center', key: 'lineIntakeQty', format: fmtNum, sumKey: 'lineIntakeQty' },
+    { header: 'SEWN', width: 46, align: 'center', key: 'sewnQty', format: fmtNum, sumKey: 'sewnQty' },
+    { header: 'WASHED', width: 46, align: 'center', key: 'washedQty', format: fmtNum, sumKey: 'washedQty' },
+    { header: 'FIN / SYNC', width: 52, align: 'center', key: 'finishedQty', format: fmtNum, sumKey: 'finishedQty' },
+    { header: 'STATUS', width: 50, align: 'center', key: 'status', format: fmtStatus },
+  ];
+}
+
 // Module column definitions for tables
-function getModuleColumns(module: ReportModule): ColumnDef[] {
+function getModuleColumns(module: ReportModule, stageFilter?: string): (ColumnDef & { sumKey?: string })[] {
   switch (module) {
     case 'sales':
       return [
@@ -116,17 +203,7 @@ function getModuleColumns(module: ReportModule): ColumnDef[] {
       ];
 
     case 'production':
-      return [
-        { header: 'PROD NO', width: 65, key: 'productionNo' },
-        { header: 'GARMENT STYLE', width: 125, key: 'productName' },
-        { header: 'SIZE/COLOR', width: 65, key: 'variant' },
-        { header: 'CUT QTY', width: 40, align: 'center', key: 'cutQty' },
-        { header: 'FINISHED', width: 42, align: 'center', key: 'completedQty' },
-        { header: 'WIP', width: 33, align: 'center', key: 'wipUnits' },
-        { header: 'YIELD', width: 38, align: 'center', key: 'yieldPercentage', format: (v) => `${v}%` },
-        { header: 'MAT COST', width: 52, align: 'right', key: 'materialCost', format: (v) => formatCurrency(v).replace('Rs. ', '') },
-        { header: 'STATUS', width: 50.28, align: 'center', key: 'status', format: (v, r) => (r && r.isStockSynced ? 'IN STOCK' : v) },
-      ];
+      return getProductionStageColumns(stageFilter);
 
     case 'suppliers':
       return [
@@ -252,7 +329,7 @@ function getModuleKpiCards(module: ReportModule, sum: any): KpiCard[] {
     );
   } else if (module === 'production') {
     cards.push(
-      { label: '1. TOTAL CUT PIECES', value: `${formatAmountNum(sum.totalCutPieces || sum.totalMaterialsCut || 0)} Units` },
+      { label: '1. TOTAL CUT QTY (YARD)', value: `${formatAmountNum(sum.totalCutQtyYards || sum.totalCutPieces || sum.totalMaterialsCut || 0)} Yards` },
       { label: '2. IN SEWING LINE (WIP)', value: `${formatAmountNum(sum.inSewingWip || sum.currentWip || 0)} Pcs` },
       { label: '3. TOTAL SEWN OUTPUT', value: `${formatAmountNum(sum.totalSewnOutput || 0)} Pcs` },
       { label: '4. IN WASH / WASHED', value: `${formatAmountNum(sum.inWashTotal || 0)} Pcs` },
@@ -330,9 +407,9 @@ export class ReportPdfService {
     doc.font('Helvetica-Bold').fontSize(8).text('Tel: ', brandTextX, headerTop + 47, { continued: true }).font('Helvetica').text('041-2268739, 071-1350123');
     doc.font('Helvetica-Bold').fontSize(8).text('Web: ', brandTextX, headerTop + 58, { continued: true }).font('Helvetica').text('relianceapparel.lk');
 
-    // Right-aligned report header section
-    const metaX = doc.page.width - 200;
-    const metaWidth = 160;
+    // Right-aligned report header section (245pt width keeps long PRINTED BY names + roles on a single line)
+    const metaWidth = 245;
+    const metaX = rightMargin - metaWidth;
 
     doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000');
     doc.text(reportTitle, 260, headerTop - 1, { width: rightMargin - 260, align: 'right' });
@@ -348,12 +425,12 @@ export class ReportPdfService {
 
     metaRows.forEach((row) => {
       doc.fontSize(7).font('Helvetica-Bold').fillColor('#555555')
-        .text(row.label, metaX, metaY, { width: 55, align: 'left' });
+        .text(row.label, metaX, metaY, { width: 58, align: 'left' });
 
       const valFont = row.isBold ? 'Helvetica-Bold' : 'Helvetica';
       doc.fontSize(7.5).font(valFont).fillColor('#000000');
-      const valHeight = doc.heightOfString(row.value, { width: metaWidth - 55, align: 'right' });
-      doc.text(row.value, metaX + 55, metaY, { width: metaWidth - 55, align: 'right', lineBreak: true });
+      const valHeight = doc.heightOfString(row.value, { width: metaWidth - 58, align: 'right' });
+      doc.text(row.value, metaX + 58, metaY, { width: metaWidth - 58, align: 'right', lineBreak: true });
 
       metaY += Math.max(10, valHeight + 2);
     });
@@ -576,13 +653,66 @@ export class ReportPdfService {
   }
 
   /**
+   * Helper: Draws totals footer row for stage-wise production tables
+   */
+  private static drawTableTotalsRow(
+    doc: InstanceType<typeof PDFDocument>,
+    columns: (ColumnDef & { sumKey?: string })[],
+    rows: any[],
+    curY: number,
+    onPageBreak: () => number
+  ): number {
+    if (!rows.length) return curY;
+    const startX = this.startX;
+    const rightMargin = this.rightMargin;
+    const pageWidth = this.pageWidth;
+    const rowHeight = 20;
+
+    if (curY + rowHeight > this.pageBottomThreshold) {
+      doc.addPage();
+      curY = onPageBreak();
+      curY = this.drawTableHeader(doc, columns, curY);
+    }
+
+    doc.rect(startX, curY, pageWidth, rowHeight).fillColor('#f8fafc').fill();
+    doc.moveTo(startX, curY).lineTo(rightMargin, curY).lineWidth(0.8).strokeColor('#000000').stroke();
+    doc.moveTo(startX, curY + rowHeight).lineTo(rightMargin, curY + rowHeight).lineWidth(0.8).strokeColor('#000000').stroke();
+
+    doc.fontSize(6.5).font('Helvetica-Bold').fillColor('#000000');
+
+    let colX = startX;
+    columns.forEach((col, idx) => {
+      let cellText = '';
+      if (idx === 0) {
+        cellText = 'TOTAL';
+      } else if (col.sumKey) {
+        const sumVal = rows.reduce((acc, r) => acc + (Number(r?.[col.sumKey!]) || 0), 0);
+        cellText = formatAmountNum(sumVal);
+      } else if (col.key === 'status') {
+        cellText = `${rows.length} Batches`;
+      }
+      if (cellText) {
+        doc.text(cellText, colX + 3, curY + 6, {
+          width: col.width - 6,
+          align: col.align || 'left',
+          lineBreak: false,
+        });
+      }
+      colX += col.width;
+    });
+
+    return curY + rowHeight;
+  }
+
+  /**
    * 1. GRANULAR SINGLE-MODULE REPORT GENERATION
    * Generates a focused, monochrome-optimized PDF report for the active module.
    */
   static generate(
     module: ReportModule,
     reportData: any,
-    user?: { name?: string; role?: string }
+    user?: { name?: string; role?: string },
+    stageFilter?: string
   ): InstanceType<typeof PDFDocument> {
     const doc = new PDFDocument({
       size: 'A4',
@@ -590,13 +720,19 @@ export class ReportPdfService {
       bufferPages: true,
     });
 
-    const reportTitle = MODULE_TITLES[module] || 'EXECUTIVE BUSINESS REPORT';
+    const activeStage = stageFilter || reportData?.stageFilter;
+    let reportTitle = MODULE_TITLES[module] || 'EXECUTIVE BUSINESS REPORT';
+    if (module === 'production' && activeStage && activeStage.toUpperCase() !== 'ALL STAGES' && activeStage.toUpperCase() !== 'ALL') {
+      reportTitle = `GARMENT PRODUCTION - [${activeStage.toUpperCase()}]`;
+    }
     let dateLabel = reportData.dateFilter?.presetLabel || 'All Recorded History';
     if (module === 'expenses' && (reportData.filterCategoryName || reportData.filterSubCategoryName)) {
       const scopeParts: string[] = [];
       if (reportData.filterCategoryName) scopeParts.push(`Primary: ${reportData.filterCategoryName}`);
       if (reportData.filterSubCategoryName) scopeParts.push(`Sub: ${reportData.filterSubCategoryName}`);
       dateLabel = `${dateLabel} | Scope: ${scopeParts.join(' › ')}`;
+    } else if (module === 'production' && activeStage && activeStage.toUpperCase() !== 'ALL STAGES' && activeStage.toUpperCase() !== 'ALL') {
+      dateLabel = `${dateLabel} | Stage: ${activeStage}`;
     }
     const generatedTimestamp = formatReportTimestamp();
     const generatedBy = user?.name ? `${user.name} (${user.role || 'Staff'})` : 'System Administrator';
@@ -612,7 +748,7 @@ export class ReportPdfService {
     curY = this.drawKpiCards(doc, kpiCards, curY);
 
     // ── Data Table ──
-    const columns = getModuleColumns(module);
+    const columns = getModuleColumns(module, activeStage);
     curY = this.drawTableHeader(doc, columns, curY);
 
     let rows = reportData.tableItems || [];
@@ -630,10 +766,16 @@ export class ReportPdfService {
         };
       });
     }
-    curY = this.drawTableRows(doc, columns, rows, curY, () => renderHeader());
+    // Continuation pages (Page 2+) start at compact top margin (36pt) with table headers only — corporate letterhead is Page 1 only
+    const continuationTopY = () => 36;
+    curY = this.drawTableRows(doc, columns, rows, curY, continuationTopY);
+
+    if (module === 'production' && rows.length > 0) {
+      curY = this.drawTableTotalsRow(doc, columns, rows, curY, continuationTopY);
+    }
 
     // ── Sign-Off Block ──
-    this.drawSignOff(doc, curY, () => renderHeader());
+    this.drawSignOff(doc, curY, continuationTopY);
 
     // ── Master Page Numbers ──
     this.applyPageNumbers(doc, `Reliance ${reportTitle}`);
@@ -716,7 +858,7 @@ export class ReportPdfService {
     const operationalCards: KpiCard[] = [
       { label: 'RETURN EVENTS VALUE', value: formatCurrency(master.totalReturnValue) },
       { label: 'WAREHOUSE UNITS', value: `${master.totalStockUnits || 0} Pcs` },
-      { label: 'PRODUCTION YIELD', value: `${master.productionCompletedQty || 0} Pcs (${master.productionYieldPct || 0}%)` },
+      { label: 'PRODUCTION OUTPUT', value: `${master.productionCompletedQty || 0} Pcs (${master.productionCutYards || 0} Yards Cut)` },
       { label: 'AUDITED EDITS', value: `${master.modifiedInvoices || 0} / ${master.auditedInvoices || 0}` },
     ];
     curY = this.drawKpiCards(doc, operationalCards, curY);
@@ -731,7 +873,7 @@ export class ReportPdfService {
       { section: 'SECTION 3', title: 'Inventory & Warehouse Stock', desc: 'Finished garment SKUs, unit stock levels, cost vs retail valuation' },
       { section: 'SECTION 4', title: 'Products & Sales Velocity', desc: 'Fast vs slow moving products, revenue distribution, SKU velocity' },
       { section: 'SECTION 5', title: 'Raw Materials & Fabric Ledger', desc: 'Fabric rolls/yards, weighted average cost valuation, scrap & waste logs' },
-      { section: 'SECTION 6', title: 'Garment Production & Yield', desc: 'Production batches, target vs completed output, efficiency yield rates' },
+      { section: 'SECTION 6', title: 'Garment Production Pipeline', desc: 'Production batches, cutting yardage, stage throughput, and stock sync status' },
       { section: 'SECTION 7', title: 'Suppliers & Goods Received Notes', desc: 'Inward GRN purchase totals, vendor disbursements, outstanding debt' },
       { section: 'SECTION 8', title: 'Expenses & Operational Outflows', desc: 'Itemized operational expenditures, overheads, and category cash ledger' },
       { section: 'SECTION 9', title: 'Invoice Modifications & Security Trail', desc: 'Audit trail of modified sales records, cashier revision frequency' },
@@ -800,12 +942,12 @@ export class ReportPdfService {
         doc.fontSize(7.5).font('Helvetica').fillColor('#555555').text('No recorded ledger entries found for this module in the selected period.', startX, curY + 8, { width: pageWidth, align: 'center' });
         curY += 28;
       } else {
-        curY = this.drawTableRows(doc, columns, rows, curY, () => renderHeader(secTitle));
+        curY = this.drawTableRows(doc, columns, rows, curY, () => 36);
       }
     });
 
     // ── Sign-Off Block on Final Page ──
-    this.drawSignOff(doc, curY, () => renderHeader('AUDIT SIGN-OFF'));
+    this.drawSignOff(doc, curY, () => 36);
 
     // ── Master Page Numbers ──
     this.applyPageNumbers(doc, 'Reliance Consolidated Master Audit Report');

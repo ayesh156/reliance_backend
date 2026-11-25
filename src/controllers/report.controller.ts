@@ -46,7 +46,9 @@ export async function getReportData(req: Request, res: Response): Promise<void> 
   const effectiveRepUserId = userRole === 'REP' ? Number(req.user?.userId) : cleanRepId;
   const queryCategoryId = req.query.categoryId && req.query.categoryId !== 'all' ? Number(req.query.categoryId) : undefined;
   const querySubCategoryId = req.query.subCategoryId && req.query.subCategoryId !== 'all' ? Number(req.query.subCategoryId) : undefined;
-  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId, queryCategoryId, querySubCategoryId);
+  const queryStage = req.query.stage ? String(req.query.stage) : undefined;
+  const queryViewMode = req.query.viewMode ? String(req.query.viewMode) : undefined;
+  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId, queryCategoryId, querySubCategoryId, queryStage, queryViewMode);
 
   res.status(200).json({
     success: true,
@@ -83,8 +85,10 @@ export async function downloadReportPdf(req: Request, res: Response): Promise<vo
   const effectiveRepUserId = userRole === 'REP' ? Number(req.user?.userId) : cleanRepId;
   const queryCategoryId = req.query.categoryId && req.query.categoryId !== 'all' ? Number(req.query.categoryId) : undefined;
   const querySubCategoryId = req.query.subCategoryId && req.query.subCategoryId !== 'all' ? Number(req.query.subCategoryId) : undefined;
-  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId, queryCategoryId, querySubCategoryId);
-  const pdfDoc = ReportPdfService.generate(moduleParam, report, req.user);
+  const queryStage = req.query.stage ? String(req.query.stage) : undefined;
+  const queryViewMode = req.query.viewMode ? String(req.query.viewMode) : undefined;
+  const report = await reportService.getReportData(moduleParam, dateFilter, effectiveRepUserId, queryCategoryId, querySubCategoryId, queryStage, queryViewMode);
+  const pdfDoc = ReportPdfService.generate(moduleParam, report, req.user, queryStage);
 
   const dateTag = dateFilter.startDate.toISOString().split('T')[0];
   const filename = `reliance-${moduleParam}-report-${dateTag}.pdf`;

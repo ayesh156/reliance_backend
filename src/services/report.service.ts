@@ -211,6 +211,7 @@ export class ReportService {
     }
 
     // Use strictly indexed createdAt & status filters (with standardized repUserId filter matching created/assigned rep)
+    // Accrual Revenue Standard: Includes ALL non-cancelled invoices regardless of payment method (CASH, CHEQUE, CREDIT, CARD, BANK_TRANSFER).
     const whereClause: any = {
       createdAt: { gte: startDate, lte: endDate },
       status: { not: OrderStatus.CANCELLED },
@@ -261,12 +262,24 @@ export class ReportService {
 
     // ── 1. Accrual Returns & Adjustments Pre-scan ──
     // Query orders that logged return activity during this date range (including returns against prior-period invoices)
+    const returnWhereClause: any = {
+      notes: { contains: 'returns' },
+      updatedAt: { gte: startDate, lte: endDate },
+      status: { not: OrderStatus.CANCELLED },
+    };
+    if (repUserId && !isNaN(Number(repUserId)) && Number(repUserId) > 0) {
+      const uId = Number(repUserId);
+      returnWhereClause.AND = [
+        {
+          OR: [
+            { userId: uId },
+            { customer: { is: { repId: uId } } },
+          ],
+        },
+      ];
+    }
     const returnActivityOrders = await prisma.order.findMany({
-      where: {
-        notes: { contains: 'returns' },
-        updatedAt: { gte: startDate, lte: endDate },
-        status: { not: OrderStatus.CANCELLED },
-      },
+      where: returnWhereClause,
       select: {
         id: true,
         notes: true,
@@ -359,17 +372,18 @@ export class ReportService {
         const originalBilled = parsed.originalTotalAmount !== undefined ? Number(parsed.originalTotalAmount) : total;
         grossBilledSales += originalBilled;
 
-        // Tally sold units for COGS (excluding line items flagged as isReturn)
+        // Tally sold units for COGS (excluding line items flagged as isReturn or negative qty; strictly uses costPrice, never selling price)
         for (const it of (order.items || [])) {
           const vId = Number(it.variantId || it.variant?.id);
           const qty = Number(it.quantity || 0);
-          if (it.isReturn) {
-            returnedUnitsByVariant[vId] = (returnedUnitsByVariant[vId] || 0) + Math.abs(qty);
+          if (it.isReturn || qty < 0) {
+            if (vId && qty !== 0) {
+              returnedUnitsByVariant[vId] = (returnedUnitsByVariant[vId] || 0) + Math.abs(qty);
+            }
           } else if (vId && qty > 0) {
             variantGrossSoldUnits[vId] = (variantGrossSoldUnits[vId] || 0) + qty;
-            if (it.variant?.costPrice !== undefined) {
-              variantUnitCostMap[vId] = Number(it.variant.costPrice || 0);
-            }
+            // Strictly resolve unit cost from costPrice (never fallback to retailPrice/wholesalePrice/price)
+            variantUnitCostMap[vId] = Number(it.variant?.costPrice ?? 0);
           }
         }
       }
@@ -603,6 +617,7 @@ export class ReportService {
         netProfitMargin,
         expensesByCategory,
         totalProductionCost: Math.round(totalProductionCost * 100) / 100,
+        totalGrnPurchases: Math.round(totalGrnExpenses * 100) / 100,
         totalGrnExpenses: Math.round(totalGrnExpenses * 100) / 100,
         totalGrnPaid: Math.round(totalGrnPaid * 100) / 100,
         totalGrnLiabilities: Math.round(totalGrnLiabilities * 100) / 100,
@@ -1120,7 +1135,7 @@ export class ReportService {
    *  - Ironed & Packed / Finished: Sum of quantityFinished / quantity from GarmentFinishLog / FinishingLog where date is within range
    *  - Trend Chart: Maps multi-stage throughput (Cut, Sewn, Wash, Finish) by their respective execution dates
    */
-  async getProductionReport(dateFilter: DateFilterResult) {
+  async getProductionReport(dateFilter: DateFilterResult, stageFilter?: string, viewMode: string = 'all') {
     const { startDate, endDate } = dateFilter;
 
     // 1. Stage-specific timestamp queries across the active date range
@@ -1292,31 +1307,84 @@ export class ReportService {
       getOrInitTrend(dStr).finishedQty += Number(fl.quantity) || 0;
     });
 
-    // 4. Resolve Production Order Table Items
+    // 4. Resolve Production Order Table Items with strict (+05:30) period-scoped stage activity & quantities
+    const startMs = startDate.getTime();
+    const endMs = endDate.getTime();
+    const isInRange = (d: Date | string | null | undefined): boolean => {
+      if (!d) return false;
+      const t = new Date(d).getTime();
+      return !Number.isNaN(t) && t >= startMs && t <= endMs;
+    };
+
     const tableItems = productionOrders.map((batch) => {
       const target = Number(batch.targetQuantity || 0);
+      const logs: any[] = Array.isArray(batch.activityLogs) ? batch.activityLogs : [];
 
-      // Calculate period-specific stage event totals using Asia/Colombo (+05:30) date boundaries
-      const batchSewnLogsInRange = (batch.activityLogs || []).filter((l: any) => {
-        const isSewn = l.action === 'SEWN' || l.action === 'LOG_SEWN' || (l.stage === 'LINE' && String(l.action || '').includes('SEWN'));
-        const t = new Date(l.timestamp).getTime();
-        return isSewn && t >= startDate.getTime() && t <= endDate.getTime();
+      // Period-specific Sewing Line logs inside [startDate, endDate]
+      const batchSewnLogsInRange = logs.filter((l: any) => {
+        const act = String(l.action || '').toUpperCase();
+        const isSewn = act === 'SEWN' || act === 'LOG_SEWN' || (l.stage === 'LINE' && act.includes('SEWN'));
+        return isSewn && isInRange(l.timestamp);
       });
       const batchPeriodSewn = batchSewnLogsInRange.reduce((acc: number, l: any) => acc + (Number(l.quantity) || 0), 0);
 
-      const batchIntakeLogsInRange = (batch.activityLogs || []).filter((l: any) => {
-        const isIntake = l.action === 'SEND_TO_LINE' || l.action === 'LINE_INTAKE' || (l.stage === 'LINE' && l.action === 'SEND_TO_LINE');
-        const t = new Date(l.timestamp).getTime();
-        return isIntake && t >= startDate.getTime() && t <= endDate.getTime();
+      const batchIntakeLogsInRange = logs.filter((l: any) => {
+        const act = String(l.action || '').toUpperCase();
+        const isIntake = act === 'SEND_TO_LINE' || act === 'LINE_INTAKE' || (l.stage === 'LINE' && act === 'SEND_TO_LINE');
+        return isIntake && isInRange(l.timestamp);
       });
       const batchPeriodIntake = batchIntakeLogsInRange.reduce((acc: number, l: any) => acc + (Number(l.quantity) || 0), 0);
 
-      const batchWashDispatchLogsInRange = (batch.activityLogs || []).filter((l: any) => {
-        const isWash = l.action === 'SEND_TO_WASH' || (l.stage === 'WASHING' && String(l.action || '').includes('SEND'));
-        const t = new Date(l.timestamp).getTime();
-        return isWash && t >= startDate.getTime() && t <= endDate.getTime();
+      const batchWashDispatchLogsInRange = logs.filter((l: any) => {
+        const act = String(l.action || '').toUpperCase();
+        const isWashDispatch = act === 'SEND_TO_WASH' || (l.stage === 'WASHING' && act.includes('SEND'));
+        return isWashDispatch && isInRange(l.timestamp);
       });
       const batchPeriodWashDispatch = batchWashDispatchLogsInRange.reduce((acc: number, l: any) => acc + (Number(l.quantity) || 0), 0);
+
+      const batchWashedLogsInRange = logs.filter((l: any) => {
+        const act = String(l.action || '').toUpperCase();
+        const isWashed = l.stage === 'WASHING' && ['WASH', 'LOG_WASH', 'WASH_COMPLETED', 'STOCK_SYNC'].includes(act);
+        return isWashed && isInRange(l.timestamp);
+      });
+      const batchPeriodWashed = batchWashedLogsInRange.reduce((acc: number, l: any) => acc + (Number(l.quantity) || 0), 0);
+
+      const batchLineLogsInRange = logs.filter((l: any) => {
+        const act = String(l.action || '').toUpperCase();
+        const stg = String(l.stage || '').toUpperCase();
+        return (stg === 'LINE' || ['SEND_TO_LINE', 'LINE_INTAKE', 'LOG_SEWN', 'SEWN', 'SEND_TO_WASH'].includes(act)) && isInRange(l.timestamp);
+      });
+      const batchWashLogsInRange = logs.filter((l: any) => {
+        const act = String(l.action || '').toUpperCase();
+        const stg = String(l.stage || '').toUpperCase();
+        return (stg === 'WASHING' || act.includes('WASH')) && isInRange(l.timestamp);
+      });
+
+      // Period-specific Cutting logs / productionDate inside [startDate, endDate]
+      const cutLogsInRange = (batch.cutLogs || []).filter((c) => isInRange(c.cutDate));
+      const isProdDateInRange = isInRange(batch.productionDate);
+      const hasCutInRange = isProdDateInRange || cutLogsInRange.length > 0;
+      const hasLineInRange = batchLineLogsInRange.length > 0;
+      const hasWashInRange = batchWashLogsInRange.length > 0;
+
+      // Period-specific Finishing & Stock Sync inside [startDate, endDate]
+      const finishLogsInRange = (batch.finishLogs || []).filter((f) => isInRange(f.finishDate));
+      const finishActivityLogsInRange = logs.filter((l: any) => {
+        const act = String(l.action || '').toUpperCase();
+        const stg = String(l.stage || '').toUpperCase();
+        return (stg === 'FINISHING' || act.includes('FINISH') || act === 'STOCK_SYNC' || act === 'FINALIZED') && isInRange(l.timestamp);
+      });
+      const isStockSyncedInRange = Boolean(batch.isStockSynced) && (
+        (batch.stockSyncedAt && isInRange(batch.stockSyncedAt)) ||
+        (!batch.stockSyncedAt && (finishLogsInRange.length > 0 || finishActivityLogsInRange.length > 0))
+      );
+      const hasFinishInRange = finishLogsInRange.length > 0 || finishActivityLogsInRange.length > 0 || isStockSyncedInRange;
+      const hasCompletedInRange = (Boolean(batch.isStockSynced) || String(batch.status || '').toUpperCase() === 'COMPLETED') && (
+        isStockSyncedInRange ||
+        finishLogsInRange.length > 0 ||
+        finishActivityLogsInRange.length > 0 ||
+        (!batch.stockSyncedAt && isInRange(batch.updatedAt))
+      );
 
       // Stage 1: Materials Cut / Total Intake - primary cutQty, falling back to cut logs or target
       const loggedCutUnits = (batch.cutLogs || []).reduce((acc, c) => acc + (Number(c.quantityCut) || 0), 0);
@@ -1393,45 +1461,179 @@ export class ReportService {
       const trend = getOrInitTrend(pDate);
       trend.batchesCount++;
 
-      // Yield %: calculated as (finished / cutQty) * 100 with zero division safeguard, cleanly rounded to 2 decimals
-      const divisor = batchCutUnits > 0 ? batchCutUnits : target;
-      const yieldPercentage = divisor > 0 ? Math.round((batchFinishedUnits / divisor) * 10000) / 100 : 0;
       const vDesc = batch.variant
         ? [batch.variant.size, batch.variant.color].filter(Boolean).join(' / ')
         : 'All Sizes';
 
+      // Extract fabric yards (cutQtyYards), roll count (rolls), and raw material name(s)
+      let rawYards = Number((batch as any).yaraAllocated || 0);
+      if (rawYards === 0 && Array.isArray(batch.materialUsages) && batch.materialUsages.length > 0) {
+        rawYards = batch.materialUsages.reduce((s, u) => s + Number(u.issuedQty || 0), 0);
+      }
+      if (rawYards === 0 && loggedCutUnits > 0) {
+        rawYards = loggedCutUnits;
+      }
+      if (rawYards === 0 && Array.isArray(batch.activityLogs)) {
+        for (const al of batch.activityLogs) {
+          const m = String(al.notes || '').match(/Cut\s+([\d.]+)\s*(?:YARDS|Meters|units|yds)?/i);
+          if (m) {
+            rawYards = parseFloat(m[1]) || 0;
+            if (rawYards > 0) break;
+          }
+        }
+      }
+      const cutQtyYards = Math.round(rawYards * 100) / 100;
+
+      let rolls = 0;
+      if (Array.isArray(batch.materialUsages) && batch.materialUsages.length > 0) {
+        rolls = batch.materialUsages.reduce((s, u) => s + Number(u.piecesCount || 0), 0);
+      }
+      if (rolls === 0 && Array.isArray(batch.activityLogs)) {
+        for (const al of batch.activityLogs) {
+          const m = String(al.notes || '').match(/(\d+(?:\.\d+)?)\s*Rolls?/i);
+          if (m) {
+            rolls = parseFloat(m[1]) || 0;
+            if (rolls > 0) break;
+          }
+        }
+      }
+      if (rolls === 0 && Array.isArray(batch.materialUsages) && batch.materialUsages.length > 0) {
+        rolls = 1;
+      }
+
+      const matNamesSet = new Set<string>();
+      (batch.materialUsages || []).forEach((u) => {
+        if (u.rawMaterial?.name) matNamesSet.add(u.rawMaterial.name);
+      });
+      if (matNamesSet.size === 0) {
+        (batch.cutLogs || []).forEach((c) => {
+          if (c.rawMaterial?.name) matNamesSet.add(c.rawMaterial.name);
+        });
+      }
+      const rawMaterialName = matNamesSet.size > 0 ? Array.from(matNamesSet).join(', ') : '-';
+
+      // Stage 1: Period-scoped Cut Yards & Rolls
+      const periodCutQtyYards = hasCutInRange
+        ? (isProdDateInRange
+            ? cutQtyYards
+            : Math.round(cutLogsInRange.reduce((s, c) => s + Number(c.quantityCut || 0), 0) * 100) / 100)
+        : 0;
+      const periodRolls = hasCutInRange ? rolls : 0;
+
+      // Stage 2 & 3: Period-scoped Line Intake, Sewn Output & Sent to Wash
+      const periodLineIntakeQty = batchPeriodIntake;
+      const periodSewnQty = batchPeriodSewn;
+      const periodRemainingToSew = Math.max(0, periodLineIntakeQty - periodSewnQty);
+
+      // Stage 4: Period-scoped Wash Dispatch & Washed Output
+      const periodSentToWashQty = batchPeriodWashDispatch;
+      const periodWashedQty = batchPeriodWashed;
+      const periodPendingAtWash = Math.max(0, periodSentToWashQty - periodWashedQty);
+
+      // Stage 5 & 6: Period-scoped Finished & Synced to Stock
+      const periodLoggedFinished = finishLogsInRange.reduce((acc, f) => acc + (Number(f.quantityFinished) || 0), 0);
+      const periodFinishedQty = periodLoggedFinished > 0
+        ? periodLoggedFinished
+        : (hasFinishInRange ? batchFinishedUnits : 0);
+      const periodSyncedToStockQty = isStockSyncedInRange && batch.status !== 'CANCELLED'
+        ? (periodFinishedQty > 0 ? periodFinishedQty : batchSynced)
+        : 0;
+      const periodPendingSyncQty = (!batch.isStockSynced && batch.status !== 'CANCELLED' && hasFinishInRange)
+        ? periodFinishedQty
+        : 0;
+      const periodReceivedForFinishingQty = periodWashedQty > 0 ? periodWashedQty : periodSentToWashQty;
+
+      // Resolve stage-specific activity dates
+      const findLatestLogDate = (predicate: (l: any) => boolean): string | null => {
+        const matched = (batch.activityLogs || []).filter(predicate);
+        if (matched.length > 0 && matched[0].timestamp) {
+          return new Date(matched[0].timestamp).toISOString();
+        }
+        return null;
+      };
+
+      const lineActivityDate =
+        findLatestLogDate((l) => l.stage === 'LINE' || ['SEND_TO_LINE', 'LINE_INTAKE', 'LOG_SEWN', 'SEWN'].includes(String(l.action || '').toUpperCase())) ||
+        batch.productionDate.toISOString();
+      const washDate =
+        findLatestLogDate((l) => l.stage === 'WASHING' || String(l.action || '').toUpperCase().includes('WASH')) ||
+        batch.productionDate.toISOString();
+      const finishingDate =
+        (batch.finishLogs && batch.finishLogs[0] ? batch.finishLogs[0].finishDate.toISOString() : null) ||
+        findLatestLogDate((l) => l.stage === 'FINISHING' || String(l.action || '').toUpperCase().includes('FINISH')) ||
+        batch.productionDate.toISOString();
+      const completionDate =
+        (batch.stockSyncedAt ? batch.stockSyncedAt.toISOString() : null) ||
+        finishingDate ||
+        batch.productionDate.toISOString();
+
+      const normStage = String(stageFilter || '').toUpperCase();
+      let stageDate = batch.productionDate.toISOString();
+      if (normStage === 'CUTTING') {
+        stageDate = (batch.cutLogs && batch.cutLogs[0] ? batch.cutLogs[0].cutDate.toISOString() : null) || batch.productionDate.toISOString();
+      } else if (normStage === 'SEWING LINE' || normStage === 'SEWING' || normStage === 'LINE') {
+        stageDate = lineActivityDate;
+      } else if (normStage === 'WASHING' || normStage === 'WASH') {
+        stageDate = washDate;
+      } else if (normStage === 'FINISHING / PACKING' || normStage === 'FINISHING' || normStage === 'PACKING') {
+        stageDate = finishingDate;
+      } else if (normStage === 'IN STOCK / COMPLETED' || normStage === 'COMPLETED' || normStage === 'IN STOCK') {
+        stageDate = completionDate;
+      }
+
       return {
         id: batch.id,
+        cuttingNo: batch.productionNo,
         productionNo: batch.productionNo,
+        date: batch.productionDate.toISOString(),
+        stageDate,
+        lineActivityDate,
+        washDate,
+        finishingDate,
+        completionDate,
         product: batch.product,
         productName: batch.product?.name || 'Garment Production Order',
         productImage: batch.product?.images?.[0]?.imageUrl || null,
+        sku: batch.variant?.sku || '-',
         variant: vDesc,
+        rawMaterialName,
+        rolls: periodRolls,
         targetQuantity: target,
-        cutQty: batchCutUnits,
-        completedQty: batchFinishedUnits,
-        washedQty: Number(batch.washedQty || 0),
-        sentToWashQty: Number(batch.sentToWashQty || 0),
-        sewnQty: Number(batch.sewnQty || 0),
-        lineSentQty: Number(batch.lineSentQty || 0),
+        cutQtyYards: periodCutQtyYards,
+        cutQty: periodCutQtyYards,
+        completedQty: periodFinishedQty,
+        finishedQty: periodFinishedQty,
+        washedQty: periodWashedQty,
+        sentToWashQty: periodSentToWashQty,
+        pendingAtWash: periodPendingAtWash,
+        sewnQty: periodSewnQty,
+        lineSentQty: periodLineIntakeQty,
+        lineIntakeQty: periodLineIntakeQty,
+        remainingToSew: periodRemainingToSew,
+        receivedForFinishingQty: periodReceivedForFinishingQty,
+        syncedToStockQty: periodSyncedToStockQty,
+        pendingSyncQty: periodPendingSyncQty,
         periodSewnQty: batchPeriodSewn,
         periodLineSentQty: batchPeriodIntake,
         periodWashDispatchQty: batchPeriodWashDispatch,
+        hasCutInRange,
+        hasLineInRange,
+        hasWashInRange,
+        hasFinishInRange,
+        hasCompletedInRange,
         inSewingWip: batchSewingWip,
-        ironedAndPacked: batchIronedPacked,
+        ironedAndPacked: periodFinishedQty,
         isStockSynced: batch.isStockSynced,
         stockSyncedAt: batch.stockSyncedAt ? batch.stockSyncedAt.toISOString() : null,
         stockSyncedByRole: batch.stockSyncedByRole,
-        totalCutUnits: Math.round(batchCutUnits * 100) / 100,
-        totalFinishedUnits: batchFinishedUnits,
+        totalCutUnits: periodCutQtyYards,
+        totalFinishedUnits: periodFinishedQty,
         wipUnits: batchWip,
         cutLogsCount: batch.cutLogs?.length || 0,
         finishLogsCount: batch.finishLogs?.length || 0,
         lastCutDate: batch.cutLogs && batch.cutLogs[0] ? batch.cutLogs[0].cutDate.toISOString() : null,
         lastFinishDate: batch.finishLogs && batch.finishLogs[0] ? batch.finishLogs[0].finishDate.toISOString() : null,
-        yieldPercentage,
         materialCost: Math.round(batchCost * 100) / 100,
-        scrapReturned: Math.round(batchReturned * 100) / 100,
         productionDate: batch.productionDate.toISOString(),
         status: batch.status || 'CUTTING',
         notes: batch.notes,
@@ -1443,40 +1645,92 @@ export class ReportService {
       };
     });
 
-    // 5. Compute true funnel totals strictly from stage-specific log quantities executed within [startDate, endDate]
-    // Absolutely decoupled from root batch-level properties (zero fallback to batchSewnOutputTotal, batchWashGrandTotal, or batchIronedPackedTotal)
-    // to prevent cross-month contamination from the parent batch's createdAt/updatedAt timestamps.
-    const finalTotalCut = Math.round(logCutTotal * 100) / 100;
-    const finalTotalSewn = Math.round(logSewnTotal * 100) / 100;
-    const finalInWash = Math.round(logWashTotal * 100) / 100;
-    const finalIronedPacked = Math.round(logFinishTotal * 100) / 100;
-    const finalInSewingWip = Math.max(0, Math.round((finalTotalCut - finalTotalSewn) * 100) / 100);
-    const finalFullyFinishedSynced = Math.round(batchFullyFinishedSyncedTotal * 100) / 100;
+    // Apply strict period-scoped stage & viewMode filtering:
+    // - Every stage matches ONLY batches with actual activity in that stage inside [startDate, endDate] (+05:30).
+    // - 'all' (Historical Stage-Activity Audit Mode): includes progressed/COMPLETED batches that worked in that stage in the period.
+    // - 'active' (Active Only Mode): further restricts to batches currently active/pending in that stage.
+    const normalizedViewMode = String(viewMode || 'all').toLowerCase() === 'active' ? 'active' : 'all';
+    const filteredTableItems = (() => {
+      const norm = String(stageFilter || 'ALL STAGES').toUpperCase();
+      return tableItems.filter((r) => {
+        const st = String(r.status || '').toUpperCase();
+        const isSynced = Boolean(r.isStockSynced);
 
-    const overallYieldDivisor = finalTotalCut > 0 ? finalTotalCut : targetQuantity;
-    const overallYieldPercentage = overallYieldDivisor > 0
-      ? Math.round((finalIronedPacked / overallYieldDivisor) * 10000) / 100
-      : 0;
+        if (normalizedViewMode === 'active') {
+          if (norm === 'ALL' || norm === 'ALL STAGES') {
+            return st !== 'COMPLETED' && !isSynced;
+          }
+          if (norm === 'CUTTING') {
+            return r.hasCutInRange && (st === 'CUTTING' || (r.cutQtyYards > 0 && r.lineIntakeQty === 0 && r.sewnQty === 0)) && !isSynced && st !== 'COMPLETED';
+          }
+          if (norm === 'SEWING LINE' || norm === 'SEWING' || norm === 'LINE') {
+            return r.hasLineInRange && (st === 'SEWING' || st === 'LINE' || r.lineIntakeQty > r.sentToWashQty || r.lineIntakeQty > r.sewnQty) && !isSynced && st !== 'COMPLETED';
+          }
+          if (norm === 'WASHING' || norm === 'WASH') {
+            return r.hasWashInRange && (st === 'WASHING' || r.sentToWashQty > r.washedQty) && r.finishedQty === 0 && !isSynced && st !== 'COMPLETED';
+          }
+          if (norm === 'FINISHING / PACKING' || norm === 'FINISHING' || norm === 'PACKING') {
+            return r.hasFinishInRange && (st === 'FINISHING' || st === 'FINISHED_PENDING_STOCK' || (r.finishedQty > 0 && !isSynced && st !== 'COMPLETED'));
+          }
+          if (norm === 'IN STOCK / COMPLETED' || norm === 'COMPLETED' || norm === 'IN STOCK') {
+            return r.hasCompletedInRange && (isSynced || st === 'COMPLETED');
+          }
+          return st !== 'COMPLETED' && !isSynced;
+        }
+
+        // Historical Stage-Activity Audit Mode ('all') — strict in-range stage activity
+        if (!stageFilter || norm === 'ALL' || norm === 'ALL STAGES') {
+          return r.hasCutInRange || r.hasLineInRange || r.hasWashInRange || r.hasFinishInRange || r.hasCompletedInRange;
+        }
+        if (norm === 'CUTTING') {
+          return r.hasCutInRange;
+        }
+        if (norm === 'SEWING LINE' || norm === 'SEWING' || norm === 'LINE') {
+          return r.hasLineInRange;
+        }
+        if (norm === 'WASHING' || norm === 'WASH') {
+          return r.hasWashInRange;
+        }
+        if (norm === 'FINISHING / PACKING' || norm === 'FINISHING' || norm === 'PACKING') {
+          return r.hasFinishInRange;
+        }
+        if (norm === 'IN STOCK / COMPLETED' || norm === 'COMPLETED' || norm === 'IN STOCK') {
+          return r.hasCompletedInRange;
+        }
+        return true;
+      });
+    })();
+
+    // 5. Compute true period-scoped funnel totals strictly from filteredTableItems
+    // Guarantees 100% parity between top KPI cards, table TOTAL footer row, CSV, PDF, and section floor pages.
+    const finalTotalCut = Math.round(filteredTableItems.reduce((s, r) => s + Number(r.cutQtyYards || 0), 0) * 100) / 100;
+    const finalTotalLineIntake = Math.round(filteredTableItems.reduce((s, r) => s + Number(r.lineIntakeQty || 0), 0) * 100) / 100;
+    const finalTotalSewn = Math.round(filteredTableItems.reduce((s, r) => s + Number(r.sewnQty || 0), 0) * 100) / 100;
+    const finalTotalWashDispatch = Math.round(filteredTableItems.reduce((s, r) => s + Number(r.sentToWashQty || 0), 0) * 100) / 100;
+    const finalInWash = Math.round(filteredTableItems.reduce((s, r) => s + Number(r.sentToWashQty || 0) + Number(r.washedQty || 0), 0) * 100) / 100;
+    const finalIronedPacked = Math.round(filteredTableItems.reduce((s, r) => s + Number(r.finishedQty || 0), 0) * 100) / 100;
+    const finalInSewingWip = Math.max(0, Math.round((finalTotalLineIntake - finalTotalSewn) * 100) / 100);
+    const finalFullyFinishedSynced = Math.round(filteredTableItems.reduce((s, r) => s + Number(r.syncedToStockQty || 0), 0) * 100) / 100;
+    totalBatches = filteredTableItems.length;
 
     const dailyTrends = Object.values(dateTrendsMap).sort((a, b) => b.date.localeCompare(a.date));
 
     return {
       module: 'production',
+      stageFilter: stageFilter || 'ALL STAGES',
       dateFilter,
       summary: {
         totalBatches,
         targetQuantity,
         completedQuantity: finalIronedPacked,
-        overallYieldPercentage,
         totalMaterialCost: Math.round(totalMaterialCost * 100) / 100,
-        scrapVariance: Math.round(scrapVariance * 100) / 100,
-        totalScrapReturned: Math.round(scrapVariance * 100) / 100,
         // 6-Stage Production Funnel Metrics
+        totalCutQtyYards: finalTotalCut,
         totalCutPieces: finalTotalCut,
-        totalLineIntake: Math.round(logLineIntakeTotal * 100) / 100,
+        totalLineIntake: finalTotalLineIntake,
         inSewingWip: finalInSewingWip,
         totalSewnOutput: finalTotalSewn,
-        totalForwardedToWash: Math.round(logWashDispatchTotal * 100) / 100,
+        totalForwardedToWash: finalTotalWashDispatch,
         inWashTotal: finalInWash,
         ironedAndPacked: finalIronedPacked,
         fullyFinishedSynced: finalFullyFinishedSynced,
@@ -1488,7 +1742,7 @@ export class ReportService {
         currentWip: finalInSewingWip,
         dailyTrends,
       },
-      tableItems,
+      tableItems: filteredTableItems,
     };
   }
 
@@ -2041,7 +2295,7 @@ export class ReportService {
       supplierPurchases: suppliers.summary?.totalPurchases || 0,
       supplierDebt: suppliers.summary?.totalOutstandingPayables || 0,
       productionCompletedQty: production.summary?.completedQuantity || 0,
-      productionYieldPct: production.summary?.overallYieldPercentage || 0,
+      productionCutYards: production.summary?.totalCutQtyYards || 0,
       auditedInvoices: audit.summary?.totalInvoicesInPeriod || 0,
       modifiedInvoices: audit.summary?.modifiedInvoicesCount || 0,
 
@@ -2087,7 +2341,9 @@ export class ReportService {
     filter: DateFilterResult,
     repUserId?: number,
     categoryId?: number,
-    subCategoryId?: number
+    subCategoryId?: number,
+    stageFilter?: string,
+    viewMode?: string
   ) {
     switch (module) {
       case 'sales':
@@ -2101,7 +2357,7 @@ export class ReportService {
       case 'materials':
         return this.getMaterialsReport(filter);
       case 'production':
-        return this.getProductionReport(filter);
+        return this.getProductionReport(filter, stageFilter, viewMode);
       case 'suppliers':
         return this.getSuppliersReport(filter);
       case 'audit':

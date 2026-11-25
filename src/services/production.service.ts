@@ -1798,6 +1798,25 @@ export class ProductionService {
           },
         ],
       });
+    } else if (filters.stage === 'washing' || filters.stage === 'wash') {
+      // Ensure all batches that have ever entered the Wash Plant are discoverable (WASHING, FINISHING, COMPLETED)
+      andConditions.push({
+        OR: [
+          { sentToWashQty: { gt: 0 } },
+          { washedQty: { gt: 0 } },
+          { status: 'WASHING' },
+          {
+            activityLogs: {
+              some: {
+                OR: [
+                  { stage: 'WASHING' },
+                  { action: { in: ['SEND_TO_WASH', 'WASH_DISPATCH', 'WASH', 'LOG_WASH', 'WASH_COMPLETED', 'WASH_FINISH'] } },
+                ],
+              },
+            },
+          },
+        ],
+      });
     }
 
     // Connect activityType directly to BatchActivityLog event timestamps without overwriting search where.OR
