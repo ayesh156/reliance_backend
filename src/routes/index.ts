@@ -34,6 +34,7 @@ router.use('/invoices', orderRoutes);
 // Presales Orders routes
 router.use('/sales-orders', salesOrderRoutes);
 router.use('/buy-raw-materials', buyRawMaterialRoutes);
+router.use('/raw-materials', buyRawMaterialRoutes);
 router.use('/raw-material-shops', rawMaterialShopRoutes);
 router.use('/raw-material-items', rawMaterialItemRoutes);
 router.use('/credit', customerCreditRoutes);

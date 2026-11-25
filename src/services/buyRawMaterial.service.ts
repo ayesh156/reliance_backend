@@ -816,6 +816,199 @@ export class BuyRawMaterialService {
       return updatedPurchase;
     });
   }
+
+  /**
+   * Fetch supplier cheques due within 2 days (today, tomorrow, in 2 days)
+   * in Asia/Colombo (+05:30) local calendar date boundaries.
+   * Deduplicates entries across BuyRawMaterial (notes ledger) and SupplierPayment records.
+   */
+  async getUpcomingCheques() {
+    // 1. Get today's YYYY-MM-DD in Asia/Colombo (+05:30)
+    const todayYMD = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Colombo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+
+    const parseToColomboYMD = (dateVal: string | Date | undefined | null): string | null => {
+      if (!dateVal) return null;
+      try {
+        const d = new Date(dateVal);
+        if (isNaN(d.getTime())) return null;
+        return new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'Asia/Colombo',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+        }).format(d);
+      } catch {
+        return null;
+      }
+    };
+
+    const calcDaysDiff = (targetYMD: string, baseTodayYMD: string): number => {
+      const [ty, tm, td] = targetYMD.split('-').map(Number);
+      const [by, bm, bd] = baseTodayYMD.split('-').map(Number);
+      const targetUtc = Date.UTC(ty, tm - 1, td);
+      const baseUtc = Date.UTC(by, bm - 1, bd);
+      return Math.round((targetUtc - baseUtc) / (1000 * 60 * 60 * 24));
+    };
+
+    const upcomingList: Array<{
+      id: string | number;
+      supplierName: string;
+      poInvoiceNumber: string;
+      chequeNumber: string;
+      bankName: string;
+      amount: number;
+      maturityDate: string;
+      daysUntilDue: number;
+    }> = [];
+
+    const seenDeduplicationKeys = new Set<string>();
+
+    // 2. Scan BuyRawMaterial records
+    const purchases = await prisma.buyRawMaterial.findMany({
+      include: {
+        shop: {
+          select: { id: true, name: true, phone: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 500,
+    });
+
+    for (const p of purchases) {
+      if (!p.notes) continue;
+      try {
+        if (!p.notes.startsWith('{')) continue;
+        const parsed = JSON.parse(p.notes);
+
+        // Check cheques array
+        if (Array.isArray(parsed.cheques)) {
+          for (const chq of parsed.cheques) {
+            const rawStatus = String(chq.status || chq.chequeStatus || 'PENDING').toUpperCase();
+            if (rawStatus === 'CLEARED' || rawStatus === 'BOUNCED') continue;
+
+            const matYMD = parseToColomboYMD(chq.chequeDate || chq.paymentDate || p.purchaseDate || p.createdAt);
+            if (!matYMD) continue;
+
+            const daysDiff = calcDaysDiff(matYMD, todayYMD);
+            if (daysDiff >= 0 && daysDiff <= 2) {
+              const chqNum = String(chq.chequeNumber || chq.reference || '-').trim();
+              const amt = Number(chq.amount) || 0;
+              const dedupKey = `${p.invoiceNumber || p.id}_${chqNum}_${amt}_${matYMD}`;
+
+              if (!seenDeduplicationKeys.has(dedupKey)) {
+                seenDeduplicationKeys.add(dedupKey);
+                upcomingList.push({
+                  id: `p-${p.id}-${chqNum}-${amt}`,
+                  supplierName: p.shop?.name || 'Raw Material Supplier',
+                  poInvoiceNumber: p.invoiceNumber || `PO-${p.id}`,
+                  chequeNumber: chqNum,
+                  bankName: chq.bankName || chq.bank || 'Bank Cheque',
+                  amount: amt,
+                  maturityDate: matYMD,
+                  daysUntilDue: daysDiff,
+                });
+              }
+            }
+          }
+        }
+
+        // Check payments array where method === 'CHEQUE'
+        if (Array.isArray(parsed.payments)) {
+          for (const pay of parsed.payments) {
+            const method = String(pay.method || pay.paymentMethod || '').toUpperCase();
+            if (method !== 'CHEQUE') continue;
+
+            const rawStatus = String(pay.status || pay.chequeStatus || 'PENDING').toUpperCase();
+            if (rawStatus === 'CLEARED' || rawStatus === 'BOUNCED') continue;
+
+            const matYMD = parseToColomboYMD(pay.chequeDate || pay.paymentDate || pay.createdAt || p.purchaseDate || p.createdAt);
+            if (!matYMD) continue;
+
+            const daysDiff = calcDaysDiff(matYMD, todayYMD);
+            if (daysDiff >= 0 && daysDiff <= 2) {
+              const chqNum = String(pay.chequeNumber || pay.reference || '-').trim();
+              const amt = Number(pay.amount) || 0;
+              const dedupKey = `${p.invoiceNumber || p.id}_${chqNum}_${amt}_${matYMD}`;
+
+              if (!seenDeduplicationKeys.has(dedupKey)) {
+                seenDeduplicationKeys.add(dedupKey);
+                upcomingList.push({
+                  id: `p-pay-${pay.id || p.id}-${chqNum}-${amt}`,
+                  supplierName: p.shop?.name || 'Raw Material Supplier',
+                  poInvoiceNumber: p.invoiceNumber || `PO-${p.id}`,
+                  chequeNumber: chqNum,
+                  bankName: pay.bankName || pay.bank || 'Bank Cheque',
+                  amount: amt,
+                  maturityDate: matYMD,
+                  daysUntilDue: daysDiff,
+                });
+              }
+            }
+          }
+        }
+      } catch {
+        // Skip malformed notes
+      }
+    }
+
+    // 3. Scan SupplierPayment table (include NULL chequeStatus for legacy records)
+    const supplierPayments = await prisma.supplierPayment.findMany({
+      where: {
+        paymentMethod: 'CHEQUE',
+        OR: [
+          { chequeStatus: null },
+          { chequeStatus: { notIn: ['CLEARED', 'BOUNCED'] } },
+        ],
+      },
+      include: {
+        shop: {
+          select: { id: true, name: true, phone: true },
+        },
+        buyRawMaterial: {
+          select: { id: true, invoiceNumber: true },
+        },
+      },
+      orderBy: { paymentDate: 'desc' },
+      take: 500,
+    });
+
+    for (const sp of supplierPayments) {
+      const matYMD = parseToColomboYMD(sp.chequeDate || sp.paymentDate || sp.createdAt);
+      if (!matYMD) continue;
+
+      const daysDiff = calcDaysDiff(matYMD, todayYMD);
+      if (daysDiff >= 0 && daysDiff <= 2) {
+        const chqNum = String(sp.reference || '-').trim();
+        const amt = Number(sp.amount) || 0;
+        const poInv = sp.buyRawMaterial?.invoiceNumber || (sp.buyRawMaterialId ? `PO-${sp.buyRawMaterialId}` : 'Supplier Payment');
+        const dedupKey = `${poInv}_${chqNum}_${amt}_${matYMD}`;
+
+        if (!seenDeduplicationKeys.has(dedupKey)) {
+          seenDeduplicationKeys.add(dedupKey);
+          upcomingList.push({
+            id: `sp-${sp.id}`,
+            supplierName: sp.shop?.name || 'Raw Material Supplier',
+            poInvoiceNumber: poInv,
+            chequeNumber: chqNum,
+            bankName: 'Bank Cheque',
+            amount: amt,
+            maturityDate: matYMD,
+            daysUntilDue: daysDiff,
+          });
+        }
+      }
+    }
+
+    // 4. Sort by earliest maturity date first
+    upcomingList.sort((a, b) => a.maturityDate.localeCompare(b.maturityDate) || a.daysUntilDue - b.daysUntilDue);
+
+    return upcomingList;
+  }
 }
 
 export default new BuyRawMaterialService();

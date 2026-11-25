@@ -3,6 +3,7 @@ import { customerService } from '../services/customer.service.ts';
 import { sendSuccess, sendCreated } from '../utils/response.ts';
 import { CustomerType } from '@prisma/client';
 import { createCustomerSchema } from '../schemas/customer.schema.ts';
+import { CustomerCreditService } from '../services/customerCredit.service.ts';
 
 /**
  * Handle listing customers with sanitized query keyword and validated customer type
@@ -158,6 +159,67 @@ export const reconcileCustomerBalances = async (req: Request, res: Response, nex
     const customerId = req.body?.customerId ? Number(req.body.customerId) : undefined;
     const result = await customerService.reconcileCustomerBalances(customerId);
     sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+/**
+ * GET /api/customers/:id/receipts
+ * Retrieve all customer payment receipts with order details
+ */
+export const getCustomerReceipts = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const customerId = parseInt(String(rawId), 10);
+    if (!customerId || isNaN(customerId) || customerId <= 0) {
+      return res.status(400).json({ error: 'Valid positive customer ID is required' });
+    }
+    const { startDate, endDate, search } = req.query;
+    const receipts = await CustomerCreditService.getCustomerReceipts(customerId, {
+      startDate: startDate ? String(startDate) : undefined,
+      endDate: endDate ? String(endDate) : undefined,
+      search: search ? String(search) : undefined,
+    });
+    sendSuccess(res, receipts);
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * GET /api/customers/receipts/:receiptId
+ * Retrieve single customer payment receipt by ID
+ */
+export const getCustomerReceiptById = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rawId = Array.isArray(req.params.receiptId) ? req.params.receiptId[0] : req.params.receiptId;
+    const receiptId = parseInt(String(rawId), 10);
+    if (!receiptId || isNaN(receiptId) || receiptId <= 0) {
+      return res.status(400).json({ error: 'Valid positive receipt ID is required' });
+    }
+    const receipt = await CustomerCreditService.getReceiptById(receiptId);
+    if (!receipt) {
+      return res.status(404).json({ error: 'Customer receipt not found' });
+    }
+    sendSuccess(res, receipt);
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * GET /api/customers/:id/statement
+ * Retrieve customer profile and non-cancelled orders with order payments for 80mm statement
+ */
+export const getCustomerStatement = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const customerId = parseInt(String(rawId), 10);
+    if (!customerId || isNaN(customerId) || customerId <= 0) {
+      return res.status(400).json({ error: 'Valid positive customer ID is required' });
+    }
+    const statement = await CustomerCreditService.getCustomerStatement(customerId);
+    sendSuccess(res, statement);
   } catch (err) {
     next(err);
   }

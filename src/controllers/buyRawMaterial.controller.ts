@@ -122,6 +122,19 @@ export class BuyRawMaterialController {
       next(err);
     }
   }
+
+  /**
+   * GET /api/buy-raw-materials/upcoming-cheques or /api/raw-materials/upcoming-cheques
+   * Retrieve supplier cheques due within 2 days in Asia/Colombo time (+05:30)
+   */
+  async getUpcomingCheques(req: Request, res: Response, next: NextFunction) {
+    try {
+      const upcoming = await buyRawMaterialService.getUpcomingCheques();
+      return sendSuccess(res, upcoming);
+    } catch (err) {
+      next(err);
+    }
+  }
 }
 
 export default new BuyRawMaterialController();

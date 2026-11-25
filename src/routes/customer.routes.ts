@@ -9,6 +9,16 @@ const router = Router();
  */
 router.get('/', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), customerController.getCustomers);
 router.post('/reconcile', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER'), customerController.reconcileCustomerBalances);
+
+// Single receipt fetch endpoint for 80mm consolidated thermal POS reprint
+router.get('/receipts/:receiptId', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), customerController.getCustomerReceiptById);
+
+// Customer 80mm statement endpoint: profile + all orders + payment methods breakdown
+router.get('/:id/statement', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), customerController.getCustomerStatement);
+
+// Customer receipts list endpoint
+router.get('/:id/receipts', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), customerController.getCustomerReceipts);
+
 router.get('/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), customerController.getCustomerById);
 router.post('/', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), customerController.createCustomer);
 router.put('/:id', verifyToken, requireRole('ADMIN', 'STAFF', 'CASHIER', 'REP'), customerController.updateCustomer);

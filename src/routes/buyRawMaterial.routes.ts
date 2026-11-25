@@ -8,6 +8,13 @@ const router = Router();
 router.get('/', verifyToken, buyRawMaterialController.getAll);
 // Real-time auto invoice generator endpoint from database
 router.get('/next-invoice', verifyToken, buyRawMaterialController.getNextInvoice);
+// Supplier cheques due within 2 days (Asia/Colombo +05:30) alert endpoint
+router.get(
+  '/upcoming-cheques',
+  verifyToken,
+  requireRole('SUPER_ADMIN', 'ADMIN', 'STAFF'),
+  buyRawMaterialController.getUpcomingCheques
+);
 router.get('/:id', verifyToken, buyRawMaterialController.getById);
 
 // Create and delete routes

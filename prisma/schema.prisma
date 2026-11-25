@@ -653,6 +653,8 @@ model SupplierPayment {
   paymentMethod      String           @default("CASH") @map("payment_method") // CASH, CHEQUE, BANK_TRANSFER
   reference          String?          @db.Text // Cheque No / Bank Slip
   paymentDate        DateTime         @default(now()) @map("payment_date")
+  chequeDate         DateTime?        @map("cheque_date")
+  chequeStatus       ChequeStatus?    @default(PENDING) @map("cheque_status")
   
   createdAt          DateTime         @default(now()) @map("created_at")
 

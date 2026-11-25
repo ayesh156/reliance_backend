@@ -2369,12 +2369,43 @@ export class OrderService {
         },
       });
 
+      // Hydrate complete receipt with customer and all settled order payments for 80mm thermal printing
+      const completeReceipt = await tx.customerReceipt.findUnique({
+        where: { id: customerReceipt.id },
+        include: {
+          customer: {
+            select: {
+              id: true,
+              name: true,
+              phone: true,
+              address: true,
+              city: true,
+              outstandingBalance: true,
+            },
+          },
+          payments: {
+            include: {
+              order: {
+                select: {
+                  id: true,
+                  invoiceNumber: true,
+                  totalAmount: true,
+                  paidAmount: true,
+                  status: true,
+                  createdAt: true,
+                },
+              },
+            },
+          },
+        },
+      });
+
       return {
         success: true,
         settledAmount: paymentToApply,
         remainingBalance: updatedCustomer.outstandingBalance,
         settledInvoices: settledInvoiceDetails,
-        receipt: customerReceipt,
+        receipt: completeReceipt || customerReceipt,
       };
     });
   }

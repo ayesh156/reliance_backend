@@ -585,6 +585,16 @@ export class CustomerCreditService {
       where,
       orderBy: { receiptDate: 'desc' },
       include: {
+        customer: {
+          select: {
+            id: true,
+            name: true,
+            phone: true,
+            address: true,
+            city: true,
+            outstandingBalance: true,
+          },
+        },
         payments: {
           include: {
             order: {
@@ -606,6 +616,7 @@ export class CustomerCreditService {
       id: r.id,
       receiptNumber: r.receiptNumber,
       customerId: r.customerId,
+      customer: r.customer,
       totalAmount: r.totalAmount,
       paymentMethod: r.paymentMethod,
       reference: r.reference,
@@ -627,5 +638,91 @@ export class CustomerCreditService {
       })),
       clearedInvoicesCount: r.payments.length,
     }));
+  }
+
+  /**
+   * Fetch single customer receipt by primary key ID with customer & orders
+   */
+  static async getReceiptById(receiptId: number) {
+    const receipt = await prisma.customerReceipt.findUnique({
+      where: { id: receiptId },
+      include: {
+        customer: {
+          select: {
+            id: true,
+            name: true,
+            phone: true,
+            address: true,
+            city: true,
+            outstandingBalance: true,
+          },
+        },
+        payments: {
+          include: {
+            order: {
+              select: {
+                id: true,
+                invoiceNumber: true,
+                totalAmount: true,
+                paidAmount: true,
+                status: true,
+                createdAt: true,
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!receipt) return null;
+    return {
+      ...receipt,
+      clearedInvoicesCount: receipt.payments.length,
+    };
+  }
+
+  /**
+   * Fetch customer 80mm statement dataset: profile + non-cancelled orders with all order payments
+   */
+  static async getCustomerStatement(customerId: number) {
+    const customer = await prisma.customer.findUnique({
+      where: { id: customerId },
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        address: true,
+        city: true,
+        outstandingBalance: true,
+        type: true,
+      },
+    });
+    if (!customer) throw new Error('Customer not found');
+
+    const orders = await prisma.order.findMany({
+      where: {
+        customerId,
+        status: { not: 'CANCELLED' },
+      },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        payments: {
+          orderBy: { createdAt: 'asc' },
+          include: {
+            customerReceipt: {
+              select: {
+                id: true,
+                receiptNumber: true,
+                paymentMethod: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    return {
+      customer,
+      orders,
+    };
   }
 }
