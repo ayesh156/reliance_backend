@@ -75,15 +75,39 @@ function getProductionStageColumns(stageFilter?: string): (ColumnDef & { sumKey?
     ];
   }
 
+  if (norm === 'SEWING_SEWN') {
+    return [
+      { header: 'CUTTING NO', width: 60, key: 'cuttingNo' },
+      { header: 'ACT DATE', width: 55, key: 'stageDate', format: fmtDate },
+      { header: 'GARMENT / STYLE', width: 160.28, key: 'productName' },
+      { header: 'LINE INTAKE', width: 55, align: 'center', key: 'lineIntakeQty', format: fmtNum, sumKey: 'lineIntakeQty' },
+      { header: 'SEWN / WASH READY', width: 75, align: 'center', key: 'sewnQty', format: fmtNum, sumKey: 'sewnQty' },
+      { header: 'REM SEW', width: 55, align: 'center', key: 'remainingToSew', format: fmtNum, sumKey: 'remainingToSew' },
+      { header: 'STATUS', width: 50, align: 'center', key: 'status', format: fmtStatus },
+    ];
+  }
+
+  if (norm === 'SEWING_WASH_READY') {
+    return [
+      { header: 'CUTTING NO', width: 60, key: 'cuttingNo' },
+      { header: 'ACT DATE', width: 55, key: 'stageDate', format: fmtDate },
+      { header: 'GARMENT / STYLE', width: 160.28, key: 'productName' },
+      { header: 'LINE INTAKE', width: 55, align: 'center', key: 'lineIntakeQty', format: fmtNum, sumKey: 'lineIntakeQty' },
+      { header: 'SEWN / WASH READY', width: 75, align: 'center', key: 'washReadyQty', format: fmtNum, sumKey: 'washReadyQty' },
+      { header: 'SENT WASH', width: 55, align: 'center', key: 'sentToWashQty', format: fmtNum, sumKey: 'sentToWashQty' },
+      { header: 'STATUS', width: 50, align: 'center', key: 'status', format: fmtStatus },
+    ];
+  }
+
   if (norm === 'SEWING LINE' || norm === 'SEWING' || norm === 'LINE') {
     return [
       { header: 'CUTTING NO', width: 60, key: 'cuttingNo' },
       { header: 'ACT DATE', width: 55, key: 'stageDate', format: fmtDate },
-      { header: 'GARMENT / STYLE', width: 140.28, key: 'productName' },
-      { header: 'LINE INTAKE', width: 52, align: 'center', key: 'lineIntakeQty', format: fmtNum, sumKey: 'lineIntakeQty' },
-      { header: 'SEWN OUT', width: 52, align: 'center', key: 'sewnQty', format: fmtNum, sumKey: 'sewnQty' },
-      { header: 'SENT WASH', width: 50, align: 'center', key: 'sentToWashQty', format: fmtNum, sumKey: 'sentToWashQty' },
-      { header: 'REM SEW', width: 51, align: 'center', key: 'remainingToSew', format: fmtNum, sumKey: 'remainingToSew' },
+      { header: 'GARMENT / STYLE', width: 130.28, key: 'productName' },
+      { header: 'LINE INTAKE', width: 50, align: 'center', key: 'lineIntakeQty', format: fmtNum, sumKey: 'lineIntakeQty' },
+      { header: 'SEWN / WASH READY', width: 70, align: 'center', key: 'sewnQty', format: fmtNum, sumKey: 'sewnQty' },
+      { header: 'SENT WASH', width: 48, align: 'center', key: 'sentToWashQty', format: fmtNum, sumKey: 'sentToWashQty' },
+      { header: 'REM SEW', width: 47, align: 'center', key: 'remainingToSew', format: fmtNum, sumKey: 'remainingToSew' },
       { header: 'STATUS', width: 50, align: 'center', key: 'status', format: fmtStatus },
     ];
   }
@@ -129,10 +153,10 @@ function getProductionStageColumns(stageFilter?: string): (ColumnDef & { sumKey?
   return [
     { header: 'CUTTING NO', width: 55, key: 'cuttingNo' },
     { header: 'DATE', width: 52, key: 'stageDate', format: fmtDate },
-    { header: 'GARMENT / STYLE', width: 113.28, key: 'productName' },
+    { header: 'GARMENT / STYLE', width: 109.28, key: 'productName' },
     { header: 'CUT (YARD)', width: 48, align: 'center', key: 'cutQtyYards', format: fmtNum, sumKey: 'cutQtyYards' },
     { header: 'LINE IN', width: 48, align: 'center', key: 'lineIntakeQty', format: fmtNum, sumKey: 'lineIntakeQty' },
-    { header: 'SEWN', width: 46, align: 'center', key: 'sewnQty', format: fmtNum, sumKey: 'sewnQty' },
+    { header: 'SEWN / WASH READY', width: 50, align: 'center', key: 'sewnQty', format: fmtNum, sumKey: 'sewnQty' },
     { header: 'WASHED', width: 46, align: 'center', key: 'washedQty', format: fmtNum, sumKey: 'washedQty' },
     { header: 'FIN / SYNC', width: 52, align: 'center', key: 'finishedQty', format: fmtNum, sumKey: 'finishedQty' },
     { header: 'STATUS', width: 50, align: 'center', key: 'status', format: fmtStatus },
@@ -278,7 +302,13 @@ function getModuleColumns(module: ReportModule, stageFilter?: string): (ColumnDe
 }
 
 // Extract module KPI cards
-function getModuleKpiCards(module: ReportModule, sum: any): KpiCard[] {
+function getModuleKpiCards(
+  module: ReportModule,
+  sum: any,
+  stageFilter?: string,
+  tableItems: any[] = [],
+  viewMode: string = 'all'
+): KpiCard[] {
   const cards: KpiCard[] = [];
   if (!sum) return cards;
 
@@ -328,10 +358,33 @@ function getModuleKpiCards(module: ReportModule, sum: any): KpiCard[] {
       { label: 'SCRAP/WASTE QTY', value: `${sum.periodScrapQty || 0}` }
     );
   } else if (module === 'production') {
+    const normStage = String(stageFilter || '').toUpperCase();
+    const isActiveMode = String(viewMode || 'all').toLowerCase() === 'active';
+    const totalWashReadyOnLine =
+      sum.washReadyOnLine !== undefined
+        ? Number(sum.washReadyOnLine)
+        : (tableItems || []).reduce(
+            (s, r) => (Number(r.lineWipQty || 0) > 0 ? s + Number(r.cumulativeWashReadyQty ?? r.washReadyQty ?? 0) : s),
+            0
+          );
+    const totalWashReady = (tableItems || []).reduce((s, r) => s + Number(r.washReadyQty ?? 0), 0);
+
+    const card2Label = isActiveMode ? '2. IN SEWING LINE (WIP)' : '2. TOTAL LINE INTAKE';
+    const card2Val = isActiveMode
+      ? Number(sum.inSewingWip || sum.currentWip || 0)
+      : Number(sum.totalLineIntake || 0);
+
+    const card3Label = isActiveMode ? '3. SEWN / WASH READY (ON LINE)' : '3. SEWN OUTPUT / WASH READY';
+    const card3Val = isActiveMode
+      ? totalWashReadyOnLine
+      : normStage === 'SEWING_WASH_READY'
+      ? totalWashReady
+      : Number(sum.totalSewnOutput || 0);
+
     cards.push(
       { label: '1. TOTAL CUT QTY (YARD)', value: `${formatAmountNum(sum.totalCutQtyYards || sum.totalCutPieces || sum.totalMaterialsCut || 0)} Yards` },
-      { label: '2. IN SEWING LINE (WIP)', value: `${formatAmountNum(sum.inSewingWip || sum.currentWip || 0)} Pcs` },
-      { label: '3. TOTAL SEWN OUTPUT', value: `${formatAmountNum(sum.totalSewnOutput || 0)} Pcs` },
+      { label: card2Label, value: `${formatAmountNum(card2Val)} Pcs` },
+      { label: card3Label, value: `${formatAmountNum(card3Val)} Pcs` },
       { label: '4. IN WASH / WASHED', value: `${formatAmountNum(sum.inWashTotal || 0)} Pcs` },
       { label: '5. IRONED & PACKED', value: `${formatAmountNum(sum.ironedAndPacked || sum.completedQuantity || 0)} Pcs` },
       { label: '6. FINISHED / SYNCED', value: `${formatAmountNum(sum.fullyFinishedSynced || sum.syncedToInventory || 0)} Pcs` }
@@ -412,10 +465,10 @@ export class ReportPdfService {
     const metaX = rightMargin - metaWidth;
 
     doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000');
-    doc.text(reportTitle, 260, headerTop - 1, { width: rightMargin - 260, align: 'right' });
+    doc.text(reportTitle, 255, headerTop - 1, { width: rightMargin - 255, align: 'right' });
     const titleBottomY = doc.y;
 
-    let metaY = headerTop + 20;
+    let metaY = Math.max(headerTop + 20, titleBottomY + 4);
 
     const metaRows = [
       { label: 'PERIOD:', value: dateLabel, isBold: true },
@@ -722,8 +775,28 @@ export class ReportPdfService {
 
     const activeStage = stageFilter || reportData?.stageFilter;
     let reportTitle = MODULE_TITLES[module] || 'EXECUTIVE BUSINESS REPORT';
-    if (module === 'production' && activeStage && activeStage.toUpperCase() !== 'ALL STAGES' && activeStage.toUpperCase() !== 'ALL') {
-      reportTitle = `GARMENT PRODUCTION - [${activeStage.toUpperCase()}]`;
+    if (module === 'production') {
+      const normStage = String(activeStage || 'ALL STAGES').toUpperCase();
+      const shortStageMap: Record<string, string> = {
+        'ALL': '',
+        'ALL STAGES': '',
+        'CUTTING': 'CUTTING',
+        'SEWING LINE': 'SEWING',
+        'SEWING': 'SEWING',
+        'LINE': 'SEWING',
+        'SEWING_SEWN': 'SEWN',
+        'SEWING_WASH_READY': 'WASH READY',
+        'WASHING': 'WASHING',
+        'WASH': 'WASHING',
+        'FINISHING / PACKING': 'FINISHING',
+        'FINISHING': 'FINISHING',
+        'PACKING': 'FINISHING',
+        'IN STOCK / COMPLETED': 'COMPLETED',
+        'COMPLETED': 'COMPLETED',
+        'IN STOCK': 'COMPLETED',
+      };
+      const shortTag = shortStageMap[normStage] ?? normStage;
+      reportTitle = shortTag ? `PRODUCTION AUDIT [${shortTag}]` : 'PRODUCTION AUDIT [ALL]';
     }
     let dateLabel = reportData.dateFilter?.presetLabel || 'All Recorded History';
     if (module === 'expenses' && (reportData.filterCategoryName || reportData.filterSubCategoryName)) {
@@ -744,7 +817,7 @@ export class ReportPdfService {
     let curY = renderHeader();
 
     // ── KPI Summary Cards ──
-    const kpiCards = getModuleKpiCards(module, reportData.summary);
+    const kpiCards = getModuleKpiCards(module, reportData.summary, activeStage, reportData.tableItems, reportData?.viewMode || 'all');
     curY = this.drawKpiCards(doc, kpiCards, curY);
 
     // ── Data Table ──

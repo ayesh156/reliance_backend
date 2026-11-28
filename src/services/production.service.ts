@@ -1851,6 +1851,42 @@ export class ProductionService {
             },
           },
         });
+      } else if (act === 'wash_ready') {
+        // Batches that have sewn pieces ready to be forwarded to Wash Plant (sewnQty > sentToWashQty)
+        andConditions.push({
+          sewnQty: { gt: 0 },
+          ...(dateFilterClause
+            ? {
+                activityLogs: {
+                  some: {
+                    timestamp: dateFilterClause,
+                    OR: [
+                      { stage: 'LINE' },
+                      { action: { in: ['SEND_TO_LINE', 'LINE_INTAKE', 'LOG_SEWN', 'SEWN', 'SEND_TO_WASH'] } },
+                    ],
+                  },
+                },
+              }
+            : {}),
+        });
+      } else if (act === 'remaining' || act === 'pending') {
+        // Batches with pending sewing work (lineSentQty > 0)
+        andConditions.push({
+          lineSentQty: { gt: 0 },
+          ...(dateFilterClause
+            ? {
+                activityLogs: {
+                  some: {
+                    timestamp: dateFilterClause,
+                    OR: [
+                      { stage: 'LINE' },
+                      { action: { in: ['SEND_TO_LINE', 'LINE_INTAKE', 'LOG_SEWN', 'SEWN', 'SEND_TO_WASH'] } },
+                    ],
+                  },
+                },
+              }
+            : {}),
+        });
       } else if (act === 'intake') {
         andConditions.push({
           OR: [

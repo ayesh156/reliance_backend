@@ -57,6 +57,44 @@ export async function getReportData(req: Request, res: Response): Promise<void> 
 }
 
 /**
+ * Builds a descriptive, conflict-free production PDF filename reflecting
+ * the active stage filter, viewMode, and date range.
+ */
+function buildBackendProductionFilename(
+  stageFilter?: string,
+  viewMode?: string,
+  startDate?: Date,
+  endDate?: Date
+): string {
+  const normStage = String(stageFilter || 'ALL STAGES').toUpperCase();
+  const stageSlugMap: Record<string, string> = {
+    'ALL': 'full-report',
+    'ALL STAGES': 'full-report',
+    'CUTTING': 'cutting',
+    'SEWING LINE': 'sewing-line',
+    'SEWING': 'sewing-line',
+    'LINE': 'sewing-line',
+    'SEWING_SEWN': 'sewn-output',
+    'SEWING_WASH_READY': 'wash-ready',
+    'WASHING': 'washing',
+    'WASH': 'washing',
+    'FINISHING / PACKING': 'finishing-packing',
+    'FINISHING': 'finishing-packing',
+    'PACKING': 'finishing-packing',
+    'IN STOCK / COMPLETED': 'completed-stock',
+    'COMPLETED': 'completed-stock',
+    'IN STOCK': 'completed-stock',
+  };
+  const stageSlug = stageSlugMap[normStage] || normStage.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const normView = String(viewMode || 'all').toLowerCase() === 'active' ? 'current' : 'all';
+  const isUnfilteredAll = stageSlug === 'full-report' && normView === 'all';
+  const viewPart = isUnfilteredAll ? '' : `-${normView}`;
+  const startYmd = startDate ? startDate.toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+  const endYmd = endDate ? endDate.toISOString().split('T')[0] : startYmd;
+  return `reliance-production-${stageSlug}${viewPart}-${startYmd}-to-${endYmd}.pdf`;
+}
+
+/**
  * Controller handling streamed PDF report export
  */
 export async function downloadReportPdf(req: Request, res: Response): Promise<void> {
@@ -91,7 +129,10 @@ export async function downloadReportPdf(req: Request, res: Response): Promise<vo
   const pdfDoc = ReportPdfService.generate(moduleParam, report, req.user, queryStage);
 
   const dateTag = dateFilter.startDate.toISOString().split('T')[0];
-  const filename = `reliance-${moduleParam}-report-${dateTag}.pdf`;
+  const filename =
+    moduleParam === 'production'
+      ? buildBackendProductionFilename(queryStage, queryViewMode, dateFilter.startDate, dateFilter.endDate)
+      : `reliance-${moduleParam}-report-${dateTag}.pdf`;
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
